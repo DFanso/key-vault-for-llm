@@ -1,0 +1,194 @@
+//! Random bytes, Argon2id key derivation and XChaCha20-Poly1305 sealing.
+
+use std::fmt;
+
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::error::VaultError;
+
+pub const KEY_LEN: usize = 32;
+pub const NONCE_LEN: usize = 24;
+pub const SALT_LEN: usize = 16;
+
+/// Upper bound on Argon2 memory read from a vault header (1 GiB), so a
+/// tampered header cannot make unlock allocate unbounded memory.
+const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
+
+/// A 256-bit symmetric key. Zeroed on drop and never printed.
+pub struct SymmetricKey(Zeroizing<[u8; KEY_LEN]>);
+
+impl SymmetricKey {
+    pub fn generate() -> Self {
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        fill_random(key.as_mut_slice());
+        Self(key)
+    }
+
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, VaultError> {
+        let array: [u8; KEY_LEN] = bytes.try_into().map_err(|_| VaultError::Corrupted)?;
+        Ok(Self(Zeroizing::new(array)))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SymmetricKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SymmetricKey([REDACTED])")
+    }
+}
+
+/// Argon2id cost parameters, stored in the vault header next to each salt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KdfParams {
+    pub m_kib: u32,
+    pub t: u32,
+    pub p: u32,
+}
+
+impl KdfParams {
+    /// 64 MiB, 3 passes, 1 lane.
+    pub const RECOMMENDED: Self = Self {
+        m_kib: 64 * 1024,
+        t: 3,
+        p: 1,
+    };
+}
+
+pub fn fill_random(buf: &mut [u8]) {
+    getrandom::fill(buf).expect("the OS random number generator is unavailable");
+}
+
+pub fn random_nonce() -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    fill_random(&mut nonce);
+    nonce
+}
+
+pub fn random_salt() -> [u8; SALT_LEN] {
+    let mut salt = [0u8; SALT_LEN];
+    fill_random(&mut salt);
+    salt
+}
+
+pub fn derive_key(
+    passphrase: &[u8],
+    salt: &[u8],
+    params: KdfParams,
+) -> Result<SymmetricKey, VaultError> {
+    if params.m_kib > MAX_KDF_MEMORY_KIB {
+        return Err(VaultError::Corrupted);
+    }
+    let argon_params = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN))
+        .map_err(|_| VaultError::Corrupted)?;
+    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params)
+        .hash_password_into(passphrase, salt, out.as_mut_slice())
+        .map_err(|_| VaultError::Corrupted)?;
+    Ok(SymmetricKey(out))
+}
+
+pub fn seal(key: &SymmetricKey, nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    cipher(key)
+        .encrypt(
+            &XNonce::from(*nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .expect("XChaCha20-Poly1305 encryption of an in-memory buffer cannot fail")
+}
+
+/// Returns `None` when the key is wrong or the ciphertext, nonce or AAD were
+/// modified.
+pub fn open(
+    key: &SymmetricKey,
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Option<Zeroizing<Vec<u8>>> {
+    let nonce: [u8; NONCE_LEN] = nonce.try_into().ok()?;
+    cipher(key)
+        .decrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .ok()
+        .map(Zeroizing::new)
+}
+
+fn cipher(key: &SymmetricKey) -> XChaCha20Poly1305 {
+    XChaCha20Poly1305::new_from_slice(key.as_bytes()).expect("key is 32 bytes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FAST: KdfParams = KdfParams {
+        m_kib: 8,
+        t: 1,
+        p: 1,
+    };
+
+    #[test]
+    fn seal_then_open_round_trips() {
+        let key = SymmetricKey::generate();
+        let nonce = random_nonce();
+        let ct = seal(&key, &nonce, b"aad", b"hello");
+        assert_eq!(
+            open(&key, &nonce, b"aad", &ct).unwrap().as_slice(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn open_fails_with_wrong_key_aad_or_modified_ciphertext() {
+        let key = SymmetricKey::generate();
+        let nonce = random_nonce();
+        let mut ct = seal(&key, &nonce, b"aad", b"hello");
+        assert!(open(&SymmetricKey::generate(), &nonce, b"aad", &ct).is_none());
+        assert!(open(&key, &nonce, b"other", &ct).is_none());
+        assert!(open(&key, &nonce[..10], b"aad", &ct).is_none());
+        ct[0] ^= 1;
+        assert!(open(&key, &nonce, b"aad", &ct).is_none());
+    }
+
+    #[test]
+    fn derive_key_is_deterministic_per_salt() {
+        let a = derive_key(b"passphrase", b"salt-salt-salt-1", FAST).unwrap();
+        let b = derive_key(b"passphrase", b"salt-salt-salt-1", FAST).unwrap();
+        let c = derive_key(b"passphrase", b"salt-salt-salt-2", FAST).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes());
+        assert_ne!(a.as_bytes(), c.as_bytes());
+    }
+
+    #[test]
+    fn derive_key_rejects_oversized_memory_cost() {
+        let huge = KdfParams {
+            m_kib: MAX_KDF_MEMORY_KIB + 1,
+            t: 1,
+            p: 1,
+        };
+        assert!(matches!(
+            derive_key(b"passphrase", b"salt-salt-salt-1", huge),
+            Err(VaultError::Corrupted)
+        ));
+    }
+
+    #[test]
+    fn debug_output_hides_key_bytes() {
+        let key = SymmetricKey::from_slice(&[7u8; KEY_LEN]).unwrap();
+        assert_eq!(format!("{key:?}"), "SymmetricKey([REDACTED])");
+    }
+}
