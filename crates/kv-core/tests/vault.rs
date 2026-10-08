@@ -298,3 +298,25 @@ fn failed_passphrase_change_leaves_the_old_passphrase_in_effect() {
         Err(VaultError::WrongPassphrase)
     ));
 }
+
+#[test]
+fn bak_does_not_open_with_the_old_passphrase_after_a_change() {
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    vault
+        .upsert(redis("cache", "redis://:s3cretpass@cache:6379"))
+        .unwrap();
+    vault.save().unwrap();
+    vault
+        .change_passphrase("a brand new passphrase", FAST)
+        .unwrap();
+
+    let bak = path.with_file_name("vault.kv.bak");
+    assert!(matches!(
+        Vault::unlock(&bak, PASS),
+        Err(VaultError::WrongPassphrase)
+    ));
+    let from_bak = Vault::unlock(&bak, "a brand new passphrase").unwrap();
+    assert_eq!(from_bak.secrets(), vault.secrets());
+    assert!(!path.with_file_name("vault.kv.bak.tmp").exists());
+}
