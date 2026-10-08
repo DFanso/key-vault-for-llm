@@ -4,7 +4,7 @@
 use std::fs::{File, TryLockError};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlErrorCode, ControlRequest, ControlResponse,
@@ -75,7 +75,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
                 Err(e) => accept_failed("control", e).await,
             },
             _ = ticker.tick() => {
-                if lock(&daemon).tick(Instant::now()) == After::Stop {
+                if lock(&daemon).tick(Instant::now(), SystemTime::now()) == After::Stop {
                     break;
                 }
             }

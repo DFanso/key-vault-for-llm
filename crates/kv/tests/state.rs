@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use kv::audit::Audit;
 use kv::daemon::{After, Daemon, Settings};
@@ -394,7 +394,8 @@ fn idle_vault_locks_and_status_polls_do_not_keep_it_open() {
         other => panic!("{other:?}"),
     }
     assert_eq!(
-        f.daemon.tick(f.t0 + Duration::from_secs(11)),
+        f.daemon
+            .tick(f.t0 + Duration::from_secs(11), SystemTime::now()),
         After::Continue
     );
     assert!(!f.daemon.is_unlocked());
@@ -407,16 +408,22 @@ fn locked_daemon_exits_after_a_quiet_period() {
         locked_exit: Duration::from_secs(60),
     });
     assert_eq!(
-        f.daemon.tick(f.t0 + Duration::from_secs(59)),
+        f.daemon
+            .tick(f.t0 + Duration::from_secs(59), SystemTime::now()),
         After::Continue
     );
     f.daemon
         .handle_agent(AgentRequest::Status, f.t0 + Duration::from_secs(59));
     assert_eq!(
-        f.daemon.tick(f.t0 + Duration::from_secs(100)),
+        f.daemon
+            .tick(f.t0 + Duration::from_secs(100), SystemTime::now()),
         After::Continue
     );
-    assert_eq!(f.daemon.tick(f.t0 + Duration::from_secs(120)), After::Stop);
+    assert_eq!(
+        f.daemon
+            .tick(f.t0 + Duration::from_secs(120), SystemTime::now()),
+        After::Stop
+    );
 }
 
 #[test]
@@ -439,4 +446,30 @@ fn audit_log_records_actions_without_secret_values() {
     assert!(log.contains(r#""action":"list_handles""#), "{log}");
     assert!(!log.contains(TOKEN), "{log}");
     assert!(!log.contains(PASS), "{log}");
+}
+
+#[test]
+fn time_asleep_counts_toward_the_idle_lock() {
+    let mut f = Fixture::with_settings(Settings {
+        idle_lock: Duration::from_secs(8 * 3600),
+        locked_exit: Duration::from_secs(600),
+    });
+    f.init();
+    // One awake minute later, but the wall clock says the lid was shut all night.
+    let awake = f.t0 + Duration::from_secs(60);
+    let wall = SystemTime::now() + Duration::from_secs(16 * 3600);
+    f.daemon.tick(awake, wall);
+    assert!(!f.daemon.is_unlocked());
+}
+
+#[test]
+fn a_wall_clock_set_backwards_does_not_keep_the_vault_open() {
+    let mut f = Fixture::with_settings(Settings {
+        idle_lock: Duration::from_secs(10),
+        locked_exit: Duration::from_secs(600),
+    });
+    f.init();
+    let wall = SystemTime::now() - Duration::from_secs(3600);
+    f.daemon.tick(f.t0 + Duration::from_secs(11), wall);
+    assert!(!f.daemon.is_unlocked());
 }

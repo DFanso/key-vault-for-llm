@@ -2,7 +2,7 @@
 //! can be tested directly.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::VaultError;
 use kv_core::crypto::KdfParams;
@@ -55,6 +55,9 @@ pub struct Daemon {
     settings: Settings,
     /// Last use of the unlocked vault. Drives the idle lock.
     last_used: Instant,
+    /// The same moment on the wall clock. `Instant` stops while the machine
+    /// sleeps, so the idle lock also checks this.
+    last_used_wall: SystemTime,
     /// Last request of any kind. Drives the exit while locked.
     last_request: Instant,
 }
@@ -84,6 +87,7 @@ impl Daemon {
             audit,
             settings,
             last_used: now,
+            last_used_wall: SystemTime::now(),
             last_request: now,
         }
     }
@@ -102,6 +106,7 @@ impl Daemon {
                 let response = match &self.vault {
                     Some(vault) => {
                         self.last_used = now;
+                        self.last_used_wall = SystemTime::now();
                         AgentResponse::Handles {
                             handles: vault.secrets().iter().map(Secret::info).collect(),
                         }
@@ -160,9 +165,10 @@ impl Daemon {
         (response, after)
     }
 
-    /// Runs the idle lock and decides whether the daemon should exit.
-    pub fn tick(&mut self, now: Instant) -> After {
-        if self.vault.is_some() && now.duration_since(self.last_used) >= self.settings.idle_lock {
+    /// Runs the idle lock and decides whether the daemon should exit. `wall`
+    /// is the current wall-clock time, so time spent asleep counts as idle.
+    pub fn tick(&mut self, now: Instant, wall: SystemTime) -> After {
+        if self.vault.is_some() && self.idle_for(now, wall) >= self.settings.idle_lock {
             self.vault = None;
             self.audit.record("daemon", "idle_lock", None, "locked");
         }
@@ -174,6 +180,19 @@ impl Daemon {
         After::Continue
     }
 
+    fn touch(&mut self, now: Instant) {
+        self.last_used = now;
+        self.last_used_wall = SystemTime::now();
+    }
+
+    /// The longer of the awake time and the wall-clock time since last use.
+    /// A wall clock set backwards counts as zero, leaving the awake time.
+    fn idle_for(&self, now: Instant, wall: SystemTime) -> Duration {
+        let awake = now.duration_since(self.last_used);
+        let elapsed = wall.duration_since(self.last_used_wall).unwrap_or_default();
+        awake.max(elapsed)
+    }
+
     fn status(&self, now: Instant) -> Status {
         Status {
             vault_exists: self.vault.is_some() || self.vault_path.exists(),
@@ -182,7 +201,7 @@ impl Daemon {
             locks_in_secs: self.vault.as_ref().map(|_| {
                 self.settings
                     .idle_lock
-                    .saturating_sub(now.duration_since(self.last_used))
+                    .saturating_sub(self.idle_for(now, SystemTime::now()))
                     .as_secs()
             }),
         }
@@ -222,7 +241,7 @@ impl Daemon {
         match Vault::create(&self.vault_path, passphrase.expose(), kdf) {
             Ok(vault) => {
                 self.vault = Some(vault);
-                self.last_used = now;
+                self.touch(now);
                 Ok(Vec::new())
             }
             Err(VaultError::AlreadyExists(_)) => Err(fail(
@@ -269,7 +288,7 @@ impl Daemon {
         match result {
             Ok(()) => {
                 self.throttle.record_success();
-                self.last_used = now;
+                self.touch(now);
                 Ok(self
                     .vault
                     .as_mut()
