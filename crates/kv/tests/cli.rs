@@ -310,7 +310,9 @@ fn garbage_on_a_socket_does_not_take_the_daemon_down() {
         for endpoint in [kv.paths().agent_endpoint(), kv.paths().control_endpoint()] {
             let mut stream = ipc::connect(&endpoint).await.unwrap();
             stream.write_all(&[0xff, 0xff, 0xff, 0xff]).await.unwrap();
-            stream.write_all(b"not json at all").await.unwrap();
+            // The daemon may already have rejected the oversized length and
+            // closed the connection, so this write is allowed to fail.
+            let _ = stream.write_all(b"not json at all").await;
             let mut half = ipc::connect(&endpoint).await.unwrap();
             half.write_all(&[0, 0, 0, 50, b'{']).await.unwrap();
             drop(half);
