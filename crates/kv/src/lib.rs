@@ -2,5 +2,6 @@
 
 pub mod audit;
 pub mod frame;
+pub mod ipc;
 pub mod paths;
 pub mod throttle;
