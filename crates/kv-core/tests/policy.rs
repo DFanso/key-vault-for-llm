@@ -208,35 +208,127 @@ fn methods_are_checked_case_insensitively_when_listed() {
     );
 }
 
-#[test]
-fn exec_matches_program_name_across_platform_spellings() {
-    let s = env(Policy {
+fn cmds(entries: &[&str]) -> Secret {
+    env(Policy {
         mode: Mode::Auto,
-        allowed_cmds: vec!["terraform".into()],
+        allowed_cmds: entries.iter().map(|e| e.to_string()).collect(),
         ..Policy::default()
-    });
-    for ok in [
-        "terraform",
-        "./terraform",
-        "/usr/local/bin/terraform",
-        r"C:\tools\Terraform.EXE",
-        "terraform.exe",
-    ] {
-        assert_eq!(exec(&s, ok), Decision::Allow, "{ok}");
-    }
+    })
+}
+
+fn denied(s: &Secret, program: &str) -> bool {
+    matches!(
+        exec(s, program),
+        Decision::Deny(DenyReason::CommandNotAllowed { .. })
+    )
+}
+
+#[test]
+fn bare_cmd_entries_match_only_bare_program_names() {
+    let s = cmds(&["terraform"]);
+    assert_eq!(exec(&s, "terraform"), Decision::Allow);
     for bad in [
+        "./terraform",
+        "/tmp/agent-written/terraform",
+        "/usr/local/bin/terraform",
+        r"C:\tools\terraform.exe",
         "terraform-evil",
         "terraformx",
         "sh",
-        "/bin/terraform/../sh",
         "",
+    ] {
+        assert!(denied(&s, bad), "{bad}");
+    }
+}
+
+#[test]
+fn path_cmd_entries_match_only_that_exact_path() {
+    let path = if cfg!(windows) {
+        r"C:\tools\psql.exe"
+    } else {
+        "/usr/local/bin/psql"
+    };
+    let s = cmds(&[path]);
+    assert_eq!(exec(&s, path), Decision::Allow);
+    for bad in ["psql", "./psql", "/tmp/x/psql", r"C:\other\psql.exe"] {
+        assert!(denied(&s, bad), "{bad}");
+    }
+}
+
+#[test]
+fn cmd_case_and_exe_suffix_are_ignored_only_on_windows() {
+    let s = cmds(&["terraform"]);
+    for spelling in ["TERRAFORM", "terraform.exe", "Terraform.EXE"] {
+        if cfg!(windows) {
+            assert_eq!(exec(&s, spelling), Decision::Allow, "{spelling}");
+        } else {
+            assert!(denied(&s, spelling), "{spelling}");
+        }
+    }
+}
+
+#[test]
+fn empty_cmd_entries_never_match() {
+    let s = cmds(&["", "  "]);
+    for program in ["", "  ", "/"] {
+        assert!(denied(&s, program), "{program:?}");
+    }
+}
+
+#[test]
+fn ports_must_match_the_allowed_entry() {
+    let s = http(Policy {
+        allow_plain_http: true,
+        allowed_hosts: vec![
+            "api.openrouter.ai".into(),
+            "localhost:4000".into(),
+            "[::1]:8080".into(),
+            "::1".into(),
+        ],
+        ..hosts(Mode::Auto)
+    });
+    for ok in [
+        "https://api.openrouter.ai/v1",
+        "https://api.openrouter.ai:443/v1",
+        "http://localhost:4000/v1",
+        "http://[::1]:8080/",
+        "http://[::1]/",
+    ] {
+        assert_eq!(get(&s, ok), Decision::Allow, "{ok}");
+    }
+    for bad in [
+        "https://api.openrouter.ai:8080/",
+        "http://localhost:9999/steal",
+        "http://localhost/",
+        "http://[::1]:9999/",
     ] {
         assert!(
             matches!(
-                exec(&s, bad),
-                Decision::Deny(DenyReason::CommandNotAllowed { .. })
+                get(&s, bad),
+                Decision::Deny(DenyReason::HostNotAllowed { .. })
             ),
             "{bad}"
+        );
+    }
+}
+
+#[test]
+fn malformed_host_entries_never_match() {
+    let s = http(Policy {
+        allowed_hosts: vec![
+            "".into(),
+            "evil.com/path".into(),
+            "user@api.openrouter.ai".into(),
+        ],
+        ..hosts(Mode::Auto)
+    });
+    for url in ["https://evil.com/path", "https://api.openrouter.ai/"] {
+        assert!(
+            matches!(
+                get(&s, url),
+                Decision::Deny(DenyReason::HostNotAllowed { .. })
+            ),
+            "{url}"
         );
     }
 }

@@ -19,7 +19,8 @@ pub enum Mode {
 pub struct Policy {
     #[serde(default)]
     pub mode: Mode,
-    /// `http`: exact hostnames the token may be sent to. Empty denies all.
+    /// `http`: where the token may be sent, as `host` (default port only) or
+    /// `host:port`. Empty denies all.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
     #[serde(default)]
@@ -30,7 +31,8 @@ pub struct Policy {
     /// `postgres`/`redis`: enforced by the database layer, not here.
     #[serde(default)]
     pub read_only: bool,
-    /// `env`: program names allowed to receive the variables. Empty denies all.
+    /// `env`: programs allowed to receive the variables, as a bare name looked
+    /// up on PATH or an absolute path. Empty denies all.
     #[serde(default)]
     pub allowed_cmds: Vec<String>,
     #[serde(with = "humantime_serde", default = "default_grant_ttl")]
@@ -165,14 +167,17 @@ fn check_http(policy: &Policy, method: &str, raw_url: &str) -> Result<(), DenyRe
     let host = url
         .host_str()
         .ok_or_else(|| DenyReason::InvalidUrl("URL has no host".into()))?;
-    let host = normalize_host(host);
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| DenyReason::InvalidUrl("URL has no port".into()))?;
+    let target = (normalize_host(host), port);
     if !policy
         .allowed_hosts
         .iter()
-        .any(|h| normalize_host(h) == host)
+        .any(|entry| host_entry(url.scheme(), entry).as_ref() == Some(&target))
     {
         return Err(DenyReason::HostNotAllowed {
-            host,
+            host: format!("{}:{}", target.0, target.1),
             allowed: policy.allowed_hosts.clone(),
         });
     }
@@ -194,9 +199,37 @@ fn normalize_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// Parses an `allowed_hosts` entry (`host`, `host:port`, `[v6]:port` or a
+/// bare IPv6 address) into the host and port it permits for `scheme`. A
+/// bare host permits only the scheme's default port. Malformed entries
+/// permit nothing.
+fn host_entry(scheme: &str, entry: &str) -> Option<(String, u16)> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let authority = if entry.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{entry}]")
+    } else {
+        entry.to_owned()
+    };
+    let url = url::Url::parse(&format!("{scheme}://{authority}/")).ok()?;
+    if !url.username().is_empty() || url.password().is_some() || url.path() != "/" {
+        return None;
+    }
+    Some((
+        normalize_host(url.host_str()?),
+        url.port_or_known_default()?,
+    ))
+}
+
 fn check_exec(policy: &Policy, program: &str) -> Result<(), DenyReason> {
-    let name = program_name(program);
-    if policy.allowed_cmds.iter().any(|c| program_name(c) == name) {
+    let allowed = !program.trim().is_empty()
+        && policy
+            .allowed_cmds
+            .iter()
+            .any(|entry| cmd_matches(entry.trim(), program));
+    if allowed {
         Ok(())
     } else {
         Err(DenyReason::CommandNotAllowed {
@@ -206,10 +239,33 @@ fn check_exec(policy: &Policy, program: &str) -> Result<(), DenyReason> {
     }
 }
 
-/// `C:\tools\Terraform.EXE`, `./terraform` and `terraform` all become
-/// `terraform`. Matching is case-insensitive on every platform.
-fn program_name(program: &str) -> String {
-    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
-    let lower = base.to_ascii_lowercase();
-    lower.strip_suffix(".exe").unwrap_or(&lower).to_owned()
+/// A bare entry (`terraform`) matches only a bare argv[0], which the runner
+/// resolves through PATH; `./terraform` or `/tmp/x/terraform` do not match
+/// it. A path entry matches only that exact path. On Windows, matching
+/// ignores case and a trailing `.exe`.
+fn cmd_matches(entry: &str, program: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    let entry_is_path = has_separator(entry);
+    if has_separator(program) {
+        entry_is_path
+            && std::path::Path::new(entry).is_absolute()
+            && canonical_cmd(entry) == canonical_cmd(program)
+    } else {
+        !entry_is_path && canonical_cmd(entry) == canonical_cmd(program)
+    }
+}
+
+fn has_separator(s: &str) -> bool {
+    s.contains('/') || (cfg!(windows) && s.contains('\\'))
+}
+
+fn canonical_cmd(s: &str) -> String {
+    if cfg!(windows) {
+        let lower = s.to_ascii_lowercase();
+        lower.strip_suffix(".exe").unwrap_or(&lower).to_owned()
+    } else {
+        s.to_owned()
+    }
 }
