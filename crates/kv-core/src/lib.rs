@@ -5,5 +5,6 @@ pub mod crypto;
 pub mod error;
 pub mod policy;
 pub mod secret;
+pub mod vault;
 
 pub use error::VaultError;
