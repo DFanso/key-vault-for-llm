@@ -440,3 +440,24 @@ fn an_overlong_socket_path_fails_cleanly() {
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert!(stderr.starts_with("kv: "), "{stderr}");
 }
+
+#[cfg(unix)]
+#[test]
+fn lock_fails_loudly_when_the_daemon_cannot_be_reached() {
+    let base = TempDir::new().unwrap();
+    let home: PathBuf = base.path().join("a".repeat(120));
+    std::fs::create_dir_all(&home).unwrap();
+    for args in [["lock"], ["stop"]] {
+        let output = run_kv(
+            {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_kv"));
+                command.args(args).env("KV_HOME", &home);
+                command
+            },
+            "",
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} reported success");
+        assert!(stderr.starts_with("kv: "), "{stderr}");
+    }
+}

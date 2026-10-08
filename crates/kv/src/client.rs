@@ -30,8 +30,6 @@ pub async fn agent(paths: &Paths, request: &AgentRequest) -> io::Result<AgentRes
     exchange(&mut stream, request).await
 }
 
-/// `autostart` is false for `lock` and `stop`, which have nothing to do when
-/// no daemon is running.
 pub async fn control(
     paths: &Paths,
     request: &ControlRequest,
@@ -39,6 +37,27 @@ pub async fn control(
 ) -> io::Result<ControlResponse> {
     let mut stream = connect(&paths.control_endpoint(), autostart).await?;
     exchange(&mut stream, request).await
+}
+
+/// For `lock` and `stop`: `Ok(None)` when no daemon is running, which is
+/// the only connect failure that means there is nothing to do.
+pub async fn control_if_running(
+    paths: &Paths,
+    request: &ControlRequest,
+) -> io::Result<Option<ControlResponse>> {
+    let mut stream = match ipc::connect(&paths.control_endpoint()).await {
+        Ok(stream) => stream,
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    exchange(&mut stream, request).await.map(Some)
 }
 
 async fn exchange<Req: Serialize, Resp: DeserializeOwned>(

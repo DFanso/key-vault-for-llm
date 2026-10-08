@@ -375,10 +375,9 @@ async fn stop_or_lock(paths: &Paths, command: ControlCommand) -> Result<()> {
         passphrase: None,
         command,
     };
-    match client::control(paths, &request, false).await {
-        Ok(ControlResponse::Done { .. }) => Ok(()),
-        Ok(ControlResponse::Error { message, .. }) => Err(CliError(message)),
-        Err(_) => Ok(()),
+    match client::control_if_running(paths, &request).await? {
+        None | Some(ControlResponse::Done { .. }) => Ok(()),
+        Some(ControlResponse::Error { message, .. }) => Err(CliError(message)),
     }
 }
 
