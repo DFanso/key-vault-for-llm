@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use common::*;
 use kv::broker::exec::run;
 use kv_core::policy::Mode;
-use kv_core::proto::{AgentResponse, ExecCall, ExecReply, MAX_OUTPUT_LEN};
+use kv_core::proto::{AgentErrorCode, AgentResponse, ExecCall, ExecReply, MAX_OUTPUT_LEN};
 
 const SECRET: &str = "s3cr3t-value-0123456789";
 const MODE_VAR: &str = "KV_EXEC_HELPER";
@@ -54,6 +54,16 @@ fn helper() {
             let _ = child.wait();
         }
         "sleep" => std::thread::sleep(Duration::from_secs(30)),
+        "orphan" => {
+            // Leaves a child holding part of the secret on stdout, then exits.
+            #[expect(clippy::zombie_processes, reason = "the orphan is the point")]
+            let _orphan = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(helper_args())
+                .env(MODE_VAR, "slow-secret")
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+        }
         other => panic!("unknown helper mode {other}"),
     }
     out.flush().unwrap();
@@ -201,6 +211,30 @@ async fn a_missing_program_is_a_bad_request() {
     match run(job).await {
         AgentResponse::Error { message, .. } => {
             assert!(message.contains("not found"), "{message}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_child_left_running_after_exit_cannot_leak_part_of_a_secret() {
+    let (mut f, call) = fixture("orphan", &[]);
+    let started = Instant::now();
+    let reply = exec(&mut f, call).await;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!((reply.exit_code, reply.timed_out), (Some(0), false));
+    assert!(!reply.stdout.contains(&SECRET[..4]), "{}", reply.stdout);
+}
+
+#[tokio::test]
+async fn a_missing_cwd_is_a_bad_request() {
+    let (mut f, mut call) = fixture("print", &[]);
+    call.cwd = f.dir.path().join("missing");
+    let job = f.exec(call).expect("authorized");
+    match run(job).await {
+        AgentResponse::Error { code, message } => {
+            assert_eq!(code, AgentErrorCode::BadRequest);
+            assert!(message.contains("cwd"), "{message}");
         }
         other => panic!("{other:?}"),
     }

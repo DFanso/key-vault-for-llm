@@ -59,6 +59,10 @@ Secret values and passphrases are read from a hidden prompt, or one per line
 from stdin when stdin is not a terminal. They are never taken as command-line
 arguments, where they would end up in shell history.
 
+`--method` limits also refuse method-override headers such as
+`X-HTTP-Method-Override`, but kv cannot see a `_method` field inside a request
+body, so for a strictly read-only key prefer one the service itself limits.
+
 Every command that changes the vault asks for the passphrase, so an agent
 running commands as you cannot add, remove or loosen secrets. The vault locks
 itself after 8 hours without use. To change that, set `KV_IDLE_LOCK=2h` (any

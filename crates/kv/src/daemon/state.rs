@@ -44,6 +44,14 @@ const RESERVED_HEADERS: [&str; 13] = [
     "if-range",
 ];
 
+/// Headers many frameworks and gateways read as the real method, which would
+/// get around `allowed_methods`.
+const METHOD_OVERRIDES: [&str; 3] = [
+    "x-http-method-override",
+    "x-http-method",
+    "x-method-override",
+];
+
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
     m_kib: 8,
@@ -244,12 +252,11 @@ impl Daemon {
         if call.handles.is_empty() {
             return refuse(self, "invalid", bad("exec needs at least one env handle"));
         }
-        if !call.cwd.is_absolute() || !call.cwd.is_dir() {
-            return refuse(
-                self,
-                "invalid",
-                bad("cwd must be an existing absolute directory"),
-            );
+        // Only the form is checked here: touching the disk under the daemon
+        // lock could hang every request on a stalled network mount. The
+        // runner checks that the directory exists.
+        if !call.cwd.is_absolute() {
+            return refuse(self, "invalid", bad("cwd must be an absolute path"));
         }
         let timeout = call
             .timeout_secs
@@ -816,6 +823,11 @@ fn check_headers(secret: &Secret, headers: &BTreeMap<String, String>) -> Result<
         if auth_header.is_some_and(|auth| auth.eq_ignore_ascii_case(name)) {
             return Err(format!(
                 "the {name} header carries this handle's credential and is set by kv"
+            ));
+        }
+        if !secret.policy.allowed_methods.is_empty() && METHOD_OVERRIDES.contains(&lower.as_str()) {
+            return Err(format!(
+                "the {name} header can change the method, which this handle's policy restricts"
             ));
         }
         if value.contains(['\r', '\n', '\0']) {

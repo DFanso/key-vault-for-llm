@@ -122,6 +122,50 @@ fn headers_that_would_hide_or_split_a_secret_are_refused() {
 }
 
 #[test]
+fn method_override_headers_are_refused_when_methods_are_restricted() {
+    let mut f = Fixture::new();
+    let mut restricted = openrouter(Mode::Auto);
+    restricted.policy.allowed_methods = vec!["GET".into()];
+    f.add(restricted);
+    for name in [
+        "X-HTTP-Method-Override",
+        "x-http-method",
+        "X-Method-Override",
+    ] {
+        let mut call = get("openrouter", "https://openrouter.ai/");
+        call.headers.insert(name.into(), "DELETE".into());
+        let (code, message) = f.http(call).unwrap_err();
+        assert_eq!(code, AgentErrorCode::BadRequest, "{name}: {message}");
+        assert!(message.contains("method"), "{message}");
+    }
+
+    let mut f = Fixture::new();
+    f.add(openrouter(Mode::Auto));
+    let mut call = get("openrouter", "https://openrouter.ai/");
+    call.headers
+        .insert("X-HTTP-Method-Override".into(), "PATCH".into());
+    assert!(f.http(call).is_ok(), "no method rule, nothing to bypass");
+}
+
+#[test]
+fn authorizing_exec_never_touches_the_cwd_on_disk() {
+    // A path on a hung network mount would block the daemon while it holds
+    // its lock, so prepare only checks that cwd is absolute.
+    let mut f = Fixture::new();
+    f.add(env_secret(
+        "aws",
+        &[("AWS_SECRET_ACCESS_KEY", AWS_KEY)],
+        &["terraform"],
+        Mode::Auto,
+    ));
+    let missing = f.dir.path().join("missing");
+    let job = f
+        .exec(run(&["aws"], &["terraform"], missing.clone()))
+        .unwrap();
+    assert_eq!(job.cwd, missing);
+}
+
+#[test]
 fn a_base_url_handle_joins_the_path_and_scrubs_its_address() {
     let mut f = Fixture::new();
     f.add(dokploy());
@@ -227,10 +271,6 @@ fn exec_refuses_what_policy_and_input_rules_forbid() {
         (run(&["aws"], &[], cwd.clone()), AgentErrorCode::BadRequest),
         (
             run(&["aws"], &["terraform"], "relative".into()),
-            AgentErrorCode::BadRequest,
-        ),
-        (
-            run(&["aws"], &["terraform"], cwd.join("missing")),
             AgentErrorCode::BadRequest,
         ),
         (

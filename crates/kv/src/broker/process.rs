@@ -49,6 +49,19 @@ impl ProcessTree {
         }
     }
 
+    /// Whether any process in the tree is still running (or not yet reaped).
+    /// Call after the program itself has been waited for.
+    pub fn running(&self) -> bool {
+        #[cfg(unix)]
+        {
+            rustix::process::test_kill_process_group(self.group).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            windows::active(self.job)
+        }
+    }
+
     /// Kills every process in the tree. Safe to call more than once.
     pub fn kill(&self) {
         #[cfg(unix)]
@@ -76,8 +89,9 @@ mod windows {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
 
     use super::ProcessTree;
@@ -107,6 +121,23 @@ mod windows {
                 return Err(error);
             }
             Ok(ProcessTree { job })
+        }
+    }
+
+    /// True if the job still has processes, or if that cannot be read.
+    pub fn active(job: HANDLE) -> bool {
+        // SAFETY: `job` stays open until `close`; `info` is a plain struct
+        // of the size passed.
+        unsafe {
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+            let ok = QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            );
+            ok == 0 || info.ActiveProcesses > 0
         }
     }
 

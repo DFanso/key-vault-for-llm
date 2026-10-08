@@ -232,6 +232,9 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
     response with a `Content-Encoding` other than `identity` is an
     `upstream_error`: a compressed body or a byte range could carry a secret
     past the scrubber.
+  - When `allowed_methods` is set, method-override headers
+    (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`) are
+    refused. A framework's `_method` body field cannot be policed.
   - With a `base_url`, the agent sends a path (`/project.all`) instead of a
     URL. The daemon appends it to the base URL's path; the result must keep
     the base URL's origin and path prefix, so absolute URLs, `//host` and
@@ -249,7 +252,9 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
   `powershell` are not allowed unless listed in `allowed_cmds`. Env vars from
   all listed handles are injected; output streams through the scrubber; the
   process group is killed on timeout.
-  - `cwd` must be an absolute path to an existing directory. `kv mcp`
+  - `cwd` must be an absolute path to an existing directory. The daemon
+    checks only that it is absolute while authorizing; the runner checks it
+    exists, so a stalled network mount cannot block the daemon's lock. `kv mcp`
     fills in its own working directory (the agent's project) when the
     agent omits it.
   - The timeout defaults to 60 s and may be at most 600 s.

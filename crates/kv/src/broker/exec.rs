@@ -49,6 +49,16 @@ pub async fn run(job: ExecJob) -> AgentResponse {
 
 async fn execute(job: &ExecJob) -> Result<AgentResponse, AgentResponse> {
     let name = &job.argv[0];
+    let cwd = job.cwd.clone();
+    if !tokio::task::spawn_blocking(move || cwd.is_dir())
+        .await
+        .unwrap_or(false)
+    {
+        return Err(error(
+            AgentErrorCode::BadRequest,
+            "cwd must be an existing absolute directory",
+        ));
+    }
     let program = resolve(name, std::env::var_os("PATH").as_deref()).ok_or_else(|| {
         error(
             AgentErrorCode::BadRequest,
@@ -97,7 +107,11 @@ async fn execute(job: &ExecJob) -> Result<AgentResponse, AgentResponse> {
         }
     };
     // Anything the program left running would keep the pipes open and could
-    // still hold the secrets.
+    // still hold the secrets. Killing it cuts the output, so the held-back
+    // tail, which may be part of a secret, is dropped.
+    if tree.running() {
+        cut.store(true, Ordering::SeqCst);
+    }
     tree.kill();
     let (stdout, stdout_cut) = drain(stdout).await;
     let (stderr, stderr_cut) = drain(stderr).await;
