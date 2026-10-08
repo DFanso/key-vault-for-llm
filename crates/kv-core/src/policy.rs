@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::secret::{Secret, SecretKind};
+use crate::secret::{Secret, SecretKind, SecretValue};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -102,6 +102,11 @@ pub enum DenyReason {
     PlainHttp,
     #[error("host {host:?} is not in allowed_hosts {allowed:?}")]
     HostNotAllowed { host: String, allowed: Vec<String> },
+    /// Deliberately vague: the base URL is hidden from the agent.
+    #[error("this handle only reaches its own service; send a path such as /v1/items")]
+    OutsideBaseUrl,
+    #[error("invalid path: {0}")]
+    InvalidPath(&'static str),
     #[error("method {method} is not in allowed_methods {allowed:?}")]
     MethodNotAllowed {
         method: String,
@@ -136,7 +141,9 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
         });
     }
     let check = match op {
-        Operation::Http { method, url } => check_http(policy, method, url),
+        Operation::Http { method, url } => {
+            base_url(secret).and_then(|base| check_http(policy, base.as_ref(), method, url))
+        }
         Operation::Exec { program } => check_exec(policy, program),
         Operation::DbQuery | Operation::DbConnect => Ok(()),
     };
@@ -147,7 +154,81 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
     }
 }
 
-fn check_http(policy: &Policy, method: &str, raw_url: &str) -> Result<(), DenyReason> {
+/// The URL an `http_request` goes to. A handle with a `base_url` takes a
+/// path, which is appended to the base URL's path and may not climb out of
+/// it; any other http handle takes an absolute URL.
+pub fn http_target(secret: &Secret, requested: &str) -> Result<url::Url, DenyReason> {
+    let Some(base) = base_url(secret)? else {
+        if requested.starts_with('/') {
+            return Err(DenyReason::InvalidUrl(
+                "this handle takes a full URL such as https://host/path".into(),
+            ));
+        }
+        return url::Url::parse(requested).map_err(|e| DenyReason::InvalidUrl(e.to_string()));
+    };
+    check_path(requested)?;
+    let prefix = base.path().trim_end_matches('/');
+    let joined = format!("{}{prefix}{requested}", base.origin().ascii_serialization());
+    let url = url::Url::parse(&joined).map_err(|_| DenyReason::InvalidPath("not a valid path"))?;
+    let path = url.path();
+    let inside = path == prefix || path.starts_with(&format!("{prefix}/"));
+    if url.origin() != base.origin() || !inside {
+        return Err(DenyReason::OutsideBaseUrl);
+    }
+    Ok(url)
+}
+
+/// Rejects paths that could leave the base URL's path once a server decodes
+/// them: dot segments (also percent-encoded), encoded slashes and
+/// backslashes.
+fn check_path(path: &str) -> Result<(), DenyReason> {
+    if !path.starts_with('/') {
+        return Err(DenyReason::InvalidPath(
+            "send a path starting with /, such as /v1/items; this handle's address is fixed",
+        ));
+    }
+    if path.starts_with("//") {
+        return Err(DenyReason::InvalidPath("a path cannot start with //"));
+    }
+    if path.contains(['\\', '#']) {
+        return Err(DenyReason::InvalidPath(
+            "backslashes and fragments are not allowed",
+        ));
+    }
+    let path_only = path.split('?').next().unwrap_or_default();
+    let lower = path_only.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") {
+        return Err(DenyReason::InvalidPath("encoded slashes are not allowed"));
+    }
+    let dot_segment = path_only.split('/').any(|segment| {
+        let decoded = percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
+        decoded == "." || decoded == ".."
+    });
+    if dot_segment {
+        return Err(DenyReason::InvalidPath(". and .. segments are not allowed"));
+    }
+    Ok(())
+}
+
+/// The parsed `base_url` of an http secret, if it has one.
+fn base_url(secret: &Secret) -> Result<Option<url::Url>, DenyReason> {
+    match &secret.value {
+        SecretValue::Http {
+            base_url: Some(base),
+            ..
+        } => url::Url::parse(base)
+            .map(Some)
+            .map_err(|_| DenyReason::InvalidUrl("this handle's base URL is invalid".into())),
+        _ => Ok(None),
+    }
+}
+
+fn check_http(
+    policy: &Policy,
+    base: Option<&url::Url>,
+    method: &str,
+    raw_url: &str,
+) -> Result<(), DenyReason> {
     let url = url::Url::parse(raw_url).map_err(|e| DenyReason::InvalidUrl(e.to_string()))?;
     match url.scheme() {
         "https" => {}
@@ -171,15 +252,20 @@ fn check_http(policy: &Policy, method: &str, raw_url: &str) -> Result<(), DenyRe
         .port_or_known_default()
         .ok_or_else(|| DenyReason::InvalidUrl("URL has no port".into()))?;
     let target = (normalize_host(host), port);
-    if !policy
-        .allowed_hosts
-        .iter()
-        .any(|entry| host_entry(url.scheme(), entry).as_ref() == Some(&target))
-    {
-        return Err(DenyReason::HostNotAllowed {
-            host: format!("{}:{}", target.0, target.1),
-            allowed: policy.allowed_hosts.clone(),
-        });
+    match base {
+        Some(base) if url.origin() != base.origin() => return Err(DenyReason::OutsideBaseUrl),
+        Some(_) => {}
+        None if !policy
+            .allowed_hosts
+            .iter()
+            .any(|entry| host_entry(url.scheme(), entry).as_ref() == Some(&target)) =>
+        {
+            return Err(DenyReason::HostNotAllowed {
+                host: format!("{}:{}", target.0, target.1),
+                allowed: policy.allowed_hosts.clone(),
+            });
+        }
+        None => {}
     }
     if !policy.allowed_methods.is_empty()
         && !policy

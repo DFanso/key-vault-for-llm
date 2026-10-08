@@ -1,0 +1,76 @@
+//! Work an agent asked for, authorized by the daemon and run outside the
+//! daemon lock: HTTP requests and programs.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use kv_core::proto::HttpCall;
+use kv_core::scrub::Scrubber;
+use kv_core::secret::{Secret, SecretText};
+
+use kv_core::proto::MAX_OUTPUT_LEN;
+
+use crate::audit::Audit;
+
+pub mod exec;
+pub mod http;
+mod process;
+
+/// An `http_request` that passed every check.
+pub struct HttpJob {
+    pub secret: Secret,
+    /// Where the first request goes, already checked against the policy.
+    pub url: url::Url,
+    pub call: HttpCall,
+    pub scrubber: Arc<Scrubber>,
+    pub audit: Audit,
+    pub started: Instant,
+}
+
+/// An `exec` that passed every check.
+pub struct ExecJob {
+    pub handles: Vec<String>,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub timeout: Duration,
+    /// Variables from every handle, already checked for clashes.
+    pub env: Vec<(String, SecretText)>,
+    pub scrubber: Arc<Scrubber>,
+    pub audit: Audit,
+    pub started: Instant,
+}
+
+/// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
+/// markers can make scrubbed output longer than its input).
+pub(crate) fn capped_text(bytes: &[u8]) -> (String, bool) {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() <= MAX_OUTPUT_LEN {
+        return (text, false);
+    }
+    let mut end = MAX_OUTPUT_LEN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    (text, true)
+}
+
+/// Names only: the URL may hold a hidden base URL, and the job holds values.
+impl std::fmt::Debug for HttpJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpJob")
+            .field("handle", &self.secret.name)
+            .field("method", &self.call.method)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ExecJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecJob")
+            .field("handles", &self.handles)
+            .field("program", &self.argv.first())
+            .finish_non_exhaustive()
+    }
+}

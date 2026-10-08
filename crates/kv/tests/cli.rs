@@ -310,7 +310,9 @@ fn garbage_on_a_socket_does_not_take_the_daemon_down() {
         for endpoint in [kv.paths().agent_endpoint(), kv.paths().control_endpoint()] {
             let mut stream = ipc::connect(&endpoint).await.unwrap();
             stream.write_all(&[0xff, 0xff, 0xff, 0xff]).await.unwrap();
-            stream.write_all(b"not json at all").await.unwrap();
+            // The daemon may already have rejected the oversized length and
+            // closed the connection, so this write is allowed to fail.
+            let _ = stream.write_all(b"not json at all").await;
             let mut half = ipc::connect(&endpoint).await.unwrap();
             half.write_all(&[0, 0, 0, 50, b'{']).await.unwrap();
             drop(half);
@@ -509,4 +511,32 @@ fn output_pipes_close_when_a_command_that_started_the_daemon_exits() {
         .expect("stdout stayed open after kv exited, so the daemon inherited it");
     assert!(text.contains("no vault yet"), "{text}");
     child.wait().unwrap();
+}
+
+#[test]
+fn a_base_url_handle_lists_as_paths_only_without_its_address() {
+    let kv = Kv::initialized();
+    kv.ok(
+        &[
+            "add",
+            "dokploy",
+            "--kind",
+            "http",
+            "--base-url",
+            "--header",
+            "x-api-key",
+            "--template",
+            "{}",
+        ],
+        &format!("{PASS}\ndokploy-token-0123456789\n  https://dokploy.internal.example/api  \n"),
+    );
+    let list = kv.ok(&["list"], "");
+    assert!(list.contains("paths-only"), "{list}");
+    assert!(!list.contains("dokploy.internal"), "{list}");
+    let json = kv.ok(&["list", "--json"], "");
+    assert!(
+        json.contains(r#""takes_path": true"#) || json.contains(r#""takes_path":true"#),
+        "{json}"
+    );
+    assert!(!json.contains("dokploy.internal"), "{json}");
 }

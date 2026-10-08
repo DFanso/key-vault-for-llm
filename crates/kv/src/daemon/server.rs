@@ -12,8 +12,9 @@ use kv_core::proto::{
 use tokio::sync::watch;
 
 use super::harden;
-use super::state::{After, Daemon, Settings};
+use super::state::{After, Daemon, Prepared, Settings};
 use crate::audit::Audit;
+use crate::broker;
 use crate::frame::{read_frame, write_frame};
 use crate::ipc::{self, ServerStream};
 use crate::paths::Paths;
@@ -55,6 +56,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         settings,
         Instant::now(),
     )));
+    let http = broker::http::client().map_err(io::Error::other)?;
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let check_every = (settings.idle_lock.min(settings.locked_exit) / 4)
         .clamp(Duration::from_millis(100), Duration::from_secs(30));
@@ -64,7 +66,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         tokio::select! {
             accepted = agent.accept() => match accepted {
                 Ok(stream) => {
-                    tokio::spawn(serve_agent(stream, daemon.clone()));
+                    tokio::spawn(serve_agent(stream, daemon.clone(), http.clone()));
                 }
                 Err(e) => accept_failed("agent", e).await,
             },
@@ -89,7 +91,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     Ok(Outcome::Stopped)
 }
 
-async fn serve_agent(mut stream: ServerStream, daemon: Shared) {
+async fn serve_agent(mut stream: ServerStream, daemon: Shared, http: reqwest::Client) {
     loop {
         let request: AgentRequest = match read_frame(&mut stream).await {
             Ok(Some(request)) => request,
@@ -105,11 +107,15 @@ async fn serve_agent(mut stream: ServerStream, daemon: Shared) {
             Err(_) => return,
         };
         let daemon = daemon.clone();
-        let handled = tokio::task::spawn_blocking(move || {
-            lock(&daemon).handle_agent(request, Instant::now())
-        })
-        .await;
-        let Ok(response) = handled else { return };
+        let prepared =
+            tokio::task::spawn_blocking(move || lock(&daemon).prepare(request, Instant::now()))
+                .await;
+        let Ok(prepared) = prepared else { return };
+        let response = match prepared {
+            Prepared::Reply(response) => response,
+            Prepared::Http(job) => broker::http::send(&http, *job).await,
+            Prepared::Exec(job) => broker::exec::run(*job).await,
+        };
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }

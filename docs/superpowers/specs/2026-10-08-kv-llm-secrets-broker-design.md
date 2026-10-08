@@ -96,7 +96,8 @@ on Windows. Both sockets verify the peer runs as the same OS user
     for approvals and edits.
 - Malformed frames get a `bad_request` reply and the connection is closed;
   control-socket replies never echo request content, which may include the
-  passphrase. Frames are capped at 1 MiB.
+  passphrase. Frames are capped at 4 MiB, so a reply with 256 KiB of stdout
+  and 256 KiB of stderr still fits when every byte is JSON-escaped.
 
 ### Daemon lifecycle
 
@@ -203,6 +204,9 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 2. Policy check → `policy_denied` with the failing rule.
 3. `mode: ask` and no matching grant → enqueue approval, send OS notification,
    wait up to 60 s → `approval_denied` / `approval_timeout` on failure.
+   Until the TUI exists (Plan 4) there is no one to ask, so these requests
+   fail at once with `approval_timeout` and a message pointing at
+   `kv policy <handle> --mode auto`.
 4. Execute.
 5. Scrub output.
 6. Write audit record.
@@ -215,6 +219,22 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
   `reqwest` with rustls. Redirects are followed only to allowed hosts, and
   auth is stripped on any cross-host hop. The response is scrubbed, since
   some APIs echo the key in errors.
+  - System proxy settings are ignored, so neither the credential nor the
+    address passes through a proxy. Requests time out after 60 s.
+  - Redirects are followed by kv, at most 5. The credential goes only to the
+    original origin; a query-parameter credential is removed from the next
+    URL, and a `Location` that contains the token is not followed. 303, and
+    301/302 after a POST, become a GET without a body. A redirect to a
+    target the policy does not allow is returned to the agent as the 3xx
+    response instead of being followed.
+  - Transport errors are reported without the URL and then scrubbed.
+  - The agent may not set `Accept-Encoding`, `Range` or `If-Range`, and a
+    response with a `Content-Encoding` other than `identity` is an
+    `upstream_error`: a compressed body or a byte range could carry a secret
+    past the scrubber.
+  - When `allowed_methods` is set, method-override headers
+    (`X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override`) are
+    refused. A framework's `_method` body field cannot be policed.
   - With a `base_url`, the agent sends a path (`/project.all`) instead of a
     URL. The daemon appends it to the base URL's path; the result must keep
     the base URL's origin and path prefix, so absolute URLs, `//host` and
@@ -232,6 +252,22 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
   `powershell` are not allowed unless listed in `allowed_cmds`. Env vars from
   all listed handles are injected; output streams through the scrubber; the
   process group is killed on timeout.
+  - `cwd` must be an absolute path to an existing directory. The daemon
+    checks only that it is absolute while authorizing; the runner checks it
+    exists, so a stalled network mount cannot block the daemon's lock. `kv mcp`
+    fills in its own working directory (the agent's project) when the
+    agent omits it.
+  - The timeout defaults to 60 s and may be at most 600 s.
+  - Two handles setting the same variable is a `bad_request` (names compare
+    case-insensitively on Windows).
+  - A bare argv[0] is resolved through the PATH the daemon started with,
+    skipping relative entries, not through the agent's environment.
+  - The program runs in its own process group (Unix) or job object
+    (Windows). Whatever it leaves running is killed when it exits, as well
+    as on timeout.
+  - stdout and stderr are each capped at 256 KiB. When output is cut by the
+    cap or by a kill, the scrubber's held-back tail is dropped rather than
+    flushed, so a partial secret at the cut never escapes.
 
 ### Read-only enforcement
 
@@ -289,7 +325,8 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 
 - JSONL at `<data dir>/kv/audit.jsonl`: timestamp, MCP session id, client
   name, handle, tool, scrubbed argument summary, decision
-  (`auto|approved|denied|policy|locked`), outcome (HTTP status / exit code /
+  (`auto|approved|denied|policy|locked|invalid`; `invalid` covers malformed
+  requests and unknown handles), outcome (HTTP status / exit code /
   error code), duration.
 - Never contains secret values. Rotates at 10 MB, keeps 5 files. Viewable in
   the TUI.
@@ -301,7 +338,9 @@ Stable codes with actionable messages:
 
 | Code | Message |
 |---|---|
+| `no_vault` | Ask the user to create one with `kv init`. |
 | `vault_locked` | Ask the user to unlock with `kv tui`. |
+| `bad_request` | Names the field that is wrong. |
 | `policy_denied` | Names the failing rule and the allowed values. |
 | `approval_denied` | The user denied the request. |
 | `approval_timeout` | No decision within 60 s. |

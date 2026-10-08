@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use kv::audit::Audit;
-use kv::daemon::{After, Daemon, Settings};
+use kv::daemon::{After, Daemon, Prepared, Settings};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlErrorCode, ControlRequest,
@@ -76,7 +76,14 @@ impl Fixture {
     }
 
     fn agent(&mut self, request: AgentRequest) -> AgentResponse {
-        self.daemon.handle_agent(request, self.t0)
+        self.agent_at(self.t0, request)
+    }
+
+    fn agent_at(&mut self, now: Instant, request: AgentRequest) -> AgentResponse {
+        match self.daemon.prepare(request, now) {
+            Prepared::Reply(response) => response,
+            Prepared::Http(_) | Prepared::Exec(_) => panic!("expected a reply, got a job"),
+        }
     }
 
     fn handles(&mut self) -> Vec<String> {
@@ -102,6 +109,7 @@ fn http_secret(name: &str) -> Secret {
                 name: "Authorization".into(),
                 template: "Bearer {}".into(),
             },
+            base_url: None,
         },
         policy: Policy {
             allowed_hosts: vec!["openrouter.ai".into()],
@@ -258,6 +266,7 @@ fn add_rejects_unusable_values() {
             name: "Authorization".into(),
             template: "Bearer".into(),
         },
+        base_url: None,
     };
     let mut no_vars = http_secret("no-vars");
     no_vars.value = SecretValue::Env {
@@ -287,6 +296,7 @@ fn add_warns_about_short_values_and_empty_allow_lists() {
         placement: AuthPlacement::Query {
             param: "key".into(),
         },
+        base_url: None,
     };
     secret.policy = Policy::default();
     let response = f.control(
@@ -386,7 +396,7 @@ fn idle_vault_locks_and_status_polls_do_not_keep_it_open() {
     });
     f.init();
     let status_at = f.t0 + Duration::from_secs(9);
-    match f.daemon.handle_agent(AgentRequest::Status, status_at) {
+    match f.agent_at(status_at, AgentRequest::Status) {
         AgentResponse::Status { status } => {
             assert!(!status.locked);
             assert_eq!(status.locks_in_secs, Some(1));
@@ -412,8 +422,7 @@ fn locked_daemon_exits_after_a_quiet_period() {
             .tick(f.t0 + Duration::from_secs(59), SystemTime::now()),
         After::Continue
     );
-    f.daemon
-        .handle_agent(AgentRequest::Status, f.t0 + Duration::from_secs(59));
+    f.agent_at(f.t0 + Duration::from_secs(59), AgentRequest::Status);
     assert_eq!(
         f.daemon
             .tick(f.t0 + Duration::from_secs(100), SystemTime::now()),
@@ -472,4 +481,65 @@ fn a_wall_clock_set_backwards_does_not_keep_the_vault_open() {
     let wall = SystemTime::now() - Duration::from_secs(3600);
     f.daemon.tick(f.t0 + Duration::from_secs(11), wall);
     assert!(!f.daemon.is_unlocked());
+}
+
+fn base_url_secret(name: &str, base: &str) -> Secret {
+    let mut secret = http_secret(name);
+    secret.value = SecretValue::Http {
+        token: SecretText::new(TOKEN),
+        placement: AuthPlacement::Header {
+            name: "Authorization".into(),
+            template: "Bearer {}".into(),
+        },
+        base_url: Some(base.into()),
+    };
+    secret.policy = Policy::default();
+    secret
+}
+
+fn add_secret(f: &mut Fixture, secret: Secret) -> ControlResponse {
+    f.control(
+        Some(PASS),
+        ControlCommand::Add {
+            secret,
+            replace: false,
+        },
+    )
+}
+
+#[test]
+fn add_rejects_unusable_base_urls() {
+    let mut f = Fixture::initialized();
+    for base in [
+        "not a url",
+        "ftp://files.example.com",
+        "https://user:pw@dokploy.example.com",
+        "https://dokploy.example.com/api?x=1",
+        "https://dokploy.example.com/api#top",
+    ] {
+        let response = add_secret(&mut f, base_url_secret("dokploy", base));
+        assert_eq!(error_code(&response), ControlErrorCode::Invalid, "{base}");
+        if let ControlResponse::Error { message, .. } = &response {
+            assert!(!message.contains("dokploy.example.com"), "{message}");
+        }
+    }
+}
+
+#[test]
+fn a_base_url_handle_needs_no_allowed_hosts() {
+    let mut f = Fixture::initialized();
+    match add_secret(
+        &mut f,
+        base_url_secret("dokploy", "https://dokploy.example.com/api"),
+    ) {
+        ControlResponse::Done { warnings } => assert!(warnings.is_empty(), "{warnings:?}"),
+        other => panic!("{other:?}"),
+    }
+    match add_secret(&mut f, base_url_secret("lan", "http://10.0.0.5:3000/api")) {
+        ControlResponse::Done { warnings } => {
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("--allow-plain-http true"));
+        }
+        other => panic!("{other:?}"),
+    }
 }

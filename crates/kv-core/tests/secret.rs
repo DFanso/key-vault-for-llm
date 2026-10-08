@@ -16,6 +16,7 @@ fn http_secret() -> Secret {
                 name: "Authorization".into(),
                 template: "Bearer {}".into(),
             },
+            base_url: None,
         },
         policy: Policy {
             allowed_hosts: vec!["openrouter.ai".into()],
@@ -159,4 +160,29 @@ fn handle_names_are_validated() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn a_base_url_is_scrubbed_and_never_shown_to_agents() {
+    let mut secret = http_secret();
+    secret.value = SecretValue::Http {
+        token: SecretText::new("sk-or-v1-0123456789abcdef"),
+        placement: AuthPlacement::Header {
+            name: "Authorization".into(),
+            template: "Bearer {}".into(),
+        },
+        base_url: Some("https://dokploy.internal.example/api/".into()),
+    };
+    let values: Vec<String> = secret
+        .sensitive_values()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    assert!(values.contains(&"https://dokploy.internal.example/api".to_owned()));
+    assert!(values.contains(&"dokploy.internal.example".to_owned()));
+    let info = secret.info();
+    assert!(info.takes_path);
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(!json.contains("dokploy"), "{json}");
+    assert!(!http_secret().info().takes_path);
 }

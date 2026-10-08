@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, PolicyPatch,
-    Status,
+    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ExecCall,
+    ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, Status,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -31,6 +31,7 @@ fn secrets() -> Vec<Secret> {
                     name: "Authorization".into(),
                     template: "Bearer {}".into(),
                 },
+                base_url: None,
             },
         ),
         make(
@@ -148,4 +149,89 @@ fn policy_patch_json_accepts_missing_fields_and_humantime() {
     assert_eq!(patch.read_only, Some(true));
     assert_eq!(patch.grant_ttl, Some(Duration::from_secs(7200)));
     assert_eq!(patch.mode, None);
+}
+
+#[test]
+fn http_and_exec_requests_are_flat_tagged_objects() {
+    let http: AgentRequest = serde_json::from_str(
+        r#"{"type":"http_request","handle":"openrouter","method":"GET","url":"https://openrouter.ai/api/v1/models"}"#,
+    )
+    .unwrap();
+    match http {
+        AgentRequest::HttpRequest(call) => {
+            assert_eq!(call.handle, "openrouter");
+            assert!(call.headers.is_empty());
+            assert_eq!(call.body, None);
+        }
+        other => panic!("{other:?}"),
+    }
+    let exec: AgentRequest = serde_json::from_str(
+        r#"{"type":"exec","handles":["aws"],"argv":["terraform","plan"],"cwd":"/work"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        exec,
+        AgentRequest::Exec(ExecCall {
+            handles: vec!["aws".into()],
+            argv: vec!["terraform".into(), "plan".into()],
+            cwd: "/work".into(),
+            timeout_secs: None,
+        })
+    );
+}
+
+#[test]
+fn replies_round_trip() {
+    for response in [
+        AgentResponse::Http(HttpReply {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: "{}".into(),
+            truncated: false,
+        }),
+        AgentResponse::Exec(ExecReply {
+            exit_code: None,
+            timed_out: true,
+            stdout: "partial".into(),
+            stderr: String::new(),
+            truncated: false,
+        }),
+    ] {
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentResponse>(&json).unwrap(),
+            response
+        );
+    }
+}
+
+#[test]
+fn error_code_names_match_the_wire_format() {
+    for code in [
+        AgentErrorCode::NoVault,
+        AgentErrorCode::VaultLocked,
+        AgentErrorCode::BadRequest,
+        AgentErrorCode::UnknownHandle,
+        AgentErrorCode::PolicyDenied,
+        AgentErrorCode::ApprovalTimeout,
+        AgentErrorCode::UpstreamError,
+    ] {
+        assert_eq!(
+            serde_json::to_string(&code).unwrap(),
+            format!("\"{}\"", code.as_str())
+        );
+    }
+}
+
+#[test]
+fn worst_case_escaped_output_fits_in_a_frame() {
+    let control_bytes = "\u{1}".repeat(MAX_OUTPUT_LEN);
+    let reply = AgentResponse::Exec(ExecReply {
+        exit_code: Some(0),
+        timed_out: false,
+        stdout: control_bytes.clone(),
+        stderr: control_bytes,
+        truncated: true,
+    });
+    assert!(serde_json::to_vec(&reply).unwrap().len() < MAX_FRAME_LEN);
 }
