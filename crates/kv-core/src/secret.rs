@@ -1,0 +1,176 @@
+//! Secret records, the agent-visible view of them, and the values the
+//! scrubber must hide.
+
+use std::collections::BTreeMap;
+use std::fmt;
+
+use percent_encoding::percent_decode_str;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::error::VaultError;
+use crate::policy::{Mode, Policy};
+
+/// A secret string. Zeroed on drop; `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretText(Zeroizing<String>);
+
+impl SecretText {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Zeroizing::new(value.into()))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretKind {
+    Http,
+    Postgres,
+    Redis,
+    Env,
+}
+
+/// Where an HTTP token goes on the outgoing request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AuthPlacement {
+    /// `template` contains `{}` where the token is inserted, e.g. `Bearer {}`.
+    Header {
+        name: String,
+        template: String,
+    },
+    Query {
+        param: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SecretValue {
+    Http {
+        token: SecretText,
+        placement: AuthPlacement,
+    },
+    Postgres {
+        url: SecretText,
+    },
+    Redis {
+        url: SecretText,
+    },
+    Env {
+        vars: BTreeMap<String, SecretText>,
+    },
+}
+
+impl SecretValue {
+    pub fn kind(&self) -> SecretKind {
+        match self {
+            Self::Http { .. } => SecretKind::Http,
+            Self::Postgres { .. } => SecretKind::Postgres,
+            Self::Redis { .. } => SecretKind::Redis,
+            Self::Env { .. } => SecretKind::Env,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Secret {
+    pub name: String,
+    pub description: String,
+    pub value: SecretValue,
+    pub policy: Policy,
+    /// Unix seconds. Set by `Vault::upsert`.
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// What an agent may learn about a handle. Has no field that can hold a
+/// secret value, so it is safe to send over the agent socket.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleInfo {
+    pub name: String,
+    pub kind: SecretKind,
+    pub description: String,
+    pub mode: Mode,
+    pub allowed_hosts: Vec<String>,
+    pub allowed_methods: Vec<String>,
+    pub read_only: bool,
+    pub allowed_cmds: Vec<String>,
+    /// Names of the variables an `env` secret injects.
+    pub env_vars: Vec<String>,
+}
+
+impl Secret {
+    pub fn kind(&self) -> SecretKind {
+        self.value.kind()
+    }
+
+    pub fn info(&self) -> HandleInfo {
+        let env_vars = match &self.value {
+            SecretValue::Env { vars } => vars.keys().cloned().collect(),
+            _ => Vec::new(),
+        };
+        HandleInfo {
+            name: self.name.clone(),
+            kind: self.kind(),
+            description: self.description.clone(),
+            mode: self.policy.mode,
+            allowed_hosts: self.policy.allowed_hosts.clone(),
+            allowed_methods: self.policy.allowed_methods.clone(),
+            read_only: self.policy.read_only,
+            allowed_cmds: self.policy.allowed_cmds.clone(),
+            env_vars,
+        }
+    }
+
+    /// Every string that must never appear in output: the token or URL, and
+    /// for connection URLs the password both as written and percent-decoded.
+    pub fn sensitive_values(&self) -> Vec<Zeroizing<String>> {
+        let mut out = Vec::new();
+        match &self.value {
+            SecretValue::Http { token, .. } => out.push(Zeroizing::new(token.expose().to_owned())),
+            SecretValue::Postgres { url } | SecretValue::Redis { url } => {
+                out.push(Zeroizing::new(url.expose().to_owned()));
+                if let Ok(parsed) = url::Url::parse(url.expose())
+                    && let Some(password) = parsed.password()
+                {
+                    out.push(Zeroizing::new(password.to_owned()));
+                    let decoded = percent_decode_str(password).decode_utf8_lossy();
+                    if decoded != password {
+                        out.push(Zeroizing::new(decoded.into_owned()));
+                    }
+                }
+            }
+            SecretValue::Env { vars } => {
+                out.extend(vars.values().map(|v| Zeroizing::new(v.expose().to_owned())));
+            }
+        }
+        out
+    }
+}
+
+/// Handle names: 1-63 chars of `[a-z0-9_-]`, starting with `[a-z0-9]`.
+pub fn validate_handle(name: &str) -> Result<(), VaultError> {
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let rest_ok =
+        chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if first_ok && rest_ok && name.len() <= 63 {
+        Ok(())
+    } else {
+        Err(VaultError::InvalidHandle(name.to_owned()))
+    }
+}
