@@ -127,6 +127,7 @@ async fn serve_agent(
             session = Some(info);
             continue;
         }
+        let asked_for_handle = matches!(request, AgentRequest::RequestHandle(_));
         let shared = daemon.clone();
         let asking = session.clone();
         let prepared = tokio::task::spawn_blocking(move || {
@@ -146,6 +147,12 @@ async fn serve_agent(
             }
             prepared => run_job(prepared, &http).await,
         };
+        if let AgentResponse::Requested { name } = &response
+            && notify
+            && asked_for_handle
+        {
+            notify::handle_requested(format!("An agent asked you to add {name}; open kv tui."));
+        }
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }

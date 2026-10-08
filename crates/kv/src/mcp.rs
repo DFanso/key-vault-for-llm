@@ -8,7 +8,8 @@ use std::io;
 use std::path::PathBuf;
 
 use kv_core::crypto::fill_random;
-use kv_core::proto::{AgentRequest, AgentResponse, ExecCall, HttpCall, SessionInfo};
+use kv_core::proto::{AgentRequest, AgentResponse, ExecCall, HandleRequest, HttpCall, SessionInfo};
+use kv_core::secret::{AuthPlacement, SecretKind};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{
@@ -50,6 +51,44 @@ pub struct ExecArgs {
     /// Seconds before the program is killed: 60 by default, at most 600.
     #[serde(default)]
     timeout_secs: Option<u64>,
+}
+
+/// Never carries a secret value: unknown fields such as `token` are refused.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestHandleArgs {
+    /// Handle name: lowercase letters, digits, - and _, such as prod-db.
+    name: String,
+    /// http, env, postgres or redis.
+    kind: String,
+    /// Shown to agents in list_handles, such as "Staging Dokploy API".
+    #[serde(default)]
+    description: String,
+    /// Why you need it. Shown to the user.
+    #[serde(default)]
+    reason: String,
+    /// http: the header the token goes in, such as Authorization or x-api-key.
+    #[serde(default)]
+    header: Option<String>,
+    /// http: the header value with {} where the token goes, such as "Bearer {}" or "{}".
+    #[serde(default)]
+    template: Option<String>,
+    /// http: a query parameter the token goes in instead of a header.
+    #[serde(default)]
+    query_param: Option<String>,
+    /// http: true if the service's address should stay hidden too; you
+    /// then send paths and the user enters the base URL.
+    #[serde(default)]
+    base_url: bool,
+    /// http: hosts the token may be sent to, such as api.example.com.
+    #[serde(default)]
+    allowed_hosts: Vec<String>,
+    /// env: names of the variables the handle should set.
+    #[serde(default)]
+    env_vars: Vec<String>,
+    /// env: programs allowed to receive them, such as terraform.
+    #[serde(default)]
+    allowed_cmds: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -120,6 +159,58 @@ impl KvServer {
             )
             .await)
     }
+
+    #[tool(
+        description = "Ask the user to add a handle you need but do not have. Never include a secret value: the user types it in kv tui, where your request appears with the form filled in, and decides the policy. Returns at once; call list_handles later to see whether it was added."
+    )]
+    async fn request_handle(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(args): Parameters<RequestHandleArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = match args.kind.as_str() {
+            "http" => SecretKind::Http,
+            "env" => SecretKind::Env,
+            "postgres" => SecretKind::Postgres,
+            "redis" => SecretKind::Redis,
+            _ => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "bad_request: kind must be http, env, postgres or redis",
+                )]));
+            }
+        };
+        let auth = match (args.query_param, args.header) {
+            (Some(param), _) => Some(AuthPlacement::Query { param }),
+            (None, Some(name)) => Some(AuthPlacement::Header {
+                name,
+                template: args.template.unwrap_or_else(|| "{}".into()),
+            }),
+            (None, None) => None,
+        };
+        let session = self.session(&peer);
+        let request = AgentRequest::RequestHandle(HandleRequest {
+            name: args.name,
+            kind,
+            description: args.description,
+            reason: args.reason,
+            auth,
+            base_url: args.base_url,
+            allowed_hosts: args.allowed_hosts,
+            env_vars: args.env_vars,
+            allowed_cmds: args.allowed_cmds,
+        });
+        Ok(
+            match client::agent(&self.paths, Some(&session), &request).await {
+                Ok(AgentResponse::Requested { name }) => {
+                    CallToolResult::success(vec![ContentBlock::text(format!(
+                        "Asked the user to add {name}. It is waiting for them in kv tui; tell them, and call list_handles later to see whether it was added."
+                    ))])
+                }
+                Ok(other) => describe(other),
+                Err(e) => unreachable_daemon(e),
+            },
+        )
+    }
 }
 
 #[tool_handler(
@@ -129,7 +220,8 @@ without seeing them. Call list_handles to see what is available and how each han
 used, then call http_request or exec with a handle name. Secret values never appear in \
 results; where one would, you see [kv:<handle>]. Handles in ask mode wait for the user to \
 approve each use in kv tui; approval_denied means they said no, so do not retry it. If a call \
-fails with vault_locked, ask the user to run `kv unlock`."
+fails with vault_locked, ask the user to run `kv unlock`. If you need a secret that has no \
+handle, call request_handle and tell the user; never ask them to paste a secret into the chat."
 )]
 impl ServerHandler for KvServer {}
 
@@ -152,21 +244,29 @@ impl KvServer {
     /// back as tool errors that start with their code.
     async fn ask(&self, session: Option<&SessionInfo>, request: AgentRequest) -> CallToolResult {
         match client::agent(&self.paths, session, &request).await {
-            Ok(AgentResponse::Error { code, message }) => {
-                CallToolResult::error(vec![ContentBlock::text(format!(
-                    "{}: {message}",
-                    code.as_str()
-                ))])
-            }
-            Ok(response) => {
-                let json = serde_json::to_string_pretty(&response).unwrap_or_default();
-                CallToolResult::success(vec![ContentBlock::text(json)])
-            }
-            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
-                "daemon_unavailable: the kv daemon could not be started or reached: {e}"
-            ))]),
+            Ok(response) => describe(response),
+            Err(e) => unreachable_daemon(e),
         }
     }
+}
+
+/// A daemon reply as a tool result; errors start with their code.
+fn describe(response: AgentResponse) -> CallToolResult {
+    match response {
+        AgentResponse::Error { code, message } => CallToolResult::error(vec![ContentBlock::text(
+            format!("{}: {message}", code.as_str()),
+        )]),
+        response => {
+            let json = serde_json::to_string_pretty(&response).unwrap_or_default();
+            CallToolResult::success(vec![ContentBlock::text(json)])
+        }
+    }
+}
+
+fn unreachable_daemon(e: io::Error) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "daemon_unavailable: the kv daemon could not be started or reached: {e}"
+    ))])
 }
 
 /// Serves MCP on stdin and stdout until the client disconnects.
