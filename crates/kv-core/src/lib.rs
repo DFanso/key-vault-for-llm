@@ -4,6 +4,7 @@
 pub mod crypto;
 pub mod error;
 pub mod policy;
+pub mod proto;
 pub mod scrub;
 pub mod secret;
 pub mod vault;
