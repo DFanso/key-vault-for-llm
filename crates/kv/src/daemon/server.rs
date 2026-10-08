@@ -114,10 +114,7 @@ async fn serve_agent(mut stream: ServerStream, daemon: Shared, http: reqwest::Cl
         let response = match prepared {
             Prepared::Reply(response) => response,
             Prepared::Http(job) => broker::http::send(&http, *job).await,
-            Prepared::Exec(_) => AgentResponse::Error {
-                code: AgentErrorCode::BadRequest,
-                message: "exec is not supported yet".into(),
-            },
+            Prepared::Exec(job) => broker::exec::run(*job).await,
         };
         if write_frame(&mut stream, &response).await.is_err() {
             return;

@@ -9,9 +9,13 @@ use kv_core::proto::HttpCall;
 use kv_core::scrub::Scrubber;
 use kv_core::secret::{Secret, SecretText};
 
+use kv_core::proto::MAX_OUTPUT_LEN;
+
 use crate::audit::Audit;
 
+pub mod exec;
 pub mod http;
+mod process;
 
 /// An `http_request` that passed every check.
 pub struct HttpJob {
@@ -35,6 +39,21 @@ pub struct ExecJob {
     pub scrubber: Arc<Scrubber>,
     pub audit: Audit,
     pub started: Instant,
+}
+
+/// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
+/// markers can make scrubbed output longer than its input).
+pub(crate) fn capped_text(bytes: &[u8]) -> (String, bool) {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() <= MAX_OUTPUT_LEN {
+        return (text, false);
+    }
+    let mut end = MAX_OUTPUT_LEN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    (text, true)
 }
 
 /// Names only: the URL may hold a hidden base URL, and the job holds values.

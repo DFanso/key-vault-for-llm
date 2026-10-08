@@ -11,7 +11,7 @@ use kv_core::secret::{AuthPlacement, SecretValue};
 use reqwest::header::{CONTENT_ENCODING, HeaderValue};
 use reqwest::{Client, Method, Request, Response, StatusCode, redirect};
 
-use super::HttpJob;
+use super::{HttpJob, capped_text};
 use crate::audit::Use;
 
 const MAX_REDIRECTS: usize = 5;
@@ -246,21 +246,6 @@ async fn reply(
         body,
         truncated: truncated || cut,
     }))
-}
-
-/// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
-/// markers can make scrubbed output longer than its input).
-pub(crate) fn capped_text(bytes: &[u8]) -> (String, bool) {
-    let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.len() <= MAX_OUTPUT_LEN {
-        return (text, false);
-    }
-    let mut end = MAX_OUTPUT_LEN;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    (text, true)
 }
 
 fn scrub_text(scrubber: &Scrubber, bytes: &[u8]) -> String {
