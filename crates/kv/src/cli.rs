@@ -376,6 +376,7 @@ async fn control(
 ) -> Result<()> {
     let request = ControlRequest {
         passphrase,
+        token: None,
         command,
     };
     match client::control(paths, &request, true).await? {
@@ -386,6 +387,9 @@ async fn control(
             Ok(())
         }
         ControlResponse::Error { message, .. } => Err(CliError(message)),
+        other => Err(CliError(format!(
+            "unexpected reply from the daemon: {other:?}"
+        ))),
     }
 }
 
@@ -393,11 +397,15 @@ async fn control(
 async fn stop_or_lock(paths: &Paths, command: ControlCommand) -> Result<()> {
     let request = ControlRequest {
         passphrase: None,
+        token: None,
         command,
     };
     match client::control_if_running(paths, &request).await? {
         None | Some(ControlResponse::Done { .. }) => Ok(()),
         Some(ControlResponse::Error { message, .. }) => Err(CliError(message)),
+        Some(other) => Err(CliError(format!(
+            "unexpected reply from the daemon: {other:?}"
+        ))),
     }
 }
 

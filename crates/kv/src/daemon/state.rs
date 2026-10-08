@@ -8,10 +8,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::VaultError;
 use kv_core::crypto::KdfParams;
+use kv_core::crypto::fill_random;
 use kv_core::policy::{Decision, DenyReason, Operation, evaluate, http_target};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlErrorCode, ControlRequest,
-    ControlResponse, ExecCall, HttpCall, PolicyPatch, Status,
+    ControlResponse, ExecCall, HttpCall, Overview, PolicyPatch, Status,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
@@ -51,6 +52,9 @@ const METHOD_OVERRIDES: [&str; 3] = [
     "x-http-method",
     "x-method-override",
 ];
+
+/// Open `kv tui` sessions kept at once; the oldest is dropped beyond this.
+const MAX_SESSIONS: usize = 16;
 
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
@@ -98,6 +102,8 @@ pub struct Daemon {
     /// Built from the unlocked secrets on first use; cleared whenever they
     /// may have changed.
     scrubber: Option<Arc<Scrubber>>,
+    /// Tokens of open `kv tui` sessions. Cleared whenever the vault locks.
+    sessions: Vec<SecretText>,
 }
 
 /// The outcome of an agent request: either an answer now, or authorized
@@ -136,6 +142,7 @@ impl Daemon {
             last_used_wall: SystemTime::now(),
             last_request: now,
             scrubber: None,
+            sessions: Vec::new(),
         }
     }
 
@@ -377,40 +384,58 @@ impl Daemon {
         now: Instant,
     ) -> (ControlResponse, After) {
         self.last_request = now;
-        self.scrubber = None;
         let ControlRequest {
             passphrase,
+            token,
             command,
         } = request;
+        // Polled by `kv tui` several times a second: not use of the vault,
+        // not audited, and it leaves the cached scrubber alone.
+        if let ControlCommand::Overview = command {
+            return (self.overview(token.as_ref(), now), After::Continue);
+        }
+        self.scrubber = None;
         let (action, handle) = describe(&command);
         let mut after = After::Continue;
+        let done = |warnings| ControlResponse::Done { warnings };
         let result = match command {
             ControlCommand::Lock => {
-                self.vault = None;
-                Ok(Vec::new())
+                self.lock_vault();
+                Ok(done(Vec::new()))
             }
             ControlCommand::Stop => {
-                self.vault = None;
+                self.lock_vault();
                 after = After::Stop;
-                Ok(Vec::new())
+                Ok(done(Vec::new()))
             }
-            ControlCommand::Init { insecure_fast_kdf } => {
-                self.init(passphrase.as_ref(), insecure_fast_kdf, now)
-            }
+            ControlCommand::Init { insecure_fast_kdf } => self
+                .init(passphrase.as_ref(), insecure_fast_kdf, now)
+                .map(done),
+            ControlCommand::OpenSession => self
+                .authenticate(passphrase.as_ref(), None, now)
+                .map(drop)
+                .map(|()| self.open_session()),
+            // A session token is not enough to change the passphrase, and
+            // the change ends every session.
+            command @ ControlCommand::ChangePassphrase { .. } => self
+                .authenticate(passphrase.as_ref(), None, now)
+                .and_then(|vault| run_authenticated(vault, command))
+                .map(|warnings| {
+                    self.sessions.clear();
+                    done(warnings)
+                }),
             command => self
-                .authenticate(passphrase.as_ref(), now)
-                .and_then(|vault| run_authenticated(vault, command)),
+                .authenticate(passphrase.as_ref(), token.as_ref(), now)
+                .and_then(|vault| run_authenticated(vault, command))
+                .map(done),
         };
-        let response = match result {
-            Ok(warnings) => ControlResponse::Done { warnings },
-            Err(failure) => ControlResponse::Error {
-                code: failure.code,
-                message: failure.message,
-            },
-        };
+        let response = result.unwrap_or_else(|failure| ControlResponse::Error {
+            code: failure.code,
+            message: failure.message,
+        });
         let outcome = match &response {
-            ControlResponse::Done { .. } => "done",
             ControlResponse::Error { .. } => "error",
+            _ => "done",
         };
         self.audit
             .record("control", action, handle.as_deref(), outcome);
@@ -421,8 +446,7 @@ impl Daemon {
     /// is the current wall-clock time, so time spent asleep counts as idle.
     pub fn tick(&mut self, now: Instant, wall: SystemTime) -> After {
         if self.vault.is_some() && self.idle_for(now, wall) >= self.settings.idle_lock {
-            self.vault = None;
-            self.scrubber = None;
+            self.lock_vault();
             self.audit.record("daemon", "idle_lock", None, "locked");
         }
         if self.vault.is_none()
@@ -431,6 +455,49 @@ impl Daemon {
             return After::Stop;
         }
         After::Continue
+    }
+
+    /// Forgets the vault key, the scrubber and every session.
+    fn lock_vault(&mut self) {
+        self.vault = None;
+        self.scrubber = None;
+        self.sessions.clear();
+    }
+
+    fn open_session(&mut self) -> ControlResponse {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        fill_random(bytes.as_mut());
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let token = SecretText::new(hex);
+        if self.sessions.len() == MAX_SESSIONS {
+            self.sessions.remove(0);
+        }
+        self.sessions.push(token.clone());
+        ControlResponse::Session { token }
+    }
+
+    fn session_is_open(&self, token: &SecretText) -> bool {
+        self.vault.is_some()
+            && self
+                .sessions
+                .iter()
+                .any(|open| constant_time_eq(open.expose(), token.expose()))
+    }
+
+    fn overview(&self, token: Option<&SecretText>, now: Instant) -> ControlResponse {
+        let Some(vault) = self
+            .vault
+            .as_ref()
+            .filter(|_| token.is_some_and(|t| self.session_is_open(t)))
+        else {
+            return session_ended();
+        };
+        ControlResponse::Overview {
+            overview: Overview {
+                status: self.status(now),
+                handles: vault.secrets().iter().map(Secret::info).collect(),
+            },
+        }
     }
 
     fn touch(&mut self, now: Instant) {
@@ -509,13 +576,25 @@ impl Daemon {
         }
     }
 
-    /// Checks the passphrase, unlocking the vault if it is locked, and
-    /// returns the unlocked vault. Wrong passphrases count toward the backoff.
+    /// Checks the passphrase, unlocking the vault if it is locked, or else
+    /// a session token, and returns the unlocked vault. Wrong passphrases
+    /// count toward the backoff; a token is too long to guess.
     fn authenticate(
         &mut self,
         passphrase: Option<&SecretText>,
+        token: Option<&SecretText>,
         now: Instant,
     ) -> Result<&mut Vault, Failure> {
+        if let (None, Some(token)) = (passphrase, token) {
+            if !self.session_is_open(token) {
+                return Err(fail(ControlErrorCode::SessionEnded, SESSION_ENDED));
+            }
+            self.touch(now);
+            return Ok(self
+                .vault
+                .as_mut()
+                .expect("a session needs the vault unlocked"));
+        }
         let passphrase = passphrase.ok_or_else(|| {
             fail(
                 ControlErrorCode::PassphraseRequired,
@@ -578,7 +657,9 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         ControlCommand::Unlock
         | ControlCommand::Init { .. }
         | ControlCommand::Lock
-        | ControlCommand::Stop => Ok(Vec::new()),
+        | ControlCommand::Stop
+        | ControlCommand::OpenSession
+        | ControlCommand::Overview => Ok(Vec::new()),
     }
 }
 
@@ -763,7 +844,28 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::Remove { name } => ("remove", Some(name.clone())),
         ControlCommand::SetPolicy { name, .. } => ("set_policy", Some(name.clone())),
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
+        ControlCommand::OpenSession => ("open_session", None),
+        ControlCommand::Overview => ("overview", None),
     }
+}
+
+const SESSION_ENDED: &str = "the kv tui session has ended because the vault locked; unlock again";
+
+fn session_ended() -> ControlResponse {
+    ControlResponse::Error {
+        code: ControlErrorCode::SessionEnded,
+        message: SESSION_ENDED.into(),
+    }
+}
+
+/// Compares without stopping at the first difference, so timing reveals
+/// nothing about a token.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+            == 0
 }
 
 fn agent_error(code: AgentErrorCode, message: impl ToString) -> AgentResponse {

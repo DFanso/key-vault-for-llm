@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ExecCall,
-    ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, Status,
+    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
+    ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, Status,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -93,6 +93,7 @@ fn agent_requests_use_a_type_tag() {
 fn a_control_request_is_not_a_valid_agent_request() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        token: None,
         command: ControlCommand::Unlock,
     };
     let json = serde_json::to_string(&control).unwrap();
@@ -103,6 +104,7 @@ fn a_control_request_is_not_a_valid_agent_request() {
 fn control_request_debug_hides_the_passphrase() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        token: None,
         command: ControlCommand::ChangePassphrase {
             new_passphrase: SecretText::new("a brand new passphrase"),
         },
@@ -234,4 +236,27 @@ fn worst_case_escaped_output_fits_in_a_frame() {
         truncated: true,
     });
     assert!(serde_json::to_vec(&reply).unwrap().len() < MAX_FRAME_LEN);
+}
+
+#[test]
+fn a_control_request_without_a_token_still_parses() {
+    let request: ControlRequest =
+        serde_json::from_str(r#"{"passphrase":"pw","command":{"type":"unlock"}}"#).unwrap();
+    assert!(request.token.is_none());
+}
+
+#[test]
+fn session_tokens_never_show_in_debug_output() {
+    let token = "ab".repeat(32);
+    let request = ControlRequest {
+        passphrase: None,
+        token: Some(SecretText::new(token.clone())),
+        command: ControlCommand::Overview,
+    };
+    let response = ControlResponse::Session {
+        token: SecretText::new(token.clone()),
+    };
+    for printed in [format!("{request:?}"), format!("{response:?}")] {
+        assert!(!printed.contains(&token), "{printed}");
+    }
 }

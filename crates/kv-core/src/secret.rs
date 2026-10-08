@@ -120,6 +120,10 @@ pub struct HandleInfo {
     /// `http_request` with this handle takes a path such as `/v1/items`
     /// instead of a URL; the service's address stays hidden.
     pub takes_path: bool,
+    /// `http`: where kv puts the token. Names a header or query parameter,
+    /// never the token itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthPlacement>,
 }
 
 impl Secret {
@@ -131,6 +135,10 @@ impl Secret {
         let env_vars = match &self.value {
             SecretValue::Env { vars } => vars.keys().cloned().collect(),
             _ => Vec::new(),
+        };
+        let auth = match &self.value {
+            SecretValue::Http { placement, .. } => Some(placement.clone()),
+            _ => None,
         };
         HandleInfo {
             name: self.name.clone(),
@@ -151,6 +159,7 @@ impl Secret {
                     ..
                 }
             ),
+            auth,
         }
     }
 

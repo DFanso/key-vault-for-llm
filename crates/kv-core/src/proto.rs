@@ -2,8 +2,9 @@
 //!
 //! Agent-socket responses are built from `HandleInfo`, status data and
 //! scrubbed output, and no agent message type has a field that holds a
-//! secret value. Control requests carry the vault passphrase, because every
-//! control command except `lock` and `stop` must prove the user is present.
+//! secret value. Control requests carry the vault passphrase, or a session
+//! token that `kv tui` got for it, because every control command except
+//! `lock` and `stop` must prove the user is present.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -140,6 +141,11 @@ pub struct ControlRequest {
     /// Required by every command except `lock` and `stop`. For `init` it is
     /// the new passphrase.
     pub passphrase: Option<SecretText>,
+    /// A token from `open_session`, accepted instead of the passphrase by
+    /// every command except `init`, `open_session` and `change_passphrase`.
+    /// `overview` accepts only a token.
+    #[serde(default)]
+    pub token: Option<SecretText>,
     pub command: ControlCommand,
 }
 
@@ -171,6 +177,12 @@ pub enum ControlCommand {
     ChangePassphrase {
         new_passphrase: SecretText,
     },
+    /// Unlocks if needed and replies with a session token that works until
+    /// the vault locks. Needs the passphrase.
+    OpenSession,
+    /// Status and handles in one reply, for `kv tui` to poll. Not counted as
+    /// use of the vault and not audited.
+    Overview,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +191,12 @@ pub enum ControlResponse {
     Done {
         #[serde(default)]
         warnings: Vec<String>,
+    },
+    Session {
+        token: SecretText,
+    },
+    Overview {
+        overview: Overview,
     },
     Error {
         code: ControlErrorCode,
@@ -199,6 +217,15 @@ pub enum ControlErrorCode {
     Invalid,
     BadRequest,
     Internal,
+    /// The session token is unknown, or the vault locked since it was issued.
+    SessionEnded,
+}
+
+/// Everything `kv tui` shows, from one request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overview {
+    pub status: Status,
+    pub handles: Vec<HandleInfo>,
 }
 
 /// A partial policy update: only the fields that are `Some` change.

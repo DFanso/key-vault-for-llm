@@ -48,6 +48,7 @@ impl Fixture {
         let (response, _) = self.daemon.handle_control(
             ControlRequest {
                 passphrase: Some(SecretText::new(PASS)),
+                token: None,
                 command,
             },
             self.t0,
