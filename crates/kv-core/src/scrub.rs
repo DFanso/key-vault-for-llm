@@ -17,6 +17,27 @@ const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'~');
 
+/// Python's `quote()`: also leaves `/` alone.
+const PATH_SEGMENT: &AsciiSet = &URI_COMPONENT.remove(b'/');
+
+/// `encodeURI`-style: leaves URL delimiters alone.
+const URI: &AsciiSet = &PATH_SEGMENT
+    .remove(b';')
+    .remove(b',')
+    .remove(b'?')
+    .remove(b':')
+    .remove(b'@')
+    .remove(b'&')
+    .remove(b'=')
+    .remove(b'+')
+    .remove(b'$')
+    .remove(b'!')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'#');
+
 pub struct Scrubber {
     matcher: Option<AhoCorasick>,
     /// `replacements[i]` replaces pattern `i`.
@@ -119,13 +140,9 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
         raw.to_vec(),
         hex::encode(raw).into_bytes(),
         hex::encode_upper(raw).into_bytes(),
-        percent_encode(raw, NON_ALPHANUMERIC)
-            .to_string()
-            .into_bytes(),
-        percent_encode(raw, URI_COMPONENT).to_string().into_bytes(),
     ];
-    let json = serde_json::to_string(value).expect("a str serializes");
-    out.push(json.as_bytes()[1..json.len() - 1].to_vec());
+    out.extend(percent_variants(raw).into_iter().map(String::into_bytes));
+    out.extend(json_variants(value).into_iter().map(String::into_bytes));
     for engine in [&STANDARD_NO_PAD, &URL_SAFE_NO_PAD] {
         for offset in 0..3 {
             out.extend(base64_core(engine, raw, offset));
@@ -134,6 +151,72 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
     out.retain(|p| p.len() >= MIN_SECRET_LEN);
     out.sort();
     out.dedup();
+    out
+}
+
+/// Percent-encodings as common libraries produce them: four reserved-char
+/// sets, upper- or lowercase hex escapes, and form-style `+` for spaces.
+fn percent_variants(raw: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for set in [NON_ALPHANUMERIC, URI_COMPONENT, PATH_SEGMENT, URI] {
+        let upper = percent_encode(raw, set).to_string();
+        let lower = lowercase_escapes(&upper);
+        for form in [upper, lower] {
+            if form.contains("%20") {
+                out.push(form.replace("%20", "+"));
+            }
+            out.push(form);
+        }
+    }
+    out
+}
+
+fn lowercase_escapes(encoded: &str) -> String {
+    let mut out = String::with_capacity(encoded.len());
+    let mut chars = encoded.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '%' {
+            out.extend(chars.by_ref().take(2).map(|h| h.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+/// JSON string bodies (without quotes) as common encoders produce them:
+/// plain, with `/` escaped as `\/`, and with non-ASCII as `\uXXXX` in either
+/// hex case.
+fn json_variants(value: &str) -> Vec<String> {
+    let quoted = serde_json::to_string(value).expect("a str serializes");
+    let plain = quoted[1..quoted.len() - 1].to_owned();
+    let mut out = Vec::new();
+    for form in [
+        escape_non_ascii(&plain, false),
+        escape_non_ascii(&plain, true),
+        plain,
+    ] {
+        out.push(form.replace('/', "\\/"));
+        out.push(form);
+    }
+    out
+}
+
+fn escape_non_ascii(json: &str, uppercase: bool) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+            continue;
+        }
+        let mut units = [0u16; 2];
+        for unit in c.encode_utf16(&mut units) {
+            if uppercase {
+                out.push_str(&format!("\\u{unit:04X}"));
+            } else {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
     out
 }
 

@@ -1,10 +1,18 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use kv_core::scrub::Scrubber;
-use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use proptest::prelude::*;
 
 const KEY: &str = "sk-or-v1-0123456789abcdef";
+
+/// Python's `urllib.parse.quote()` default: leaves `-_.~/` alone.
+const PY_QUOTE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'/');
 
 fn scrub(s: &Scrubber, input: &str) -> String {
     String::from_utf8(s.scrub(input.as_bytes())).unwrap()
@@ -52,6 +60,40 @@ fn replaces_percent_and_json_encoded_db_passwords() {
     );
     let component = "p%40ss%22word%2Fwith%3Achars";
     assert_eq!(scrub(&s, component), "[kv:prod-db]");
+}
+
+#[test]
+fn replaces_url_encodings_from_common_libraries() {
+    let s = Scrubber::new([("prod-db", r#"p@ss"word/with:chars"#)]);
+    for encoded in [
+        "p%40ss%22word/with%3Achars",   // Python quote()
+        "p%40ss%22word%2fwith%3achars", // lowercase hex escapes
+        "p@ss%22word/with:chars",       // JavaScript encodeURI
+    ] {
+        assert_eq!(scrub(&s, encoded), "[kv:prod-db]", "{encoded}");
+    }
+}
+
+#[test]
+fn replaces_form_encoding_with_plus_for_space() {
+    let s = Scrubber::new([("pw", "correct horse battery staple")]);
+    assert_eq!(
+        scrub(&s, "pw=correct+horse+battery+staple&x=1"),
+        "pw=[kv:pw]&x=1"
+    );
+}
+
+#[test]
+fn replaces_json_escape_styles_from_common_libraries() {
+    let s = Scrubber::new([("prod-db", r#"p@ss"word/with:chars"#)]);
+    assert_eq!(
+        scrub(&s, r#"{"pw":"p@ss\"word\/with:chars"}"#),
+        r#"{"pw":"[kv:prod-db]"}"#
+    );
+    let s = Scrubber::new([("pw", "pässwörd-sëcret")]);
+    for encoded in [r#""pässwörd-sëcret""#, r#""pässwörd-sëcret""#] {
+        assert_eq!(scrub(&s, encoded), r#""[kv:pw]""#, "{encoded}");
+    }
 }
 
 #[test]
@@ -105,6 +147,18 @@ fn chunked<'a>(input: &'a [u8], cuts: &[usize]) -> Vec<&'a [u8]> {
     chunks
 }
 
+fn lowercase_escapes(encoded: &str) -> String {
+    let mut out = String::new();
+    let mut chars = encoded.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '%' {
+            out.extend(chars.by_ref().take(2).map(|h| h.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
 fn encode(secret: &str, how: u8, prefix: &[u8]) -> String {
     let mut buf = prefix.to_vec();
     buf.extend_from_slice(secret.as_bytes());
@@ -115,7 +169,10 @@ fn encode(secret: &str, how: u8, prefix: &[u8]) -> String {
         3 => STANDARD.encode(&buf),
         4 => URL_SAFE.encode(&buf),
         5 => percent_encode(secret.as_bytes(), NON_ALPHANUMERIC).to_string(),
-        _ => serde_json::to_string(secret).unwrap(),
+        6 => serde_json::to_string(secret).unwrap(),
+        7 => percent_encode(secret.as_bytes(), PY_QUOTE).to_string(),
+        8 => lowercase_escapes(&percent_encode(secret.as_bytes(), NON_ALPHANUMERIC).to_string()),
+        _ => serde_json::to_string(secret).unwrap().replace('/', "\\/"),
     }
 }
 
@@ -123,7 +180,7 @@ proptest! {
     #[test]
     fn stream_output_equals_one_shot_output(
         secret in "[a-zA-Z0-9!@#$%^&*()_+=/:\"'{}-]{8,40}",
-        pieces in prop::collection::vec((0u8..7, prop::collection::vec(any::<u8>(), 0..3), "[ ,;\n]{0,20}"), 0..6),
+        pieces in prop::collection::vec((0u8..10, prop::collection::vec(any::<u8>(), 0..3), "[ ,;\n]{0,20}"), 0..6),
         cuts in prop::collection::vec(any::<usize>(), 0..8),
     ) {
         let s = Scrubber::new([("h", secret.as_str())]);
@@ -144,7 +201,7 @@ proptest! {
     #[test]
     fn no_encoding_of_a_secret_survives(
         secret in "[a-zA-Z0-9!@#$%^&*()_+=/:\"'{}-]{8,40}",
-        how in 0u8..7,
+        how in 0u8..10,
         prefix in prop::collection::vec(any::<u8>(), 0..3),
         before in "[ ,;\n]{0,20}",
         after in "[ ,;\n]{0,20}",
