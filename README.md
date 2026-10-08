@@ -22,11 +22,12 @@ kv add aws --kind env --var AWS_ACCESS_KEY_ID --var AWS_SECRET_ACCESS_KEY \
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
 
-The agent then sees four tools:
+The agent then sees five tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
 - `exec`: runs a program (never a shell) with an `env` handle's variables set.
+- `request_handle`: asks you to add a handle it needs (see below).
 - `status`: whether the vault is unlocked.
 
 Wherever a secret would appear in a response or in program output, the agent
@@ -69,6 +70,18 @@ The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
 their policy (`p`). Secret values are typed into hidden fields and never shown
 again; leave one blank when editing to keep it. The Audit tab shows the
 newest entries of the audit log. `L` locks the vault, `q` quits.
+
+### When the agent needs a key you have not added
+
+Agents cannot add secrets: no tool takes a value. Instead an agent calls
+`request_handle` with what it knows (the name, the kind, where the token goes,
+the hosts or commands, and why it wants it), and kv shows a notification. The
+request waits at the top of the Handles tab. `Enter` opens the New handle form
+already filled in with the focus on the secret: type or paste it, add the base
+URL if the agent asked for one, check the hosts (at most 4, in plain ASCII) and
+save. Programs an `env` handle may run are shown as a hint rather than filled
+in, since one could be a shell; type the ones you allow. `x` dismisses the
+request. At most 16 wait at once; they survive a lock but not a daemon restart.
 
 ## Day to day
 

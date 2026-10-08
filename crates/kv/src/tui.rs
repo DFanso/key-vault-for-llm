@@ -83,6 +83,7 @@ impl Driver {
                 self.send(ControlCommand::SetPolicy { name, patch }).await
             }
             Effect::Remove(name) => self.send(ControlCommand::Remove { name }).await,
+            Effect::Dismiss(id) => self.send(ControlCommand::DismissRequest { id }).await,
             Effect::Lock => {
                 self.token = None;
                 let request = ControlRequest {

@@ -83,14 +83,14 @@ on Windows. Both sockets verify the peer runs as the same OS user
 (`SO_PEERCRED` / `getpeereid` / pipe ACL).
 
 - **Agent socket**: `list_handles`, `http_request`, `db_query`, `db_connect`,
-  `exec`, `status`. No message type on this socket can carry a secret value;
+  `exec`, `request_handle`, `status`. No message type on this socket can carry a secret value;
   this is enforced by the types in `kv-core`, not by runtime checks. A
   connection may open with a `hello` frame naming its agent session (a random
   id `kv mcp` picks per MCP connection, at most 128 bytes) and client (the MCP
   `clientInfo` name, self-reported, at most 1024 bytes). It gets no reply;
   approvals use it to scope grants and to tell the user who is asking.
 - **Control socket**: `init`, `unlock`, `lock`, `stop`, `open_session`,
-  `overview`, `decide`, secret and policy CRUD (`add`, `update`, `remove`,
+  `overview`, `decide`, `dismiss_request`, secret and policy CRUD (`add`, `update`, `remove`,
   `set_policy`), passphrase change. Every command except `lock` and `stop`
   must prove the user is present:
   - CLI commands (`kv add`, `kv rm`, `kv policy`, `kv passwd`, `kv unlock`)
@@ -210,7 +210,25 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 | `db_query` | handle, query (SQL or Redis command) | rows as JSON (scrubbed, capped) |
 | `db_connect` | handle, ttl? | local connection URL with a lease token |
 | `exec` | handles[], argv[], cwd?, timeout? | exit code, stdout, stderr (scrubbed) |
+| `request_handle` | name, kind, description?, reason?, header?/template?/query_param?, base_url?, allowed_hosts?, env_vars?, allowed_cmds? | confirmation that the request waits in `kv tui` |
 | `status` | — | locked/unlocked, pending approvals |
+
+`request_handle` lets an agent ask for a handle it lacks without ever
+carrying a value: unknown arguments such as `token` are refused, and the
+request type has no field for one. The daemon refuses a name that is invalid
+or already a handle, and more than 4 hosts or a host that is not a plain-ASCII
+`host` or `host:port` (so lookalike letters cannot pose as a known host). It
+keeps at most 16 requests (asking again for a name replaces the earlier request
+and is not announced again), cleans the agent's text as for approvals, and
+drops fields that do not belong to the kind. Requests live in memory, survive
+a lock, appear in `overview`, and leave when a handle with that name is added
+or the user dismisses them (`dismiss_request`, audited). The TUI lists them
+first on the Handles tab, selected by identity so rows arriving above never
+move the cursor; `Enter` opens the New handle form filled in from the request
+with mode `ask` and the focus on the secret field, and `x` dismisses. Requested
+programs are a hint, not a prefilled policy, because one could be a shell. The
+form scrolls by wrapped rows so the focused field is always in view.
+A notification announces each request.
 
 ### Request pipeline (daemon)
 

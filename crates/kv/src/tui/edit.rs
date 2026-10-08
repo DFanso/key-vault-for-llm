@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kv_core::policy::{Mode, Policy};
-use kv_core::proto::PolicyPatch;
+use kv_core::proto::{PolicyPatch, RequestedHandle};
 use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
 
 use super::app::Effect;
@@ -38,6 +38,53 @@ pub fn new_handle() -> Form {
         Field::choice("mode", "Mode", MODES),
     ]);
     Form::new("New handle", fields)
+}
+
+/// The New handle form filled in from an agent's request, with the focus
+/// on the secret: the one thing the agent could not say.
+pub fn requested_handle(requested: &RequestedHandle) -> Form {
+    let request = &requested.request;
+    let mut form = new_handle();
+    let kind = kind_name(request.kind);
+    form.field_mut("kind").set_choice(kind);
+    form.field_mut("name").text = request.name.clone().into();
+    form.field_mut("description").text = request.description.clone().into();
+    match &request.auth {
+        Some(AuthPlacement::Header { name, template }) => {
+            form.field_mut("header").text = name.clone().into();
+            form.field_mut("template").text = template.clone().into();
+        }
+        Some(AuthPlacement::Query { param }) => {
+            form.field_mut("placement").set_choice("query");
+            form.field_mut("param").text = param.clone().into();
+        }
+        None => {}
+    }
+    if request.base_url {
+        form.field_mut("base_url").hint =
+            "asked for: agents send only a path; type the service's URL".into();
+    }
+    form.field_mut("hosts").text = request.allowed_hosts.join(", ").into();
+    // A program the agent names could be a shell that runs anything, so
+    // the user types the ones they allow.
+    if !request.allowed_cmds.is_empty() {
+        form.field_mut("cmds").hint = format!(
+            "asked for {}; type the ones you allow",
+            request.allowed_cmds.join(", ")
+        );
+    }
+    if !request.env_vars.is_empty() {
+        form.field_mut("vars").hint = format!(
+            "NAME=value, Enter adds; asked for {}",
+            request.env_vars.join(", ")
+        );
+    }
+    form.focus_on(match kind {
+        "http" => "token",
+        "env" => "vars",
+        _ => "url",
+    });
+    form
 }
 
 pub fn edit_handle(handle: &HandleInfo) -> Form {

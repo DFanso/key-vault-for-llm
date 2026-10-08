@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::{Mode, Policy};
-use crate::secret::{HandleInfo, Secret, SecretText, SecretValue};
+use crate::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
 
 /// Largest frame either side accepts, in bytes. Room for the output caps
 /// below even when every byte is JSON-escaped as `\u00XX`.
@@ -34,6 +34,40 @@ pub enum AgentRequest {
     Status,
     HttpRequest(HttpCall),
     Exec(ExecCall),
+    /// Asks the user to add a handle. Answered at once; the user finishes
+    /// it in `kv tui`.
+    RequestHandle(HandleRequest),
+}
+
+/// A handle an agent would like the user to add. It has no field for a
+/// value or a mode: the user types the secret and decides the policy in
+/// `kv tui`. Unknown fields are refused, so a value sent by mistake is an
+/// error rather than silently dropped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandleRequest {
+    pub name: String,
+    pub kind: SecretKind,
+    #[serde(default)]
+    pub description: String,
+    /// Why the agent needs it, shown to the user.
+    #[serde(default)]
+    pub reason: String,
+    /// http: where the token goes.
+    #[serde(default)]
+    pub auth: Option<AuthPlacement>,
+    /// http: the service's address should stay hidden behind a base URL.
+    #[serde(default)]
+    pub base_url: bool,
+    /// http: hosts the token may be sent to.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// env: names of the variables the handle should set.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    /// env: programs allowed to receive them.
+    #[serde(default)]
+    pub allowed_cmds: Vec<String>,
 }
 
 /// Who is asking, as `kv mcp` reports it. The id is random per `kv mcp`
@@ -81,6 +115,10 @@ pub enum AgentResponse {
     },
     Http(HttpReply),
     Exec(ExecReply),
+    /// The handle request is waiting for the user in `kv tui`.
+    Requested {
+        name: String,
+    },
     Error {
         code: AgentErrorCode,
         message: String,
@@ -213,6 +251,10 @@ pub enum ControlCommand {
         id: u64,
         verdict: Verdict,
     },
+    /// Turns down a handle request.
+    DismissRequest {
+        id: u64,
+    },
 }
 
 /// The user's answer to a request waiting for approval.
@@ -271,6 +313,18 @@ pub struct Overview {
     pub handles: Vec<HandleInfo>,
     #[serde(default)]
     pub approvals: Vec<Approval>,
+    #[serde(default)]
+    pub handle_requests: Vec<RequestedHandle>,
+}
+
+/// A handle request waiting for the user. Agent text has been made safe to
+/// show.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedHandle {
+    pub id: u64,
+    /// Self-reported by the MCP client.
+    pub client: Option<String>,
+    pub request: HandleRequest,
 }
 
 /// A request waiting for approval. Text that came from the agent has

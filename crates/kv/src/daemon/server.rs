@@ -130,10 +130,19 @@ async fn serve_agent(
         let shared = daemon.clone();
         let asking = session.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            lock(&shared).prepare_in(asking.as_ref(), request, Instant::now())
+            let mut daemon = lock(&shared);
+            let prepared = daemon.prepare_in(asking.as_ref(), request, Instant::now());
+            (prepared, daemon.take_request_notice())
         })
         .await;
-        let Ok(prepared) = prepared else { return };
+        let Ok((prepared, requested)) = prepared else {
+            return;
+        };
+        if let Some(name) = requested
+            && notify
+        {
+            notify::handle_requested(format!("An agent asked you to add {name}; open kv tui."));
+        }
         let response = match prepared {
             Prepared::Wait(waiting) => {
                 if notify {

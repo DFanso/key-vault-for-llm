@@ -336,3 +336,72 @@ async fn an_ask_handle_waits_for_approval_and_shows_the_client() {
     assert_ne!(result.is_error, Some(true), "{result:?}");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_agent_asks_for_a_handle_it_does_not_have() {
+    use kv::paths::Paths;
+    use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse};
+    use kv_core::secret::{AuthPlacement, SecretText};
+
+    let home = Home::new();
+    home.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    let project = TempDir::new().unwrap();
+    let client = home.mcp(project.path()).await;
+    let (failed, text) = call(
+        &client,
+        "request_handle",
+        serde_json::json!({
+            "name": "dokploy",
+            "kind": "http",
+            "description": "KYC dev Dokploy",
+            "reason": "to list Dokploy projects",
+            "header": "x-api-key",
+            "template": "{}",
+            "base_url": true
+        }),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    assert!(text.contains("kv tui"), "{text}");
+
+    let (failed, text) = call(
+        &client,
+        "request_handle",
+        serde_json::json!({"name": "x", "kind": "http", "token": "sk-should-not-be-here"}),
+    )
+    .await;
+    assert!(failed, "a value is refused: {text}");
+    assert!(!text.contains("sk-should-not-be-here"), "{text}");
+
+    let paths = Paths::under(home.dir.path());
+    let send = |token: Option<SecretText>, passphrase: Option<&str>, command| {
+        let request = ControlRequest {
+            passphrase: passphrase.map(SecretText::new),
+            token,
+            command,
+        };
+        let paths = paths.clone();
+        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+    };
+    let token = match send(None, Some(PASS), ControlCommand::OpenSession).await {
+        ControlResponse::Session { token } => token,
+        other => panic!("{other:?}"),
+    };
+    let requests = match send(Some(token), None, ControlCommand::Overview).await {
+        ControlResponse::Overview { overview } => overview.handle_requests,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    let request = &requests[0].request;
+    assert_eq!(request.name, "dokploy");
+    assert!(request.base_url);
+    assert_eq!(
+        request.auth,
+        Some(AuthPlacement::Header {
+            name: "x-api-key".into(),
+            template: "{}".into(),
+        })
+    );
+    assert!(requests[0].client.is_some());
+    client.cancel().await.unwrap();
+}
