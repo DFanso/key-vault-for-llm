@@ -300,3 +300,19 @@ fn a_status_from_before_approvals_still_parses() {
     .unwrap();
     assert_eq!(status.pending_approvals, 0);
 }
+
+#[test]
+fn update_fields_are_optional() {
+    let parsed: ControlCommand = serde_json::from_str(r#"{"type":"update","name":"api"}"#).unwrap();
+    assert!(
+        matches!(
+            &parsed,
+            ControlCommand::Update {
+                name,
+                description: None,
+                value: None,
+            } if name == "api"
+        ),
+        "{parsed:?}"
+    );
+}

@@ -16,7 +16,7 @@ use kv_core::proto::{
     Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
-use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
+use kv_core::secret::{AuthPlacement, Secret, SecretKind, SecretText, SecretValue};
 use kv_core::vault::Vault;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -933,6 +933,11 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         ControlCommand::Add { secret, replace } => add(vault, secret, replace),
         ControlCommand::Remove { name } => remove(vault, &name),
         ControlCommand::SetPolicy { name, patch } => set_policy(vault, &name, &patch),
+        ControlCommand::Update {
+            name,
+            description,
+            value,
+        } => update(vault, &name, description, value),
         ControlCommand::ChangePassphrase { new_passphrase } => {
             match vault.change_passphrase(new_passphrase.expose(), KdfParams::RECOMMENDED) {
                 Ok(()) => Ok(Vec::new()),
@@ -991,6 +996,59 @@ fn set_policy(vault: &mut Vault, name: &str, patch: &PolicyPatch) -> Result<Vec<
         .map_err(|e| fail(ControlErrorCode::Invalid, e.to_string()))?;
     save_or_restore(vault, name, Some(previous))?;
     Ok(warnings)
+}
+
+fn update(
+    vault: &mut Vault,
+    name: &str,
+    description: Option<String>,
+    value: Option<SecretValue>,
+) -> Result<Vec<String>, Failure> {
+    let previous = vault.get(name).cloned().ok_or_else(|| unknown(name))?;
+    let mut updated = previous.clone();
+    if let Some(description) = description {
+        updated.description = description;
+    }
+    if let Some(mut value) = value {
+        let kind = previous.value.kind();
+        if value.kind() != kind {
+            return Err(fail(
+                ControlErrorCode::Invalid,
+                format!(
+                    "{name} holds a value of kind {}; remove it and add it again to change its kind",
+                    kind_name(kind)
+                ),
+            ));
+        }
+        if let (
+            SecretValue::Http { base_url, .. },
+            SecretValue::Http {
+                base_url: Some(old),
+                ..
+            },
+        ) = (&mut value, &previous.value)
+            && base_url.is_none()
+        {
+            *base_url = Some(old.clone());
+        }
+        validate_value(&value)?;
+        updated.value = value;
+    }
+    let warnings = warnings_for(&updated);
+    vault
+        .upsert(updated)
+        .map_err(|e| fail(ControlErrorCode::Invalid, e.to_string()))?;
+    save_or_restore(vault, name, Some(previous))?;
+    Ok(warnings)
+}
+
+fn kind_name(kind: SecretKind) -> &'static str {
+    match kind {
+        SecretKind::Http => "http",
+        SecretKind::Postgres => "postgres",
+        SecretKind::Redis => "redis",
+        SecretKind::Env => "env",
+    }
 }
 
 /// Saves, or puts `name` back the way it was if the save fails, so memory
@@ -1133,6 +1191,7 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::Add { secret, .. } => ("add", Some(secret.name.clone())),
         ControlCommand::Remove { name } => ("remove", Some(name.clone())),
         ControlCommand::SetPolicy { name, .. } => ("set_policy", Some(name.clone())),
+        ControlCommand::Update { name, .. } => ("update", Some(name.clone())),
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
         ControlCommand::Overview => ("overview", None),

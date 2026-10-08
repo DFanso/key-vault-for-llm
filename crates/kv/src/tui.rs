@@ -1,8 +1,10 @@
-//! `kv tui`: approve waiting agent requests, see handles, lock the vault.
+//! `kv tui`: approve waiting agent requests, edit handles, lock the vault.
 //! Unlocking trades the passphrase for a session token held only in this
 //! process; every later request uses the token.
 
 pub mod app;
+mod edit;
+pub mod form;
 pub mod view;
 
 use std::io::{self, IsTerminal};
@@ -52,6 +54,29 @@ impl Driver {
             Effect::Decide { id, verdict } => {
                 self.send(ControlCommand::Decide { id, verdict }).await
             }
+            Effect::Add(secret) => {
+                self.send(ControlCommand::Add {
+                    secret,
+                    replace: false,
+                })
+                .await
+            }
+            Effect::Update {
+                name,
+                description,
+                value,
+            } => {
+                self.send(ControlCommand::Update {
+                    name,
+                    description,
+                    value,
+                })
+                .await
+            }
+            Effect::SetPolicy { name, patch } => {
+                self.send(ControlCommand::SetPolicy { name, patch }).await
+            }
+            Effect::Remove(name) => self.send(ControlCommand::Remove { name }).await,
             Effect::Lock => {
                 self.token = None;
                 let request = ControlRequest {

@@ -104,3 +104,43 @@ async fn a_wrong_passphrase_is_reported() {
         Outcome::Done(warnings) if warnings.is_empty()
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_and_removing_a_handle_through_the_tui() {
+    let daemon = Daemon::start().await;
+    let mut driver = Driver::new(daemon.paths.clone());
+    let mut app = App::new();
+    unlock(&mut app, &mut driver, PASS).await;
+    refresh(&mut app, &mut driver).await;
+    press(&mut app, &mut driver, KeyCode::Char('2')).await;
+    press(&mut app, &mut driver, KeyCode::Char('n')).await;
+    for (field, text) in [("name", "extra"), ("token", "extra-token-0123456789")] {
+        while app.form().unwrap().focused() != Some(field) {
+            press(&mut app, &mut driver, KeyCode::Tab).await;
+        }
+        for c in text.chars() {
+            press(&mut app, &mut driver, KeyCode::Char(c)).await;
+        }
+    }
+    while app.form().unwrap().focused().is_some() {
+        press(&mut app, &mut driver, KeyCode::Tab).await;
+    }
+    press(&mut app, &mut driver, KeyCode::Enter).await;
+    assert!(app.form().is_none(), "{:?}", app.message());
+    refresh(&mut app, &mut driver).await;
+    let names = |app: &App| {
+        app.overview()
+            .unwrap()
+            .handles
+            .iter()
+            .map(|h| h.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&app), ["api", "extra"]);
+
+    press(&mut app, &mut driver, KeyCode::Down).await;
+    press(&mut app, &mut driver, KeyCode::Char('x')).await;
+    press(&mut app, &mut driver, KeyCode::Char('y')).await;
+    refresh(&mut app, &mut driver).await;
+    assert_eq!(names(&app), ["api"]);
+}

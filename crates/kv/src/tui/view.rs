@@ -9,9 +9,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::app::{App, Screen, Tab};
+use super::form::{Field, Form, Input};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen() {
@@ -69,9 +70,19 @@ fn draw_main(frame: &mut Frame, app: &App) {
     frame.render_widget(Paragraph::new(tab_line(app)), tabs);
     match app.tab() {
         Tab::Approvals => draw_approvals(frame, app, body),
-        Tab::Handles => draw_handles(frame, app.overview(), body),
+        Tab::Handles => draw_handles(frame, app, body),
     }
-    frame.render_widget(Paragraph::new(Line::styled(key_hints(app), dim())), footer);
+    if let Some(form) = app.form() {
+        draw_form(frame, form, body);
+    }
+    let footer_line = match app.removing() {
+        Some(name) => Line::styled(
+            format!("Remove {name}? y removes it, any other key keeps it"),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        None => Line::styled(key_hints(app), dim()),
+    };
+    frame.render_widget(Paragraph::new(footer_line), footer);
     if let Some(text) = app.message() {
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -181,30 +192,124 @@ fn approval_lines(approval: &Approval, selected: bool) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_handles(frame: &mut Frame, overview: Option<&Overview>, area: Rect) {
-    let handles = overview.map_or(&[][..], |o| &o.handles[..]);
+fn draw_handles(frame: &mut Frame, app: &App, area: Rect) {
+    let handles = app.overview().map_or(&[][..], |o| &o.handles[..]);
     let block = Block::bordered().title(" Handles ");
     if handles.is_empty() {
-        let text = Line::styled("No handles yet.", dim());
+        let text = Line::styled("No handles yet. Press n to add one.", dim());
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     }
-    let lines: Vec<Line> = handles.iter().map(handle_line).collect();
+    let lines: Vec<Line> = handles
+        .iter()
+        .enumerate()
+        .map(|(index, handle)| handle_line(handle, index == app.selected_handle()))
+        .collect();
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn handle_line(handle: &HandleInfo) -> Line<'static> {
+fn handle_line(handle: &HandleInfo, selected: bool) -> Line<'static> {
     let mode = match handle.mode {
         Mode::Auto => "auto",
         Mode::Ask => "ask",
         Mode::Deny => "deny",
     };
     let kind = format!("{:?}", handle.kind).to_lowercase();
-    let mut text = format!("{:<20} {kind:<9} {mode:<5}", handle.name);
+    let marker = if selected { "▶ " } else { "  " };
+    let mut text = format!("{marker}{:<20} {kind:<9} {mode:<5}", handle.name);
     if !handle.description.is_empty() {
         text.push_str(&format!(" {}", handle.description));
     }
-    Line::raw(text)
+    if selected {
+        Line::styled(text, Style::new().add_modifier(Modifier::BOLD))
+    } else {
+        Line::raw(text)
+    }
+}
+
+fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    for (field, focused) in form.shown() {
+        lines.push(field_line(field, focused));
+    }
+    lines.push(Line::raw(""));
+    let save = if form.save_focused() {
+        Span::styled(" Save ", Style::new().add_modifier(Modifier::REVERSED))
+    } else {
+        Span::raw(" Save ")
+    };
+    lines.push(Line::from(vec![Span::raw("  "), save]));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  Tab next · ←→ choose · Enter next or save · Esc cancel",
+        dim(),
+    ));
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = area.width.min(90);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(format!(" {} ", form.title()));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn field_line(field: &Field, focused: bool) -> Line<'static> {
+    let marker = if focused { "▶ " } else { "  " };
+    let label = Span::styled(
+        format!("{marker}{:<16} ", field.label),
+        if focused {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        },
+    );
+    let mut spans = vec![label];
+    match &field.input {
+        Input::Text => spans.push(Span::raw(field.text.to_string())),
+        Input::Hidden => spans.push(Span::raw("•".repeat(field.text.chars().count()))),
+        Input::Choice(options) => {
+            for (index, option) in options.iter().enumerate() {
+                let style = if index == field.choice {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    dim()
+                };
+                spans.push(Span::styled(format!(" {option} "), style));
+            }
+        }
+        Input::Pairs => {
+            let names: Vec<&str> = field.pairs.iter().map(|(name, _)| name.as_str()).collect();
+            if !names.is_empty() {
+                spans.push(Span::raw(format!("{} ", names.join(", "))));
+            }
+            // The name shows once `=` is typed; until then the text could
+            // be a value pasted on its own.
+            let dots = |text: &str| "•".repeat(text.chars().count());
+            let typed = match field.text.split_once('=') {
+                Some((name, value)) => format!("{name}={}", dots(value)),
+                None => dots(&field.text),
+            };
+            if focused || !typed.is_empty() {
+                spans.push(Span::styled(format!("+ {typed}"), dim()));
+            }
+        }
+    }
+    if focused && !matches!(field.input, Input::Choice(_)) {
+        spans.push(Span::raw("▏"));
+    }
+    if !field.hint.is_empty() {
+        spans.push(Span::styled(format!("  {}", field.hint), dim()));
+    }
+    Line::from(spans)
 }
 
 fn key_hints(app: &App) -> String {
@@ -217,6 +322,12 @@ fn key_hints(app: &App) -> String {
                 hints.push("s allow for session");
             }
             hints.extend(["d deny", "D deny always", "↑↓ select"]);
+        }
+    }
+    if app.tab() == Tab::Handles {
+        hints.push("n new");
+        if app.overview().is_some_and(|o| !o.handles.is_empty()) {
+            hints.extend(["e edit", "p policy", "x remove", "↑↓ select"]);
         }
     }
     hints.extend(["1/2 tabs", "L lock", "q quit"]);

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::{Mode, Policy};
-use crate::secret::{HandleInfo, Secret, SecretText};
+use crate::secret::{HandleInfo, Secret, SecretText, SecretValue};
 
 /// Largest frame either side accepts, in bytes. Room for the output caps
 /// below even when every byte is JSON-escaped as `\u00XX`.
@@ -188,6 +188,16 @@ pub enum ControlCommand {
     SetPolicy {
         name: String,
         patch: PolicyPatch,
+    },
+    /// Changes a handle's description or value and keeps its policy. The
+    /// value must be of the same kind; an http value without a base URL
+    /// keeps the base URL the handle has.
+    Update {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        value: Option<SecretValue>,
     },
     ChangePassphrase {
         new_passphrase: SecretText,
