@@ -4,7 +4,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use kv_core::proto::{AgentRequest, AgentResponse, ControlRequest, ControlResponse};
+use kv_core::proto::{AgentRequest, AgentResponse, ControlRequest, ControlResponse, SessionInfo};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -25,8 +25,17 @@ pub async fn connect(endpoint: &Endpoint, autostart: bool) -> io::Result<ClientS
     }
 }
 
-pub async fn agent(paths: &Paths, request: &AgentRequest) -> io::Result<AgentResponse> {
+/// Sends one agent request, starting the daemon if needed. With a session,
+/// the connection first says which agent session is asking.
+pub async fn agent(
+    paths: &Paths,
+    session: Option<&SessionInfo>,
+    request: &AgentRequest,
+) -> io::Result<AgentResponse> {
     let mut stream = connect(&paths.agent_endpoint(), true).await?;
+    if let Some(session) = session {
+        write_frame(&mut stream, &AgentRequest::Hello(session.clone())).await?;
+    }
     exchange(&mut stream, request).await
 }
 

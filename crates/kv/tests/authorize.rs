@@ -58,20 +58,6 @@ fn policy_failures_name_the_rule() {
 }
 
 #[test]
-fn ask_mode_fails_until_approvals_exist() {
-    let mut f = Fixture::new();
-    f.add(openrouter(Mode::Ask));
-    let (code, message) = f
-        .http(get("openrouter", "https://openrouter.ai/"))
-        .unwrap_err();
-    assert_eq!(code, AgentErrorCode::ApprovalTimeout);
-    assert!(
-        message.contains("kv policy openrouter --mode auto"),
-        "{message}"
-    );
-}
-
-#[test]
 fn malformed_http_requests_are_bad_requests() {
     let mut f = Fixture::new();
     f.add(openrouter(Mode::Auto));
@@ -239,12 +225,6 @@ fn exec_refuses_what_policy_and_input_rules_forbid() {
         &["terraform"],
         Mode::Auto,
     ));
-    f.add(env_secret(
-        "asks",
-        &[("TOKEN", "ask-token-0123456789")],
-        &["terraform"],
-        Mode::Ask,
-    ));
     f.add(openrouter(Mode::Auto));
     let cwd = f.dir.path().to_path_buf();
     let cases = [
@@ -276,10 +256,6 @@ fn exec_refuses_what_policy_and_input_rules_forbid() {
         (
             run(&["nope"], &["terraform"], cwd.clone()),
             AgentErrorCode::UnknownHandle,
-        ),
-        (
-            run(&["asks"], &["terraform"], cwd.clone()),
-            AgentErrorCode::ApprovalTimeout,
         ),
     ];
     for (call, expected) in cases {

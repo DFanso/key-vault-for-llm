@@ -9,14 +9,16 @@ use std::time::{Duration, Instant, SystemTime};
 use kv_core::VaultError;
 use kv_core::crypto::KdfParams;
 use kv_core::crypto::fill_random;
-use kv_core::policy::{Decision, DenyReason, Operation, evaluate, http_target};
+use kv_core::policy::{Decision, DenyReason, Mode, Operation, evaluate, http_target};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlErrorCode, ControlRequest,
-    ControlResponse, ExecCall, HttpCall, Overview, PolicyPatch, Status,
+    AgentErrorCode, AgentRequest, AgentResponse, Approval, ControlCommand, ControlErrorCode,
+    ControlRequest, ControlResponse, ExecCall, HttpCall, Overview, PolicyPatch, SessionInfo,
+    Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 use kv_core::vault::Vault;
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::audit::{Audit, Use};
@@ -56,6 +58,10 @@ const METHOD_OVERRIDES: [&str; 3] = [
 /// Open `kv tui` sessions kept at once; the oldest is dropped beyond this.
 const MAX_SESSIONS: usize = 16;
 
+/// Requests that may wait for approval at once. More are refused, so an
+/// agent cannot flood the approval list or the notifications.
+const MAX_PENDING: usize = 32;
+
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
     m_kib: 8,
@@ -69,6 +75,10 @@ pub struct Settings {
     pub idle_lock: Duration,
     /// Exit after receiving no requests for this long while locked.
     pub locked_exit: Duration,
+    /// How long a request waits for a decision in `kv tui`.
+    pub approval_wait: Duration,
+    /// Show a desktop notification when a request starts waiting.
+    pub notify: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +86,8 @@ impl Default for Settings {
         Self {
             idle_lock: Duration::from_secs(8 * 60 * 60),
             locked_exit: Duration::from_secs(10 * 60),
+            approval_wait: Duration::from_secs(60),
+            notify: false,
         }
     }
 }
@@ -104,6 +116,59 @@ pub struct Daemon {
     scrubber: Option<Arc<Scrubber>>,
     /// Tokens of open `kv tui` sessions. Cleared whenever the vault locks.
     sessions: Vec<SecretText>,
+    /// Requests waiting for a decision, oldest first.
+    approvals: Vec<Pending>,
+    next_approval: u64,
+    /// "Allow for the session" decisions. Cleared whenever the vault locks.
+    grants: Vec<Grant>,
+}
+
+/// A request waiting for approval, as the daemon keeps it.
+struct Pending {
+    id: u64,
+    tool: &'static str,
+    /// The handles that need approval.
+    ask: Vec<String>,
+    /// Every handle in the request, for the audit log.
+    handles: String,
+    summary: String,
+    detail: String,
+    cwd: Option<String>,
+    client: Option<String>,
+    session: Option<String>,
+    queued: Instant,
+    expires: Instant,
+    /// Dropping it without sending tells the waiting request the vault
+    /// locked.
+    reply: oneshot::Sender<Verdict>,
+}
+
+struct Grant {
+    session: String,
+    handle: String,
+    until: Instant,
+}
+
+/// What `prepare` knows about a request that has to wait for approval.
+struct Ask {
+    tool: &'static str,
+    ask: Vec<String>,
+    handles: String,
+    summary: String,
+    detail: String,
+    cwd: Option<String>,
+}
+
+/// An authorized request waiting for the user. The server waits on
+/// `verdict` for at most `wait`, then runs `then` if allowed.
+pub struct Waiting {
+    pub id: u64,
+    pub verdict: oneshot::Receiver<Verdict>,
+    /// The job to run once allowed, already marked as approved.
+    pub then: Prepared,
+    pub wait: Duration,
+    /// One line for the desktop notification. Never contains a value.
+    pub notice: String,
 }
 
 /// The outcome of an agent request: either an answer now, or authorized
@@ -112,6 +177,7 @@ pub enum Prepared {
     Reply(AgentResponse),
     Http(Box<HttpJob>),
     Exec(Box<ExecJob>),
+    Wait(Box<Waiting>),
 }
 
 struct Failure {
@@ -143,6 +209,9 @@ impl Daemon {
             last_request: now,
             scrubber: None,
             sessions: Vec::new(),
+            approvals: Vec::new(),
+            next_approval: 0,
+            grants: Vec::new(),
         }
     }
 
@@ -151,8 +220,22 @@ impl Daemon {
     }
 
     pub fn prepare(&mut self, request: AgentRequest, now: Instant) -> Prepared {
+        self.prepare_in(None, request, now)
+    }
+
+    /// Like `prepare`, for a request from a named agent session.
+    pub fn prepare_in(
+        &mut self,
+        session: Option<&SessionInfo>,
+        request: AgentRequest,
+        now: Instant,
+    ) -> Prepared {
         self.last_request = now;
         match request {
+            AgentRequest::Hello(_) => Prepared::Reply(agent_error(
+                AgentErrorCode::BadRequest,
+                "hello may only open a connection",
+            )),
             AgentRequest::Status => Prepared::Reply(AgentResponse::Status {
                 status: self.status(now),
             }),
@@ -171,12 +254,17 @@ impl Daemon {
                     .record("agent", "list_handles", None, agent_outcome(&response));
                 Prepared::Reply(response)
             }
-            AgentRequest::HttpRequest(call) => self.prepare_http(call, now),
-            AgentRequest::Exec(call) => self.prepare_exec(call, now),
+            AgentRequest::HttpRequest(call) => self.prepare_http(call, session, now),
+            AgentRequest::Exec(call) => self.prepare_exec(call, session, now),
         }
     }
 
-    fn prepare_http(&mut self, call: HttpCall, now: Instant) -> Prepared {
+    fn prepare_http(
+        &mut self,
+        call: HttpCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
         let summary = format!("{} {}", call.method, call.url);
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("http_request", &call.handle, &summary, decision, response)
@@ -217,8 +305,8 @@ impl Daemon {
             method: &call.method,
             url: url.as_str(),
         };
-        match evaluate(&secret, &operation) {
-            Decision::Allow => {}
+        let (decision, ask) = match evaluate(&secret, &operation) {
+            Decision::Allow => ("auto", false),
             Decision::Deny(reason) => {
                 return refuse(
                     self,
@@ -226,20 +314,43 @@ impl Daemon {
                     agent_error(AgentErrorCode::PolicyDenied, reason),
                 );
             }
-            Decision::Ask => return refuse(self, "denied", approval_needed(&call.handle)),
+            Decision::Ask => ("approved", !self.granted(session, &call.handle, now)),
+        };
+        if ask && self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
         }
         self.touch(now);
-        Prepared::Http(Box::new(HttpJob {
+        let detail = format!("{} {}", call.method, call.url);
+        let handle = call.handle.clone();
+        let job = Prepared::Http(Box::new(HttpJob {
             secret,
             url,
             call,
             scrubber: self.scrubber(),
             audit: self.audit.clone(),
             started: now,
-        }))
+            decision,
+        }));
+        if !ask {
+            return job;
+        }
+        let ask = Ask {
+            tool: "http_request",
+            ask: vec![handle.clone()],
+            handles: handle,
+            summary,
+            detail,
+            cwd: None,
+        };
+        self.queue(ask, job, session, now)
     }
 
-    fn prepare_exec(&mut self, call: ExecCall, now: Instant) -> Prepared {
+    fn prepare_exec(
+        &mut self,
+        call: ExecCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
         let handles = call.handles.join(",");
         let summary = call.argv.first().cloned().unwrap_or_default();
         let refuse = |daemon: &Self, decision, response| {
@@ -277,14 +388,20 @@ impl Daemon {
         }
         let mut env = Vec::new();
         let mut set_by: BTreeMap<String, &str> = BTreeMap::new();
-        let mut needs_approval = None;
+        let mut asks = Vec::new();
+        let mut asked = false;
         for name in &call.handles {
             let Some(secret) = vault.get(name) else {
                 return refuse(self, "invalid", unknown_handle(vault, name));
             };
             match evaluate(secret, &Operation::Exec { program }) {
                 Decision::Allow => {}
-                Decision::Ask => needs_approval = needs_approval.or(Some(name)),
+                Decision::Ask => {
+                    asked = true;
+                    if !self.granted(session, name, now) {
+                        asks.push(name.clone());
+                    }
+                }
                 Decision::Deny(reason) => {
                     let message = format!("{name}: {reason}");
                     return refuse(
@@ -313,11 +430,13 @@ impl Daemon {
                 }
             }
         }
-        if let Some(name) = needs_approval {
-            return refuse(self, "denied", approval_needed(name));
+        if !asks.is_empty() && self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
         }
         self.touch(now);
-        Prepared::Exec(Box::new(ExecJob {
+        let detail = serde_json::to_string(&call.argv).unwrap_or_default();
+        let cwd = call.cwd.display().to_string();
+        let job = Prepared::Exec(Box::new(ExecJob {
             handles: call.handles,
             argv: call.argv,
             cwd: call.cwd,
@@ -326,7 +445,150 @@ impl Daemon {
             scrubber: self.scrubber(),
             audit: self.audit.clone(),
             started: now,
+            decision: if asked { "approved" } else { "auto" },
+        }));
+        if asks.is_empty() {
+            return job;
+        }
+        let ask = Ask {
+            tool: "exec",
+            ask: asks,
+            handles,
+            summary,
+            detail,
+            cwd: Some(cwd),
+        };
+        self.queue(ask, job, session, now)
+    }
+
+    fn granted(&self, session: Option<&SessionInfo>, handle: &str, now: Instant) -> bool {
+        session.is_some_and(|session| {
+            self.grants
+                .iter()
+                .any(|g| g.session == session.id && g.handle == handle && g.until > now)
+        })
+    }
+
+    /// Adds `job` to the requests waiting for approval.
+    fn queue(
+        &mut self,
+        ask: Ask,
+        job: Prepared,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
+        self.next_approval += 1;
+        let id = self.next_approval;
+        let client = session.map(|s| printable(&s.client, 64));
+        let notice = format!(
+            "{} wants to use {} ({}). Open kv tui to answer.",
+            client.as_deref().unwrap_or("An agent"),
+            printable(&ask.ask.join(", "), 120),
+            ask.tool
+        );
+        let (reply, verdict) = oneshot::channel();
+        self.approvals.push(Pending {
+            id,
+            tool: ask.tool,
+            ask: ask.ask,
+            handles: ask.handles,
+            summary: ask.summary,
+            detail: printable(&ask.detail, 300),
+            cwd: ask.cwd.map(|cwd| printable(&cwd, 300)),
+            client,
+            session: session.map(|s| s.id.clone()),
+            queued: now,
+            expires: now + self.settings.approval_wait,
+            reply,
+        });
+        Prepared::Wait(Box::new(Waiting {
+            id,
+            verdict,
+            then: job,
+            wait: self.settings.approval_wait,
+            notice,
         }))
+    }
+
+    /// Ends the wait for a request nobody answered, and returns its reply.
+    /// `None` if it was already decided or the vault locked.
+    pub fn expire(&mut self, id: u64, now: Instant) -> Option<AgentResponse> {
+        let index = self.approvals.iter().position(|p| p.id == id)?;
+        let pending = self.approvals.remove(index);
+        self.record_unanswered(&pending, "denied", "approval_timeout", now);
+        Some(agent_error(
+            AgentErrorCode::ApprovalTimeout,
+            format!(
+                "no one approved the request within {}s",
+                self.settings.approval_wait.as_secs()
+            ),
+        ))
+    }
+
+    fn decide(&mut self, id: u64, verdict: Verdict, now: Instant) -> Result<Vec<String>, Failure> {
+        let index = self
+            .approvals
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| {
+                fail(
+                    ControlErrorCode::Invalid,
+                    "that request is no longer waiting for approval",
+                )
+            })?;
+        let pending = self.approvals.remove(index);
+        let mut warnings = Vec::new();
+        let vault = self
+            .vault
+            .as_mut()
+            .expect("deciding needs the vault unlocked");
+        match verdict {
+            Verdict::AllowOnce | Verdict::Deny => {}
+            Verdict::AllowSession => {
+                if let Some(session) = &pending.session {
+                    self.grants.retain(|g| g.until > now);
+                    for handle in &pending.ask {
+                        let ttl = vault
+                            .get(handle)
+                            .map_or(Duration::ZERO, |s| s.policy.grant_ttl);
+                        self.grants.push(Grant {
+                            session: session.clone(),
+                            handle: handle.clone(),
+                            until: now + ttl,
+                        });
+                    }
+                }
+            }
+            Verdict::DenyAlways => {
+                let patch = PolicyPatch {
+                    mode: Some(Mode::Deny),
+                    ..PolicyPatch::default()
+                };
+                for handle in &pending.ask {
+                    if vault.get(handle).is_some() {
+                        warnings.extend(set_policy(vault, handle, &patch)?);
+                    }
+                }
+            }
+        }
+        if matches!(verdict, Verdict::Deny | Verdict::DenyAlways) {
+            self.record_unanswered(&pending, "denied", "approval_denied", now);
+        }
+        // The request may have given up already; then nothing is waiting.
+        let _ = pending.reply.send(verdict);
+        Ok(warnings)
+    }
+
+    /// Audits a waiting request that ends without running.
+    fn record_unanswered(&self, pending: &Pending, decision: &str, outcome: &str, now: Instant) {
+        self.audit.record_use(&Use {
+            action: pending.tool,
+            handle: &pending.handles,
+            decision,
+            summary: &pending.summary,
+            outcome,
+            duration: now.saturating_duration_since(pending.queued),
+        });
     }
 
     /// Records a request that never reached the broker and returns its reply.
@@ -415,6 +677,11 @@ impl Daemon {
                 .authenticate(passphrase.as_ref(), None, now)
                 .map(drop)
                 .map(|()| self.open_session()),
+            ControlCommand::Decide { id, verdict } => self
+                .authenticate(passphrase.as_ref(), token.as_ref(), now)
+                .map(drop)
+                .and_then(|()| self.decide(id, verdict, now))
+                .map(done),
             // A session token is not enough to change the passphrase, and
             // the change ends every session.
             command @ ControlCommand::ChangePassphrase { .. } => self
@@ -457,11 +724,17 @@ impl Daemon {
         After::Continue
     }
 
-    /// Forgets the vault key, the scrubber and every session.
+    /// Forgets the vault key, the scrubber, every session and every grant,
+    /// and answers every waiting request with `vault_locked`.
     fn lock_vault(&mut self) {
         self.vault = None;
         self.scrubber = None;
         self.sessions.clear();
+        self.grants.clear();
+        let now = Instant::now();
+        for pending in std::mem::take(&mut self.approvals) {
+            self.record_unanswered(&pending, "locked", "vault_locked", now);
+        }
     }
 
     fn open_session(&mut self) -> ControlResponse {
@@ -492,10 +765,25 @@ impl Daemon {
         else {
             return session_ended();
         };
+        let approvals = self
+            .approvals
+            .iter()
+            .map(|p| Approval {
+                id: p.id,
+                client: p.client.clone(),
+                tool: p.tool.into(),
+                handles: p.ask.clone(),
+                detail: p.detail.clone(),
+                cwd: p.cwd.clone(),
+                can_grant: p.session.is_some(),
+                expires_in_secs: p.expires.saturating_duration_since(now).as_secs(),
+            })
+            .collect();
         ControlResponse::Overview {
             overview: Overview {
                 status: self.status(now),
                 handles: vault.secrets().iter().map(Secret::info).collect(),
+                approvals,
             },
         }
     }
@@ -524,6 +812,7 @@ impl Daemon {
                     .saturating_sub(self.idle_for(now, SystemTime::now()))
                     .as_secs()
             }),
+            pending_approvals: self.approvals.len(),
         }
     }
 
@@ -659,7 +948,8 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::Lock
         | ControlCommand::Stop
         | ControlCommand::OpenSession
-        | ControlCommand::Overview => Ok(Vec::new()),
+        | ControlCommand::Overview
+        | ControlCommand::Decide { .. } => Ok(Vec::new()),
     }
 }
 
@@ -846,6 +1136,7 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
         ControlCommand::Overview => ("overview", None),
+        ControlCommand::Decide { .. } => ("decide", None),
     }
 }
 
@@ -888,13 +1179,26 @@ fn unknown_handle(vault: &Vault, name: &str) -> AgentResponse {
     )
 }
 
-fn approval_needed(name: &str) -> AgentResponse {
+fn too_many_waiting() -> AgentResponse {
     agent_error(
         AgentErrorCode::ApprovalTimeout,
-        format!(
-            "{name} needs approval for each use, and kv cannot ask for approval yet (that arrives with `kv tui`). Ask the user whether to allow it with `kv policy {name} --mode auto`"
-        ),
+        "too many requests are already waiting for approval; try again shortly",
     )
+}
+
+/// Agent-supplied text for the terminal: control characters, which could
+/// drive the user's terminal, become U+FFFD, and long text is cut.
+fn printable(text: &str, max_chars: usize) -> String {
+    let mut out: String = text
+        .chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .take(max_chars)
+        .collect();
+    if text.chars().count() > max_chars {
+        out.pop();
+        out.push('…');
+    }
+    out
 }
 
 fn check_method(method: &str) -> Result<(), String> {

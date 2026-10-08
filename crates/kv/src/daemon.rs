@@ -6,4 +6,4 @@ mod server;
 mod state;
 
 pub use server::{Outcome, run};
-pub use state::{After, Daemon, Prepared, Settings};
+pub use state::{After, Daemon, Prepared, Settings, Waiting};

@@ -8,5 +8,6 @@ pub mod daemon;
 pub mod frame;
 pub mod ipc;
 pub mod mcp;
+pub mod notify;
 pub mod paths;
 pub mod throttle;

@@ -27,10 +27,21 @@ pub const MAX_OUTPUT_LEN: usize = 256 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentRequest {
+    /// Names the agent session for the rest of the connection, so approvals
+    /// can show who is asking and session grants can apply. Gets no reply.
+    Hello(SessionInfo),
     ListHandles,
     Status,
     HttpRequest(HttpCall),
     Exec(ExecCall),
+}
+
+/// Who is asking, as `kv mcp` reports it. The id is random per `kv mcp`
+/// process; the client name comes from the MCP client and is self-reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub client: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +116,9 @@ pub struct Status {
     pub handle_count: Option<usize>,
     /// Seconds until the idle timeout locks the vault, while unlocked.
     pub locks_in_secs: Option<u64>,
+    /// Agent requests waiting for a decision in `kv tui`.
+    #[serde(default)]
+    pub pending_approvals: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,9 +129,9 @@ pub enum AgentErrorCode {
     BadRequest,
     UnknownHandle,
     PolicyDenied,
-    /// The handle needs approval. Until `kv tui` exists, these requests
-    /// fail at once.
+    /// No decision in time, or too many requests already waiting.
     ApprovalTimeout,
+    ApprovalDenied,
     UpstreamError,
 }
 
@@ -131,6 +145,7 @@ impl AgentErrorCode {
             Self::UnknownHandle => "unknown_handle",
             Self::PolicyDenied => "policy_denied",
             Self::ApprovalTimeout => "approval_timeout",
+            Self::ApprovalDenied => "approval_denied",
             Self::UpstreamError => "upstream_error",
         }
     }
@@ -180,9 +195,27 @@ pub enum ControlCommand {
     /// Unlocks if needed and replies with a session token that works until
     /// the vault locks. Needs the passphrase.
     OpenSession,
-    /// Status and handles in one reply, for `kv tui` to poll. Not counted as
-    /// use of the vault and not audited.
+    /// Status, handles and waiting requests in one reply, for `kv tui` to
+    /// poll. Not counted as use of the vault and not audited.
     Overview,
+    /// Answers a request waiting for approval.
+    Decide {
+        id: u64,
+        verdict: Verdict,
+    },
+}
+
+/// The user's answer to a request waiting for approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    AllowOnce,
+    /// Allows this request, and the same handles from the same agent session
+    /// for each handle's `grant_ttl`.
+    AllowSession,
+    Deny,
+    /// Denies, and sets the handles to `mode: deny`.
+    DenyAlways,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +259,29 @@ pub enum ControlErrorCode {
 pub struct Overview {
     pub status: Status,
     pub handles: Vec<HandleInfo>,
+    #[serde(default)]
+    pub approvals: Vec<Approval>,
+}
+
+/// A request waiting for approval. Text that came from the agent has
+/// control characters replaced and is cut to a safe length.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub id: u64,
+    /// Self-reported by the MCP client.
+    pub client: Option<String>,
+    /// `http_request` or `exec`.
+    pub tool: String,
+    /// The handles that need approval.
+    pub handles: Vec<String>,
+    /// Method and URL, or the argv as a JSON array.
+    pub detail: String,
+    /// Working directory, for `exec`.
+    pub cwd: Option<String>,
+    /// Whether `allow_session` can grant anything: the request named its
+    /// agent session.
+    pub can_grant: bool,
+    pub expires_in_secs: u64,
 }
 
 /// A partial policy update: only the fields that are `Some` change.

@@ -8,15 +8,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlErrorCode, ControlRequest, ControlResponse,
+    SessionInfo, Verdict,
 };
 use tokio::sync::watch;
 
 use super::harden;
-use super::state::{After, Daemon, Prepared, Settings};
+use super::state::{After, Daemon, Prepared, Settings, Waiting};
 use crate::audit::Audit;
 use crate::broker;
 use crate::frame::{read_frame, write_frame};
 use crate::ipc::{self, ServerStream};
+use crate::notify;
 use crate::paths::Paths;
 
 type Shared = Arc<Mutex<Daemon>>;
@@ -66,7 +68,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         tokio::select! {
             accepted = agent.accept() => match accepted {
                 Ok(stream) => {
-                    tokio::spawn(serve_agent(stream, daemon.clone(), http.clone()));
+                    tokio::spawn(serve_agent(stream, daemon.clone(), http.clone(), settings.notify));
                 }
                 Err(e) => accept_failed("agent", e).await,
             },
@@ -91,7 +93,13 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     Ok(Outcome::Stopped)
 }
 
-async fn serve_agent(mut stream: ServerStream, daemon: Shared, http: reqwest::Client) {
+async fn serve_agent(
+    mut stream: ServerStream,
+    daemon: Shared,
+    http: reqwest::Client,
+    notify: bool,
+) {
+    let mut session: Option<SessionInfo> = None;
     loop {
         let request: AgentRequest = match read_frame(&mut stream).await {
             Ok(Some(request)) => request,
@@ -106,19 +114,88 @@ async fn serve_agent(mut stream: ServerStream, daemon: Shared, http: reqwest::Cl
             }
             Err(_) => return,
         };
-        let daemon = daemon.clone();
-        let prepared =
-            tokio::task::spawn_blocking(move || lock(&daemon).prepare(request, Instant::now()))
-                .await;
+        if let AgentRequest::Hello(info) = request {
+            if info.id.len() > 128 || info.client.len() > 1024 {
+                let response = AgentResponse::Error {
+                    code: AgentErrorCode::BadRequest,
+                    message: "the session id or client name is too long".into(),
+                };
+                let _ = write_frame(&mut stream, &response).await;
+                return;
+            }
+            session = Some(info);
+            continue;
+        }
+        let shared = daemon.clone();
+        let asking = session.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            lock(&shared).prepare_in(asking.as_ref(), request, Instant::now())
+        })
+        .await;
         let Ok(prepared) = prepared else { return };
         let response = match prepared {
-            Prepared::Reply(response) => response,
-            Prepared::Http(job) => broker::http::send(&http, *job).await,
-            Prepared::Exec(job) => broker::exec::run(*job).await,
+            Prepared::Wait(waiting) => {
+                if notify {
+                    notify::approval_needed(waiting.notice.clone());
+                }
+                wait_then_run(&daemon, &http, *waiting).await
+            }
+            prepared => run_job(prepared, &http).await,
         };
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }
+    }
+}
+
+async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
+    match prepared {
+        Prepared::Reply(response) => response,
+        Prepared::Http(job) => broker::http::send(http, *job).await,
+        Prepared::Exec(job) => broker::exec::run(*job).await,
+        // `Waiting::then` is always a job; it never waits twice.
+        Prepared::Wait(_) => AgentResponse::Error {
+            code: AgentErrorCode::UpstreamError,
+            message: "internal error: a request waited twice".into(),
+        },
+    }
+}
+
+/// Waits for the user's decision without holding the daemon lock, then runs
+/// the job or explains why not.
+async fn wait_then_run(daemon: &Shared, http: &reqwest::Client, waiting: Waiting) -> AgentResponse {
+    let Waiting {
+        id,
+        mut verdict,
+        then,
+        wait,
+        ..
+    } = waiting;
+    let decided = match tokio::time::timeout(wait, &mut verdict).await {
+        Ok(decided) => decided.ok(),
+        Err(_) => {
+            let shared = daemon.clone();
+            let expired =
+                tokio::task::spawn_blocking(move || lock(&shared).expire(id, Instant::now())).await;
+            if let Ok(Some(response)) = expired {
+                return response;
+            }
+            // Decided, or locked, just as the wait ran out.
+            verdict.try_recv().ok()
+        }
+    };
+    match decided {
+        Some(Verdict::AllowOnce | Verdict::AllowSession) => run_job(then, http).await,
+        Some(Verdict::Deny | Verdict::DenyAlways) => AgentResponse::Error {
+            code: AgentErrorCode::ApprovalDenied,
+            message: "the user denied the request".into(),
+        },
+        None => AgentResponse::Error {
+            code: AgentErrorCode::VaultLocked,
+            message:
+                "the vault was locked before the request was approved; ask the user to unlock it"
+                    .into(),
+        },
     }
 }
 

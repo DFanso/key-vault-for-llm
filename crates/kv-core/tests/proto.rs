@@ -4,7 +4,8 @@ use std::time::Duration;
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, Status,
+    ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, SessionInfo,
+    Status, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -63,6 +64,7 @@ fn agent_responses_never_contain_secret_values() {
                 locked: false,
                 handle_count: Some(secrets.len()),
                 locks_in_secs: Some(60),
+                pending_approvals: 0,
             },
         },
     ];
@@ -216,6 +218,7 @@ fn error_code_names_match_the_wire_format() {
         AgentErrorCode::UnknownHandle,
         AgentErrorCode::PolicyDenied,
         AgentErrorCode::ApprovalTimeout,
+        AgentErrorCode::ApprovalDenied,
         AgentErrorCode::UpstreamError,
     ] {
         assert_eq!(
@@ -259,4 +262,41 @@ fn session_tokens_never_show_in_debug_output() {
     for printed in [format!("{request:?}"), format!("{response:?}")] {
         assert!(!printed.contains(&token), "{printed}");
     }
+}
+
+#[test]
+fn hello_names_the_agent_session() {
+    let hello = AgentRequest::Hello(SessionInfo {
+        id: "abc".into(),
+        client: "claude-code".into(),
+    });
+    let json = serde_json::to_string(&hello).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"hello","id":"abc","client":"claude-code"}"#
+    );
+}
+
+#[test]
+fn verdicts_use_snake_case_names() {
+    let json = serde_json::to_string(&[
+        Verdict::AllowOnce,
+        Verdict::AllowSession,
+        Verdict::Deny,
+        Verdict::DenyAlways,
+    ])
+    .unwrap();
+    assert_eq!(
+        json,
+        r#"["allow_once","allow_session","deny","deny_always"]"#
+    );
+}
+
+#[test]
+fn a_status_from_before_approvals_still_parses() {
+    let status: Status = serde_json::from_str(
+        r#"{"vault_exists":true,"locked":true,"handle_count":null,"locks_in_secs":null}"#,
+    )
+    .unwrap();
+    assert_eq!(status.pending_approvals, 0);
 }

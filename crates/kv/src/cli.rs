@@ -76,6 +76,10 @@ enum Command {
         /// Started by another command: exit quietly if a daemon already runs
         #[arg(long, hide = true)]
         autostart: bool,
+        /// Show a desktop notification when a request waits for approval:
+        /// on or off. Daemons started on demand read KV_NOTIFY.
+        #[arg(long, env = "KV_NOTIFY", default_value = "on", value_parser = clap::builder::BoolishValueParser::new())]
+        notify: bool,
     },
 }
 
@@ -228,12 +232,15 @@ async fn run(cli: Cli) -> Result<()> {
             idle_lock,
             locked_exit,
             autostart,
+            notify,
         } => {
             let outcome = daemon::run(
                 paths,
                 Settings {
                     idle_lock,
                     locked_exit,
+                    notify,
+                    ..Settings::default()
                 },
             )
             .await?;
@@ -272,14 +279,14 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Status => {
-            match client::agent(&paths, &AgentRequest::Status).await? {
+            match client::agent(&paths, None, &AgentRequest::Status).await? {
                 AgentResponse::Status { status } => println!("{}", describe_status(&status)),
                 other => return Err(unexpected(&other)),
             }
             Ok(())
         }
         Command::List { json } => {
-            let handles = match client::agent(&paths, &AgentRequest::ListHandles).await? {
+            let handles = match client::agent(&paths, None, &AgentRequest::ListHandles).await? {
                 AgentResponse::Handles { handles } => handles,
                 AgentResponse::Error { message, .. } => return Err(CliError(message)),
                 other => return Err(unexpected(&other)),
@@ -522,13 +529,21 @@ fn describe_status(status: &Status) -> String {
     }
     let count = status.handle_count.unwrap_or(0);
     let plural = if count == 1 { "" } else { "s" };
-    match status.locks_in_secs {
+    let mut line = match status.locks_in_secs {
         Some(secs) => format!(
             "unlocked: {count} handle{plural}, locks after {} unused",
             humantime::format_duration(Duration::from_secs(secs))
         ),
         None => format!("unlocked: {count} handle{plural}"),
+    };
+    match status.pending_approvals {
+        0 => {}
+        1 => line.push_str("\n1 request is waiting for approval: run `kv tui`"),
+        n => line.push_str(&format!(
+            "\n{n} requests are waiting for approval: run `kv tui`"
+        )),
     }
+    line
 }
 
 fn handle_table(handles: &[HandleInfo]) -> String {
