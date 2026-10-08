@@ -7,5 +7,6 @@ pub mod client;
 pub mod daemon;
 pub mod frame;
 pub mod ipc;
+pub mod mcp;
 pub mod paths;
 pub mod throttle;

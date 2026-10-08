@@ -62,6 +62,8 @@ enum Command {
     },
     /// Change the vault passphrase
     Passwd,
+    /// Serve MCP on stdin and stdout, for agents such as Claude Code
+    Mcp,
     /// Run the daemon in the foreground (other commands start it on demand)
     Daemon {
         /// Lock the vault after it has gone unused for this long. Daemons
@@ -345,6 +347,10 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
             println!("updated {name}");
+            Ok(())
+        }
+        Command::Mcp => {
+            crate::mcp::serve(paths).await?;
             Ok(())
         }
         Command::Passwd => {
