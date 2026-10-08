@@ -67,10 +67,16 @@ impl Field {
     }
 
     pub fn with_choice(mut self, option: &str) -> Self {
+        self.set_choice(option);
+        self
+    }
+
+    /// Selects `option` in a choice field, or the first one if it has no
+    /// such option.
+    pub fn set_choice(&mut self, option: &str) {
         if let Input::Choice(options) = self.input {
             self.choice = options.iter().position(|o| *o == option).unwrap_or(0);
         }
-        self
     }
 
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
@@ -156,6 +162,22 @@ impl Form {
             .iter()
             .find(|f| f.key == key)
             .unwrap_or_else(|| panic!("the form has no field {key}"))
+    }
+
+    pub fn field_mut(&mut self, key: &str) -> &mut Field {
+        self.fields
+            .iter_mut()
+            .find(|f| f.key == key)
+            .unwrap_or_else(|| panic!("the form has no field {key}"))
+    }
+
+    /// Puts the focus on a field, if it is shown.
+    pub fn focus_on(&mut self, key: &str) {
+        if let Some(index) = self.fields.iter().position(|f| f.key == key)
+            && self.is_shown(index)
+        {
+            self.focus = index;
+        }
     }
 
     pub fn has(&self, key: &str) -> bool {

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use kv_core::policy::Mode;
-use kv_core::proto::{Approval, Overview};
+use kv_core::proto::{Approval, Overview, RequestedHandle};
 use kv_core::secret::HandleInfo;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -120,11 +120,23 @@ fn status_line(overview: Option<&Overview>) -> Line<'static> {
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     }
+    if !overview.handle_requests.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {} requested", overview.handle_requests.len()),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
     Line::from(spans)
 }
 
 fn tab_line(app: &App) -> Line<'static> {
     let waiting = app.overview().map_or(0, |o| o.approvals.len());
+    let requested = app.overview().map_or(0, |o| o.handle_requests.len());
+    let handles = if requested > 0 {
+        format!("2 Handles ({requested} requested)")
+    } else {
+        "2 Handles".into()
+    };
     let tab = |label: String, active: bool| {
         let style = if active {
             Style::new().add_modifier(Modifier::REVERSED)
@@ -139,7 +151,7 @@ fn tab_line(app: &App) -> Line<'static> {
             app.tab() == Tab::Approvals,
         ),
         Span::raw(" "),
-        tab("2 Handles".into(), app.tab() == Tab::Handles),
+        tab(handles, app.tab() == Tab::Handles),
         Span::raw(" "),
         tab("3 Audit".into(), app.tab() == Tab::Audit),
     ])
@@ -225,19 +237,58 @@ fn approval_lines(approval: &Approval, selected: bool) -> Vec<Line<'static>> {
 }
 
 fn draw_handles(frame: &mut Frame, app: &App, area: Rect) {
-    let handles = app.overview().map_or(&[][..], |o| &o.handles[..]);
+    let (requests, handles) = app.overview().map_or((&[][..], &[][..]), |o| {
+        (&o.handle_requests[..], &o.handles[..])
+    });
     let block = Block::bordered().title(" Handles ");
-    if handles.is_empty() {
+    if requests.is_empty() && handles.is_empty() {
         let text = Line::styled("No handles yet. Press n to add one.", dim());
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     }
-    let lines: Vec<Line> = handles
-        .iter()
-        .enumerate()
-        .map(|(index, handle)| handle_line(handle, index == app.selected_handle()))
-        .collect();
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    let selected = app.selected_handle();
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        lines.extend(request_lines(request, index == selected));
+    }
+    if !requests.is_empty() && !handles.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    for (index, handle) in handles.iter().enumerate() {
+        lines.push(handle_line(handle, requests.len() + index == selected));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// A handle an agent asked for: what it would be, then who asked and why.
+fn request_lines(requested: &RequestedHandle, selected: bool) -> Vec<Line<'static>> {
+    let request = &requested.request;
+    let kind = format!("{:?}", request.kind).to_lowercase();
+    let marker = if selected { "▶ " } else { "  " };
+    let mut text = format!("{marker}{:<20} {kind:<9} requested", request.name);
+    if !request.description.is_empty() {
+        text.push_str(&format!(" {}", request.description));
+    }
+    let style = Style::new().fg(Color::Yellow);
+    let first = if selected {
+        Line::styled(text, style.add_modifier(Modifier::BOLD))
+    } else {
+        Line::styled(text, style)
+    };
+    let client = requested.client.as_deref().map_or_else(
+        || "an agent with no session".to_owned(),
+        |client| format!("{client} (self-reported)"),
+    );
+    let mut why = format!("    asked by {client}");
+    if !request.reason.is_empty() {
+        why.push_str(&format!(": {}", request.reason));
+    }
+    vec![first, Line::styled(why, dim())]
 }
 
 fn handle_line(handle: &HandleInfo, selected: bool) -> Line<'static> {
@@ -406,8 +457,16 @@ fn key_hints(app: &App) -> String {
     }
     if app.tab() == Tab::Handles {
         hints.push("n new");
-        if app.overview().is_some_and(|o| !o.handles.is_empty()) {
-            hints.extend(["e edit", "p policy", "x remove", "↑↓ select"]);
+        let (requests, handles) = app
+            .overview()
+            .map_or((0, 0), |o| (o.handle_requests.len(), o.handles.len()));
+        if app.selected_handle() < requests {
+            hints.extend(["Enter fill in", "x dismiss"]);
+        } else if handles > 0 {
+            hints.extend(["e edit", "p policy", "x remove"]);
+        }
+        if requests + handles > 1 {
+            hints.push("↑↓ select");
         }
     }
     hints.extend(["1/2/3 tabs", "L lock", "q quit"]);

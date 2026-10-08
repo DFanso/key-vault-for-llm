@@ -44,6 +44,8 @@ pub enum Effect {
         patch: PolicyPatch,
     },
     Remove(String),
+    /// Drops an agent's handle request.
+    Dismiss(u64),
     Lock,
     Quit,
 }
@@ -81,7 +83,8 @@ pub struct App {
     /// not position, so a request leaving the list never shifts a key press
     /// onto one the user has not read.
     selected: Option<u64>,
-    /// Index into the handles.
+    /// Index into the handles tab's rows: the handle requests, then the
+    /// handles.
     selected_handle: usize,
     editor: Option<Editor>,
     /// The handle waiting for a yes before it is removed.
@@ -153,7 +156,8 @@ impl App {
         self.selected
     }
 
-    /// The handle the edit keys act on.
+    /// The row of the handles tab the keys act on: handle requests come
+    /// first, then handles.
     pub fn selected_handle(&self) -> usize {
         self.selected_handle
     }
@@ -211,8 +215,8 @@ impl App {
                     None if was_empty => self.selected = ids.first().copied(),
                     _ => {}
                 }
-                let last = overview.handles.len().saturating_sub(1);
-                self.selected_handle = self.selected_handle.min(last);
+                let rows = overview.handle_requests.len() + overview.handles.len();
+                self.selected_handle = self.selected_handle.min(rows.saturating_sub(1));
                 self.overview = Some(overview);
             }
             Outcome::Audit(entries) => self.audit = entries,
@@ -299,7 +303,7 @@ impl App {
             }
             _ => match self.tab {
                 Tab::Approvals => return self.approvals_key(key),
-                Tab::Handles => self.handles_key(key),
+                Tab::Handles => return self.handles_key(key),
                 Tab::Audit => {}
             },
         }
@@ -351,31 +355,41 @@ impl App {
         })
     }
 
-    fn handles_key(&mut self, key: KeyEvent) {
-        let handles = self.overview.as_ref().map_or(&[][..], |o| &o.handles[..]);
-        let selected = handles.get(self.selected_handle);
-        let (form, purpose) = match (key.code, selected) {
-            (KeyCode::Up | KeyCode::Char('k'), _) => {
+    fn handles_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        let (requests, handles) = self.overview.as_ref().map_or((&[][..], &[][..]), |o| {
+            (&o.handle_requests[..], &o.handles[..])
+        });
+        let rows = requests.len() + handles.len();
+        let request = requests.get(self.selected_handle);
+        let handle = self
+            .selected_handle
+            .checked_sub(requests.len())
+            .and_then(|i| handles.get(i));
+        let (form, purpose) = match (key.code, request, handle) {
+            (KeyCode::Up | KeyCode::Char('k'), ..) => {
                 self.selected_handle = self.selected_handle.saturating_sub(1);
-                return;
+                return None;
             }
-            (KeyCode::Down | KeyCode::Char('j'), _) => {
-                let last = handles.len().saturating_sub(1);
-                self.selected_handle = (self.selected_handle + 1).min(last);
-                return;
+            (KeyCode::Down | KeyCode::Char('j'), ..) => {
+                self.selected_handle = (self.selected_handle + 1).min(rows.saturating_sub(1));
+                return None;
             }
-            (KeyCode::Char('n'), _) => (edit::new_handle(), Purpose::Add),
-            (KeyCode::Char('e'), Some(handle)) => {
+            (KeyCode::Char('n'), ..) => (edit::new_handle(), Purpose::Add),
+            (KeyCode::Enter | KeyCode::Char('e'), Some(request), _) => {
+                (edit::requested_handle(request), Purpose::Add)
+            }
+            (KeyCode::Char('x'), Some(request), _) => return Some(Effect::Dismiss(request.id)),
+            (KeyCode::Char('e'), _, Some(handle)) => {
                 (edit::edit_handle(handle), Purpose::Edit(handle.clone()))
             }
-            (KeyCode::Char('p'), Some(handle)) => {
+            (KeyCode::Char('p'), _, Some(handle)) => {
                 (edit::edit_policy(handle), Purpose::Policy(handle.clone()))
             }
-            (KeyCode::Char('x'), Some(handle)) => {
+            (KeyCode::Char('x'), _, Some(handle)) => {
                 self.removing = Some(handle.name.clone());
-                return;
+                return None;
             }
-            _ => return,
+            _ => return None,
         };
         self.message = None;
         self.editor = Some(Editor {
@@ -383,6 +397,7 @@ impl App {
             purpose,
             saving: false,
         });
+        None
     }
 
     fn form_key(&mut self, key: KeyEvent) -> Option<Effect> {

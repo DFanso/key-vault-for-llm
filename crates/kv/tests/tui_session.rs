@@ -5,9 +5,11 @@ mod live;
 
 use std::time::{Duration, Instant};
 
+use kv::client;
 use kv::tui::Driver;
 use kv::tui::app::{App, Effect, Outcome, Screen};
-use kv_core::proto::{AgentResponse, ControlCommand};
+use kv_core::proto::{AgentRequest, AgentResponse, ControlCommand, HandleRequest, SessionInfo};
+use kv_core::secret::SecretKind;
 use live::{Daemon, PASS};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -157,4 +159,70 @@ async fn the_driver_reads_the_daemons_audit_log() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// What an agent's `request_handle` sends.
+async fn request_handle(daemon: &Daemon, name: &str) {
+    let session = SessionInfo {
+        id: "session-1".into(),
+        client: "request test".into(),
+    };
+    let request = AgentRequest::RequestHandle(HandleRequest {
+        name: name.into(),
+        kind: SecretKind::Http,
+        description: "Staging API".into(),
+        reason: "to check the staging deploy".into(),
+        auth: None,
+        base_url: false,
+        allowed_hosts: vec!["staging.example.com".into()],
+        env_vars: Vec::new(),
+        allowed_cmds: Vec::new(),
+    });
+    let response = client::agent(&daemon.paths, Some(&session), &request)
+        .await
+        .unwrap();
+    assert_eq!(response, AgentResponse::Requested { name: name.into() });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requested_handle_is_finished_or_dismissed_in_the_tui() {
+    let daemon = Daemon::start().await;
+    let mut driver = Driver::new(daemon.paths.clone());
+    let mut app = App::new();
+    unlock(&mut app, &mut driver, PASS).await;
+    request_handle(&daemon, "staging").await;
+    refresh(&mut app, &mut driver).await;
+    press(&mut app, &mut driver, KeyCode::Char('2')).await;
+    let requests = &app.overview().unwrap().handle_requests;
+    assert_eq!(requests[0].client.as_deref(), Some("request test"));
+
+    press(&mut app, &mut driver, KeyCode::Enter).await;
+    assert_eq!(app.form().unwrap().focused(), Some("token"));
+    for c in "staging-token-0123456789".chars() {
+        press(&mut app, &mut driver, KeyCode::Char(c)).await;
+    }
+    while app.form().unwrap().focused().is_some() {
+        press(&mut app, &mut driver, KeyCode::Tab).await;
+    }
+    press(&mut app, &mut driver, KeyCode::Enter).await;
+    assert!(app.form().is_none(), "{:?}", app.message());
+    refresh(&mut app, &mut driver).await;
+    let overview = app.overview().unwrap();
+    assert!(overview.handle_requests.is_empty(), "adding answers it");
+    let added = overview
+        .handles
+        .iter()
+        .find(|h| h.name == "staging")
+        .unwrap();
+    assert_eq!(added.allowed_hosts, ["staging.example.com"]);
+
+    request_handle(&daemon, "other").await;
+    refresh(&mut app, &mut driver).await;
+    press(&mut app, &mut driver, KeyCode::Up).await;
+    press(&mut app, &mut driver, KeyCode::Up).await;
+    press(&mut app, &mut driver, KeyCode::Char('x')).await;
+    refresh(&mut app, &mut driver).await;
+    let overview = app.overview().unwrap();
+    assert!(overview.handle_requests.is_empty(), "{:?}", app.message());
+    assert_eq!(overview.handles.len(), 2, "dismissing removes no handle");
 }
