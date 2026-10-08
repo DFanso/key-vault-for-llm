@@ -2,7 +2,7 @@
 //! talks to a real daemon in a temporary `KV_HOME`.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use rmcp::ServiceExt;
@@ -212,9 +212,18 @@ async fn an_agent_uses_handles_through_mcp_without_seeing_secrets() {
     assert!(!failed, "{output}");
     assert!(output.contains("secret=[kv:tool]"), "{output}");
     assert!(!output.contains(SECRET), "{output}");
-    let cwd = canonical(project.path());
-    assert!(
-        output.contains(&format!("cwd={}", cwd.display()).replace('\\', "\\\\")),
+    // Compare canonical paths: Windows may report a short 8.3 name
+    // (RUNNER~1) and macOS a /var path that resolves to /private/var.
+    let reply: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let reported = reply["stdout"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("cwd="))
+        .unwrap_or_else(|| panic!("no cwd line: {output}"));
+    assert_eq!(
+        Path::new(reported).canonicalize().unwrap(),
+        project.path().canonicalize().unwrap(),
         "kv mcp's directory is the default cwd: {output}"
     );
 
@@ -241,10 +250,4 @@ async fn bad_arguments_are_tool_errors_not_crashes() {
     assert!(!failed, "{status}");
     assert!(status.contains("\"vault_exists\": false"), "{status}");
     client.cancel().await.unwrap();
-}
-
-fn canonical(path: &Path) -> PathBuf {
-    let path = path.canonicalize().unwrap();
-    // Windows canonical paths carry a \\?\ prefix that current_dir omits.
-    PathBuf::from(path.to_string_lossy().trim_start_matches(r"\\?\"))
 }
