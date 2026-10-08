@@ -186,3 +186,26 @@ fn a_base_url_is_scrubbed_and_never_shown_to_agents() {
     assert!(!json.contains("dokploy"), "{json}");
     assert!(!http_secret().info().takes_path);
 }
+
+#[test]
+fn a_database_host_is_scrubbed_unless_it_is_loopback() {
+    let values = |url: &str| -> Vec<String> {
+        pg_secret(url)
+            .sensitive_values()
+            .iter()
+            .map(|v| v.to_string())
+            .collect()
+    };
+    assert!(
+        values("postgres://app:pw-0123456789@kyc.postgres.database.azure.com/app")
+            .contains(&"kyc.postgres.database.azure.com".to_string())
+    );
+    for url in [
+        "postgres://app:pw-0123456789@localhost/app",
+        "postgres://app:pw-0123456789@127.0.0.1:5432/app",
+        "postgres://app:pw-0123456789@[::1]/app",
+    ] {
+        let host = url::Url::parse(url).unwrap().host_str().unwrap().to_owned();
+        assert!(!values(url).contains(&host), "{url}");
+    }
+}
