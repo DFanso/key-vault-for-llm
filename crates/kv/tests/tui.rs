@@ -84,6 +84,7 @@ fn overview(approvals: Vec<Approval>) -> Overview {
         },
         handles: vec![handle("openrouter", Mode::Ask)],
         approvals,
+        handle_requests: Vec::new(),
     }
 }
 

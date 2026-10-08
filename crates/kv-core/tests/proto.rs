@@ -316,3 +316,26 @@ fn update_fields_are_optional() {
         "{parsed:?}"
     );
 }
+
+#[test]
+fn a_handle_request_has_defaults_and_no_place_for_a_value() {
+    let parsed: AgentRequest =
+        serde_json::from_str(r#"{"type":"request_handle","name":"dokploy","kind":"http"}"#)
+            .unwrap();
+    match parsed {
+        AgentRequest::RequestHandle(request) => {
+            assert_eq!(request.name, "dokploy");
+            assert_eq!(request.kind, kv_core::secret::SecretKind::Http);
+            assert!(request.auth.is_none() && !request.base_url);
+            assert!(request.allowed_hosts.is_empty() && request.env_vars.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    for extra in [r#""token":"sk-123""#, r#""value":"x""#, r#""mode":"auto""#] {
+        let json = format!(r#"{{"type":"request_handle","name":"a","kind":"http",{extra}}}"#);
+        assert!(
+            serde_json::from_str::<AgentRequest>(&json).is_err(),
+            "{extra} must be refused, not ignored"
+        );
+    }
+}

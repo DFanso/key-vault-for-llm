@@ -12,11 +12,13 @@ use kv_core::crypto::fill_random;
 use kv_core::policy::{Decision, DenyReason, Mode, Operation, evaluate, http_target};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ControlCommand, ControlErrorCode,
-    ControlRequest, ControlResponse, ExecCall, HttpCall, Overview, PolicyPatch, SessionInfo,
-    Status, Verdict,
+    ControlRequest, ControlResponse, ExecCall, HandleRequest, HttpCall, Overview, PolicyPatch,
+    RequestedHandle, SessionInfo, Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
-use kv_core::secret::{AuthPlacement, Secret, SecretKind, SecretText, SecretValue};
+use kv_core::secret::{
+    AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
+};
 use kv_core::vault::Vault;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -61,6 +63,9 @@ const MAX_SESSIONS: usize = 16;
 /// Requests that may wait for approval at once. More are refused, so an
 /// agent cannot flood the approval list or the notifications.
 const MAX_PENDING: usize = 32;
+
+/// Handle requests kept for the user at once.
+const MAX_HANDLE_REQUESTS: usize = 16;
 
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
@@ -121,6 +126,10 @@ pub struct Daemon {
     next_approval: u64,
     /// "Allow for the session" decisions. Cleared whenever the vault locks.
     grants: Vec<Grant>,
+    /// Handles agents asked the user to add, oldest first. They hold no
+    /// secrets, so they outlast a lock.
+    handle_requests: Vec<RequestedHandle>,
+    next_request: u64,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -211,6 +220,8 @@ impl Daemon {
             sessions: Vec::new(),
             approvals: Vec::new(),
             next_approval: 0,
+            handle_requests: Vec::new(),
+            next_request: 0,
             grants: Vec::new(),
         }
     }
@@ -256,7 +267,108 @@ impl Daemon {
             }
             AgentRequest::HttpRequest(call) => self.prepare_http(call, session, now),
             AgentRequest::Exec(call) => self.prepare_exec(call, session, now),
+            AgentRequest::RequestHandle(request) => {
+                let name = printable(&request.name, 63);
+                let response = self.request_handle(session, request);
+                self.audit.record(
+                    "agent",
+                    "request_handle",
+                    Some(&name),
+                    agent_outcome(&response),
+                );
+                Prepared::Reply(response)
+            }
         }
+    }
+
+    /// Queues a handle for the user to add in `kv tui`, keeping only what
+    /// fits its kind and making agent text safe to show.
+    fn request_handle(
+        &mut self,
+        session: Option<&SessionInfo>,
+        mut request: HandleRequest,
+    ) -> AgentResponse {
+        let bad = |message: String| agent_error(AgentErrorCode::BadRequest, message);
+        if validate_handle(&request.name).is_err() {
+            return bad(
+                "a handle name is up to 63 lowercase letters, digits, - and _, starting with a letter or digit"
+                    .into(),
+            );
+        }
+        if let Some(vault) = &self.vault
+            && vault.get(&request.name).is_some()
+        {
+            return bad(format!(
+                "{} already exists; use it, or ask the user to change it in kv tui",
+                request.name
+            ));
+        }
+        let replaces = self
+            .handle_requests
+            .iter()
+            .position(|r| r.request.name == request.name);
+        if replaces.is_none() && self.handle_requests.len() >= MAX_HANDLE_REQUESTS {
+            return bad(format!(
+                "{MAX_HANDLE_REQUESTS} handle requests are already waiting; ask the user to open kv tui"
+            ));
+        }
+        request.description = printable(&request.description, 300);
+        request.reason = printable(&request.reason, 300);
+        let list = |items: Vec<String>, keep: &dyn Fn(&str) -> bool, max: usize| -> Vec<String> {
+            items
+                .iter()
+                .map(|item| printable(item.trim(), 253))
+                .filter(|item| !item.is_empty() && keep(item))
+                .take(max)
+                .collect()
+        };
+        if request.kind == SecretKind::Http {
+            request.auth = request.auth.map(|auth| match auth {
+                AuthPlacement::Header { name, template } => AuthPlacement::Header {
+                    name: printable(&name, 100),
+                    template: printable(&template, 200),
+                },
+                AuthPlacement::Query { param } => AuthPlacement::Query {
+                    param: printable(&param, 100),
+                },
+            });
+            request.allowed_hosts = list(request.allowed_hosts, &|_| true, 16);
+        } else {
+            request.auth = None;
+            request.base_url = false;
+            request.allowed_hosts.clear();
+        }
+        if request.kind == SecretKind::Env {
+            request.env_vars = list(request.env_vars, &is_variable_name, 32);
+            request.allowed_cmds = list(request.allowed_cmds, &|_| true, 16);
+        } else {
+            request.env_vars.clear();
+            request.allowed_cmds.clear();
+        }
+        let name = request.name.clone();
+        let requested = RequestedHandle {
+            id: {
+                self.next_request += 1;
+                self.next_request
+            },
+            client: session.map(|s| printable(&s.client, 64)),
+            request,
+        };
+        match replaces {
+            Some(index) => self.handle_requests[index] = requested,
+            None => self.handle_requests.push(requested),
+        }
+        AgentResponse::Requested { name }
+    }
+
+    /// Removes a handle request and returns its name.
+    fn dismiss_request(&mut self, id: u64) -> Result<String, Failure> {
+        let index = self
+            .handle_requests
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| fail(ControlErrorCode::Invalid, "that handle request is gone"))?;
+        Ok(self.handle_requests.remove(index).request.name)
     }
 
     fn prepare_http(
@@ -675,7 +787,7 @@ impl Daemon {
             return (self.overview(token.as_ref(), now), After::Continue);
         }
         self.scrubber = None;
-        let (action, handle) = describe(&command);
+        let (action, mut handle) = describe(&command);
         let mut after = After::Continue;
         let done = |warnings| ControlResponse::Done { warnings };
         let result = match command {
@@ -709,10 +821,29 @@ impl Daemon {
                     self.sessions.clear();
                     done(warnings)
                 }),
-            command => self
+            ControlCommand::DismissRequest { id } => self
                 .authenticate(passphrase.as_ref(), token.as_ref(), now)
-                .and_then(|vault| run_authenticated(vault, command))
-                .map(done),
+                .map(drop)
+                .and_then(|()| self.dismiss_request(id))
+                .map(|name| {
+                    handle = Some(name);
+                    done(Vec::new())
+                }),
+            command => {
+                // Adding a handle someone asked for answers the request.
+                let added = match &command {
+                    ControlCommand::Add { secret, .. } => Some(secret.name.clone()),
+                    _ => None,
+                };
+                self.authenticate(passphrase.as_ref(), token.as_ref(), now)
+                    .and_then(|vault| run_authenticated(vault, command))
+                    .map(|warnings| {
+                        if let Some(name) = added {
+                            self.handle_requests.retain(|r| r.request.name != name);
+                        }
+                        done(warnings)
+                    })
+            }
         };
         let response = result.unwrap_or_else(|failure| ControlResponse::Error {
             code: failure.code,
@@ -802,6 +933,7 @@ impl Daemon {
                 status: self.status(now),
                 handles: vault.secrets().iter().map(Secret::info).collect(),
                 approvals,
+                handle_requests: self.handle_requests.clone(),
             },
         }
     }
@@ -972,7 +1104,8 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::Stop
         | ControlCommand::OpenSession
         | ControlCommand::Overview
-        | ControlCommand::Decide { .. } => Ok(Vec::new()),
+        | ControlCommand::Decide { .. }
+        | ControlCommand::DismissRequest { .. } => Ok(Vec::new()),
     }
 }
 
@@ -1214,6 +1347,7 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::OpenSession => ("open_session", None),
         ControlCommand::Overview => ("overview", None),
         ControlCommand::Decide { .. } => ("decide", None),
+        ControlCommand::DismissRequest { .. } => ("dismiss_request", None),
     }
 }
 
@@ -1346,4 +1480,13 @@ fn agent_outcome(response: &AgentResponse) -> &'static str {
         AgentResponse::Error { .. } => "error",
         _ => "done",
     }
+}
+
+/// Letters, digits and `_`, not starting with a digit.
+fn is_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
