@@ -325,3 +325,68 @@ fn a_base_url_request_shows_its_path_not_the_address() {
     // The agent's path; the base path is part of the hidden address.
     assert_eq!(approval.detail, "GET /projects?all=1");
 }
+
+#[test]
+fn a_grant_ends_when_its_handle_is_removed() {
+    let mut f = fixture();
+    let token = f.token();
+    let agent = session("s1");
+    let granted = f.wait(Some(&agent), ask_get(), f.t0);
+    done(&f.decide(&token, granted.id, Verdict::AllowSession));
+    f.control(ControlCommand::Remove {
+        name: "openrouter".into(),
+    });
+    f.add(openrouter(Mode::Ask));
+    // A new handle of the same name is asked about afresh.
+    f.wait(Some(&agent), ask_get(), f.t0);
+}
+
+#[test]
+fn changing_a_handle_withdraws_the_requests_waiting_on_it() {
+    let mut f = fixture();
+    f.add(env_secret(
+        "aws",
+        &[("AWS_KEY", AWS_KEY)],
+        &["terraform"],
+        Mode::Ask,
+    ));
+    let token = f.token();
+    let mut changed = f.wait(Some(&session("s1")), ask_get(), f.t0);
+    let mut other = f.wait(
+        Some(&session("s1")),
+        AgentRequest::Exec(run(&["aws"], &["terraform"], std::env::temp_dir())),
+        f.t0,
+    );
+    done(&f.send(
+        None,
+        Some(&token),
+        ControlCommand::SetPolicy {
+            name: "openrouter".into(),
+            patch: kv_core::proto::PolicyPatch {
+                allowed_hosts: Some(vec!["evil.example".into()]),
+                ..Default::default()
+            },
+        },
+    ));
+    assert!(
+        changed.verdict.try_recv().is_err(),
+        "the old request can no longer be approved"
+    );
+    match f.daemon.take_ended(changed.id) {
+        Some(AgentResponse::Error { code, message }) => {
+            assert_eq!(code, AgentErrorCode::PolicyDenied);
+            assert!(message.contains("changed"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(f.daemon.take_ended(changed.id), None, "answered once");
+    let approvals = f.overview(&token).approvals;
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].id, other.id);
+    assert!(verdict(&mut other).is_none());
+    assert!(
+        f.audit_lines()
+            .iter()
+            .any(|l| l["decision"] == "withdrawn" && l["outcome"] == "handle_changed")
+    );
+}

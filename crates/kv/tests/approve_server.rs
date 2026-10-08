@@ -141,3 +141,26 @@ async fn a_request_whose_agent_hung_up_is_withdrawn() {
     let audit = std::fs::read_to_string(&daemon.paths.audit).unwrap();
     assert!(audit.contains(r#""outcome":"cancelled""#), "{audit}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_waiting_on_a_changed_handle_is_told_why() {
+    let daemon = Daemon::start().await;
+    let call = daemon.agent_call();
+    daemon.waiting_id().await;
+    daemon
+        .with_token(ControlCommand::SetPolicy {
+            name: "api".into(),
+            patch: kv_core::proto::PolicyPatch {
+                allow_plain_http: Some(false),
+                ..Default::default()
+            },
+        })
+        .await;
+    match call.await.unwrap() {
+        AgentResponse::Error { code, message } => {
+            assert_eq!(code, AgentErrorCode::PolicyDenied);
+            assert!(message.contains("changed"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -132,6 +132,9 @@ pub struct Daemon {
     next_approval: u64,
     /// "Allow for the session" decisions. Cleared whenever the vault locks.
     grants: Vec<Grant>,
+    /// Answers for requests withdrawn while they waited, for the server to
+    /// pick up. Oldest are dropped past `MAX_PENDING`.
+    ended: BTreeMap<u64, AgentResponse>,
     /// Handles agents asked the user to add, oldest first. They hold no
     /// secrets, so they outlast a lock.
     handle_requests: Vec<RequestedHandle>,
@@ -236,6 +239,7 @@ impl Daemon {
             next_request: 0,
             request_notice: None,
             role_checks: RoleChecks::default(),
+            ended: BTreeMap::new(),
             grants: Vec::new(),
         }
     }
@@ -772,6 +776,37 @@ impl Daemon {
         }))
     }
 
+    /// Drops what was decided about a handle that was added, changed or
+    /// removed: its grants, its role check, and the requests waiting on it,
+    /// which hold its old value and policy and so may not run.
+    fn handle_changed(&mut self, name: &str, now: Instant) {
+        self.grants.retain(|g| g.handle != name);
+        self.role_checks.forget(name);
+        let (stale, kept) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|p: &Pending| p.handles.split(',').any(|h| h == name));
+        self.approvals = kept;
+        for pending in stale {
+            self.record_unanswered(&pending, "withdrawn", "handle_changed", now);
+            self.ended.insert(
+                pending.id,
+                agent_error(
+                    AgentErrorCode::PolicyDenied,
+                    format!("{name} changed while the request waited; send it again"),
+                ),
+            );
+            while self.ended.len() > MAX_PENDING {
+                self.ended.pop_first();
+            }
+        }
+    }
+
+    /// Why a request stopped waiting without a decision, if it was
+    /// withdrawn; `None` means the vault locked.
+    pub fn take_ended(&mut self, id: u64) -> Option<AgentResponse> {
+        self.ended.remove(&id)
+    }
+
     /// Ends the wait for a request nobody answered, and returns its reply.
     /// `None` if it was already decided or the vault locked.
     pub fn expire(&mut self, id: u64, now: Instant) -> Option<AgentResponse> {
@@ -984,9 +1019,8 @@ impl Daemon {
                         if let Some(name) = added {
                             self.handle_requests.retain(|r| r.request.name != name);
                         }
-                        // A new URL or policy may mean a different role.
                         if let Some(name) = &handle {
-                            self.role_checks.forget(name);
+                            self.handle_changed(name, now);
                         }
                         done(warnings)
                     })
