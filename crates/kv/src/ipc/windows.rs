@@ -1,17 +1,21 @@
 use std::ffi::c_void;
 use std::io;
+use std::os::windows::io::AsRawHandle;
 use std::time::Duration;
 
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_BUSY, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_PIPE_BUSY, ERROR_SUCCESS, HANDLE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -22,8 +26,8 @@ pub type ClientStream = NamedPipeClient;
 
 pub struct Listener {
     name: String,
-    /// Security descriptor granting access to the current user only, as a
-    /// NUL-terminated UTF-16 SDDL string.
+    /// Security descriptor owned by and granting access to the current user
+    /// only, as a NUL-terminated UTF-16 SDDL string.
     sddl: Vec<u16>,
     next: NamedPipeServer,
 }
@@ -32,7 +36,7 @@ pub struct Listener {
 /// the name, which the daemon lock file should already have prevented.
 pub fn bind(endpoint: &Endpoint) -> io::Result<Listener> {
     let sid = current_user_sid()?;
-    let sddl: Vec<u16> = format!("D:P(A;;GA;;;{sid})")
+    let sddl: Vec<u16> = format!("O:{sid}D:P(A;;GA;;;{sid})")
         .encode_utf16()
         .chain(Some(0))
         .collect();
@@ -52,7 +56,16 @@ impl Listener {
     }
 }
 
+/// Opens the pipe and checks that the current user created it. Pipe names
+/// are machine-wide, so on a shared machine another account could create
+/// the name first and collect whatever the client sends.
 pub async fn connect(endpoint: &Endpoint) -> io::Result<ClientStream> {
+    let client = open(endpoint).await?;
+    ensure_owned_by(&client, &current_user_sid()?)?;
+    Ok(client)
+}
+
+async fn open(endpoint: &Endpoint) -> io::Result<ClientStream> {
     for _ in 0..40 {
         match ClientOptions::new().open(&endpoint.name) {
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
@@ -107,6 +120,43 @@ fn create(name: &str, sddl: &[u16], first: bool) -> io::Result<NamedPipeServer> 
     result
 }
 
+fn ensure_owned_by(pipe: &impl AsRawHandle, sid: &str) -> io::Result<()> {
+    let owner = owner_sid(pipe.as_raw_handle())?;
+    if owner == sid {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the kv pipe belongs to another account ({owner}); refusing to use it"),
+        ))
+    }
+}
+
+fn owner_sid(handle: HANDLE) -> io::Result<String> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `handle` is an open pipe handle. On success `owner` points into
+    // `descriptor`, a LocalAlloc'd buffer freed below after the SID is copied.
+    unsafe {
+        let status = GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let text = sid_to_string(owner);
+        LocalFree(descriptor);
+        text
+    }
+}
+
 /// The current user's SID as a string such as `S-1-5-21-...`.
 fn current_user_sid() -> io::Result<String> {
     // SAFETY: standard token query. Every handle and buffer is checked
@@ -126,16 +176,44 @@ fn current_user_sid() -> io::Result<String> {
             return Err(io::Error::last_os_error());
         }
         let user: TOKEN_USER = std::ptr::read_unaligned(buffer.as_ptr().cast());
-        let mut sid: *mut u16 = std::ptr::null_mut();
-        if ConvertSidToStringSidW(user.User.Sid, &mut sid) == 0 {
+        sid_to_string(user.User.Sid)
+    }
+}
+
+/// # Safety
+/// `sid` must point to a valid SID.
+unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: the caller guarantees `sid`; `text` is LocalAlloc'd on success
+    // and freed once after copying.
+    unsafe {
+        if ConvertSidToStringSidW(sid, &mut text) == 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut sid_len = 0;
-        while *sid.add(sid_len) != 0 {
-            sid_len += 1;
+        let mut len = 0;
+        while *text.add(len) != 0 {
+            len += 1;
         }
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(sid, sid_len));
-        LocalFree(sid.cast());
-        Ok(text)
+        let owned = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+        LocalFree(text.cast());
+        Ok(owned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pipes_owned_by_another_account_are_refused() {
+        let endpoint = Endpoint {
+            name: format!(r"\\.\pipe\kv-test-owner-{}", std::process::id()),
+        };
+        let _listener = bind(&endpoint).unwrap();
+        let client = open(&endpoint).await.unwrap();
+        let me = current_user_sid().unwrap();
+        assert!(ensure_owned_by(&client, &me).is_ok());
+        let error = ensure_owned_by(&client, "S-1-5-18").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 }
