@@ -119,6 +119,7 @@ fn overview(requests: Vec<HandleRequest>, handles: Vec<HandleInfo>) -> Overview 
                 request,
             })
             .collect(),
+        role_warnings: Default::default(),
     }
 }
 

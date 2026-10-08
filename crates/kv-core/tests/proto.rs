@@ -4,8 +4,8 @@ use std::time::Duration;
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, SessionInfo,
-    Status, Verdict,
+    DbCall, ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, Overview, PolicyPatch,
+    RedisReply, ResultSet, RowsReply, SessionInfo, Status, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -338,4 +338,53 @@ fn a_handle_request_has_defaults_and_no_place_for_a_value() {
             "{extra} must be refused, not ignored"
         );
     }
+}
+
+#[test]
+fn a_db_query_is_a_flat_tagged_object_with_an_optional_timeout() {
+    let request: AgentRequest =
+        serde_json::from_str(r#"{"type":"db_query","handle":"prod-db","query":"select 1"}"#)
+            .unwrap();
+    assert_eq!(
+        request,
+        AgentRequest::DbQuery(DbCall {
+            handle: "prod-db".into(),
+            query: "select 1".into(),
+            timeout_secs: None,
+        })
+    );
+}
+
+#[test]
+fn database_replies_round_trip() {
+    for response in [
+        AgentResponse::Rows(RowsReply {
+            results: vec![ResultSet {
+                columns: vec!["id".into(), "email".into()],
+                rows: vec![vec![Some("1".into()), None]],
+                rows_affected: Some(1),
+            }],
+            truncated: false,
+            warnings: vec!["the role can write".into()],
+        }),
+        AgentResponse::Redis(RedisReply {
+            value: serde_json::json!(["a", 1, null]),
+            truncated: true,
+        }),
+    ] {
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentResponse>(&json).unwrap(),
+            response
+        );
+    }
+}
+
+#[test]
+fn an_overview_from_before_role_warnings_still_parses() {
+    let overview: Overview = serde_json::from_str(
+        r#"{"status":{"vault_exists":true,"locked":false,"handle_count":0,"locks_in_secs":null},"handles":[]}"#,
+    )
+    .unwrap();
+    assert!(overview.role_warnings.is_empty());
 }

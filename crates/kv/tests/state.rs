@@ -83,7 +83,7 @@ impl Fixture {
     fn agent_at(&mut self, now: Instant, request: AgentRequest) -> AgentResponse {
         match self.daemon.prepare(request, now) {
             Prepared::Reply(response) => response,
-            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Wait(_) => {
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) | Prepared::Wait(_) => {
                 panic!("expected a reply, got a job")
             }
         }

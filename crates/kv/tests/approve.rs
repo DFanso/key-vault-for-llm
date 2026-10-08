@@ -28,6 +28,7 @@ fn job_decision(prepared: Prepared) -> &'static str {
     match prepared {
         Prepared::Http(job) => job.decision,
         Prepared::Exec(job) => job.decision,
+        Prepared::Db(job) => job.decision,
         Prepared::Reply(reply) => panic!("expected a job, got {reply:?}"),
         Prepared::Wait(_) => panic!("expected a job, got a wait"),
     }

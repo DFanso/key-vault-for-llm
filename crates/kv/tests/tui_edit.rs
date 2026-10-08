@@ -119,6 +119,7 @@ fn handles(handles: Vec<HandleInfo>) -> App {
         handles,
         approvals: Vec::new(),
         handle_requests: Vec::new(),
+        role_warnings: Default::default(),
     }));
     key(&mut app, '2');
     app

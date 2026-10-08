@@ -166,6 +166,7 @@ async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
         Prepared::Reply(response) => response,
         Prepared::Http(job) => broker::http::send(http, *job).await,
         Prepared::Exec(job) => broker::exec::run(*job).await,
+        Prepared::Db(job) => broker::db::run(*job).await,
         // `Waiting::then` is always a job; it never waits twice.
         Prepared::Wait(_) => AgentResponse::Error {
             code: AgentErrorCode::UpstreamError,

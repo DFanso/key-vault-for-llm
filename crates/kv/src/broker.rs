@@ -1,11 +1,11 @@
 //! Work an agent asked for, authorized by the daemon and run outside the
-//! daemon lock: HTTP requests and programs.
+//! daemon lock: HTTP requests, programs and database queries.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kv_core::proto::HttpCall;
+use kv_core::proto::{DbCall, HttpCall};
 use kv_core::scrub::Scrubber;
 use kv_core::secret::{Secret, SecretText};
 
@@ -13,9 +13,12 @@ use kv_core::proto::MAX_OUTPUT_LEN;
 
 use crate::audit::Audit;
 
+pub mod db;
 pub mod exec;
 pub mod http;
 mod process;
+
+pub use db::RoleChecks;
 
 /// An `http_request` that passed every check.
 pub struct HttpJob {
@@ -43,6 +46,21 @@ pub struct ExecJob {
     pub started: Instant,
     /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
     pub decision: &'static str,
+}
+
+/// A `db_query` that passed every check.
+pub struct DbJob {
+    pub secret: Secret,
+    pub call: DbCall,
+    pub timeout: Duration,
+    pub scrubber: Arc<Scrubber>,
+    pub audit: Audit,
+    pub started: Instant,
+    /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
+    pub decision: &'static str,
+    /// Where a read-only Postgres handle's role check is kept; the job runs
+    /// the check if this handle has none since the vault was unlocked.
+    pub role_checks: RoleChecks,
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
@@ -75,6 +93,15 @@ impl std::fmt::Debug for ExecJob {
         f.debug_struct("ExecJob")
             .field("handles", &self.handles)
             .field("program", &self.argv.first())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for DbJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbJob")
+            .field("handle", &self.secret.name)
+            .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
