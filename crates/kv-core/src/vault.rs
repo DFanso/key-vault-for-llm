@@ -94,22 +94,7 @@ impl Vault {
             Err(e) => return Err(e.into()),
         };
         let (header, aad, payload) = parse(&bytes)?;
-
-        let mut key = None;
-        for wrapped in &header.wrapped_keys {
-            let WrappedKey::Passphrase {
-                kdf,
-                salt,
-                nonce,
-                ciphertext,
-            } = wrapped;
-            let wrapping_key = crypto::derive_key(passphrase.as_bytes(), salt, *kdf)?;
-            if let Some(raw) = crypto::open(&wrapping_key, nonce, WRAP_AAD, ciphertext) {
-                key = Some(SymmetricKey::from_slice(&raw)?);
-                break;
-            }
-        }
-        let key = key.ok_or(VaultError::WrongPassphrase)?;
+        let key = unwrap_with_passphrase(&header.wrapped_keys, passphrase)?;
 
         let plaintext =
             crypto::open(&key, &header.payload_nonce, aad, payload).ok_or(VaultError::Corrupted)?;
@@ -151,6 +136,17 @@ impl Vault {
         let ciphertext = crypto::seal(key, &nonce, &out, &plaintext);
         out.extend_from_slice(&ciphertext);
         out
+    }
+
+    /// Checks `passphrase` against the vault's passphrase wrap without reading
+    /// the file. Costs one Argon2 derivation, like `unlock`.
+    pub fn verify_passphrase(&self, passphrase: &str) -> Result<(), VaultError> {
+        let key = unwrap_with_passphrase(&self.wrapped_keys, passphrase)?;
+        if key.as_bytes() == self.key.as_bytes() {
+            Ok(())
+        } else {
+            Err(VaultError::WrongPassphrase)
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -211,6 +207,25 @@ impl Vault {
     }
 }
 
+fn unwrap_with_passphrase(
+    wrapped_keys: &[WrappedKey],
+    passphrase: &str,
+) -> Result<SymmetricKey, VaultError> {
+    for wrapped in wrapped_keys {
+        let WrappedKey::Passphrase {
+            kdf,
+            salt,
+            nonce,
+            ciphertext,
+        } = wrapped;
+        let wrapping_key = crypto::derive_key(passphrase.as_bytes(), salt, *kdf)?;
+        if let Some(raw) = crypto::open(&wrapping_key, nonce, WRAP_AAD, ciphertext) {
+            return SymmetricKey::from_slice(&raw);
+        }
+    }
+    Err(VaultError::WrongPassphrase)
+}
+
 fn check_passphrase(passphrase: &str) -> Result<(), VaultError> {
     if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
         return Err(VaultError::WeakPassphrase);
@@ -267,7 +282,16 @@ fn write_atomic(path: &Path, bytes: &[u8], backup: Backup) -> io::Result<()> {
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    fs::create_dir_all(dir)?;
+    if !dir.exists() {
+        fs::create_dir_all(dir)?;
+        // Only a directory kv creates is made private; an existing one keeps
+        // the permissions its owner chose.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+    }
     let tmp = with_suffix(path, ".tmp");
     write_new_file(&tmp, bytes)?;
     let bak = with_suffix(path, ".bak");

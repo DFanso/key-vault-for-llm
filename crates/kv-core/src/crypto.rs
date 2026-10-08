@@ -18,19 +18,36 @@ pub const SALT_LEN: usize = 16;
 /// tampered header cannot make unlock allocate unbounded memory.
 const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
 
-/// A 256-bit symmetric key. Zeroed on drop and never printed.
-pub struct SymmetricKey(Zeroizing<[u8; KEY_LEN]>);
+/// A 256-bit symmetric key. Zeroed on drop and never printed. Lives in its
+/// own heap allocation, which is locked into RAM where the OS allows it so
+/// the key is not written to swap.
+pub struct SymmetricKey(Box<Zeroizing<[u8; KEY_LEN]>>);
 
 impl SymmetricKey {
     pub fn generate() -> Self {
-        let mut key = Zeroizing::new([0u8; KEY_LEN]);
-        fill_random(key.as_mut_slice());
-        Self(key)
+        let mut key = Self::zeroed();
+        fill_random(key.0.as_mut_slice());
+        key
     }
 
     pub fn from_slice(bytes: &[u8]) -> Result<Self, VaultError> {
-        let array: [u8; KEY_LEN] = bytes.try_into().map_err(|_| VaultError::Corrupted)?;
-        Ok(Self(Zeroizing::new(array)))
+        if bytes.len() != KEY_LEN {
+            return Err(VaultError::Corrupted);
+        }
+        let mut key = Self::zeroed();
+        key.0.copy_from_slice(bytes);
+        Ok(key)
+    }
+
+    /// Allocates and memory-locks the key before any secret byte is written
+    /// to it. Locking is best effort: it can fail under a low `RLIMIT_MEMLOCK`,
+    /// and locked pages stay locked for the life of the process.
+    fn zeroed() -> Self {
+        let key = Box::new(Zeroizing::new([0u8; KEY_LEN]));
+        if let Ok(guard) = region::lock(key.as_ptr(), KEY_LEN) {
+            std::mem::forget(guard);
+        }
+        Self(key)
     }
 
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
@@ -87,11 +104,11 @@ pub fn derive_key(
     }
     let argon_params = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN))
         .map_err(|_| VaultError::Corrupted)?;
-    let mut out = Zeroizing::new([0u8; KEY_LEN]);
+    let mut out = SymmetricKey::zeroed();
     Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params)
-        .hash_password_into(passphrase, salt, out.as_mut_slice())
+        .hash_password_into(passphrase, salt, out.0.as_mut_slice())
         .map_err(|_| VaultError::Corrupted)?;
-    Ok(SymmetricKey(out))
+    Ok(out)
 }
 
 pub fn seal(key: &SymmetricKey, nonce: &[u8; NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {

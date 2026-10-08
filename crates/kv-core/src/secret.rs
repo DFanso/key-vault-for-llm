@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
@@ -104,9 +105,12 @@ pub struct HandleInfo {
     pub description: String,
     pub mode: Mode,
     pub allowed_hosts: Vec<String>,
+    pub allow_plain_http: bool,
     pub allowed_methods: Vec<String>,
     pub read_only: bool,
     pub allowed_cmds: Vec<String>,
+    #[serde(with = "humantime_serde")]
+    pub grant_ttl: Duration,
     /// Names of the variables an `env` secret injects.
     pub env_vars: Vec<String>,
 }
@@ -127,9 +131,11 @@ impl Secret {
             description: self.description.clone(),
             mode: self.policy.mode,
             allowed_hosts: self.policy.allowed_hosts.clone(),
+            allow_plain_http: self.policy.allow_plain_http,
             allowed_methods: self.policy.allowed_methods.clone(),
             read_only: self.policy.read_only,
             allowed_cmds: self.policy.allowed_cmds.clone(),
+            grant_ttl: self.policy.grant_ttl,
             env_vars,
         }
     }
