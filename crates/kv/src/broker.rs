@@ -11,6 +11,8 @@ use kv_core::secret::{Secret, SecretText};
 
 use crate::audit::Audit;
 
+pub mod http;
+
 /// An `http_request` that passed every check.
 pub struct HttpJob {
     pub secret: Secret,
