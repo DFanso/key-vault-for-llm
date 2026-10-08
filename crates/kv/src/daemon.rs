@@ -5,5 +5,5 @@ mod harden;
 mod server;
 mod state;
 
-pub use server::run;
+pub use server::{Outcome, run};
 pub use state::{After, Daemon, Settings};

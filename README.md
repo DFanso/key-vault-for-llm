@@ -31,7 +31,9 @@ arguments, where they would end up in shell history.
 
 Every command that changes the vault asks for the passphrase, so an agent
 running commands as you cannot add, remove or loosen secrets. The vault locks
-itself after 8 hours without use (`kv daemon --idle-lock 2h` to change that).
+itself after 8 hours without use. To change that, set `KV_IDLE_LOCK=2h` (any
+duration) in your shell profile and run `kv stop` so the next command picks it
+up.
 
 Set `KV_HOME` to keep the vault, audit log and sockets in one directory
 instead of the platform defaults.

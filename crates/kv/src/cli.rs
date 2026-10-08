@@ -15,7 +15,7 @@ use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretText, SecretValue
 use zeroize::Zeroizing;
 
 use crate::client;
-use crate::daemon::{self, Settings};
+use crate::daemon::{self, Outcome, Settings};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -64,12 +64,16 @@ enum Command {
     Passwd,
     /// Run the daemon in the foreground (other commands start it on demand)
     Daemon {
-        /// Lock the vault after it has gone unused for this long
-        #[arg(long, default_value = "8h", value_parser = humantime::parse_duration)]
+        /// Lock the vault after it has gone unused for this long. Daemons
+        /// started on demand read KV_IDLE_LOCK.
+        #[arg(long, env = "KV_IDLE_LOCK", default_value = "8h", value_parser = humantime::parse_duration)]
         idle_lock: Duration,
         /// Exit after this long with no requests while locked
         #[arg(long, default_value = "10m", value_parser = humantime::parse_duration, hide = true)]
         locked_exit: Duration,
+        /// Started by another command: exit quietly if a daemon already runs
+        #[arg(long, hide = true)]
+        autostart: bool,
     },
 }
 
@@ -217,8 +221,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Daemon {
             idle_lock,
             locked_exit,
+            autostart,
         } => {
-            daemon::run(
+            let outcome = daemon::run(
                 paths,
                 Settings {
                     idle_lock,
@@ -226,6 +231,11 @@ async fn run(cli: Cli) -> Result<()> {
                 },
             )
             .await?;
+            if outcome == Outcome::AlreadyRunning && !autostart {
+                return Err(CliError(
+                    "a daemon is already running; run `kv stop` first".into(),
+                ));
+            }
             Ok(())
         }
         Command::Init { insecure_fast_kdf } => {

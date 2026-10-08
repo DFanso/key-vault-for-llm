@@ -20,10 +20,17 @@ use crate::paths::Paths;
 
 type Shared = Arc<Mutex<Daemon>>;
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Stopped,
+    /// Another daemon holds the lock file; this one never started.
+    AlreadyRunning,
+}
+
 /// Runs until `kv stop`, or until the daemon has been locked and idle for
 /// `settings.locked_exit`. Returns immediately if another daemon already
 /// holds the lock file.
-pub async fn run(paths: Paths, settings: Settings) -> io::Result<()> {
+pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     harden::apply();
     paths.ensure_runtime_dir()?;
     let lock_file = File::options()
@@ -33,7 +40,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<()> {
         .open(paths.lock_file())?;
     match lock_file.try_lock() {
         Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::WouldBlock) => return Ok(Outcome::AlreadyRunning),
         Err(TryLockError::Error(e)) => return Err(e),
     }
 
@@ -79,7 +86,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<()> {
     ipc::cleanup(&agent_endpoint);
     ipc::cleanup(&control_endpoint);
     drop(lock_file);
-    Ok(())
+    Ok(Outcome::Stopped)
 }
 
 async fn serve_agent(mut stream: ServerStream, daemon: Shared) {

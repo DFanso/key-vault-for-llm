@@ -371,13 +371,38 @@ fn concurrent_commands_start_only_one_daemon() {
 fn a_second_daemon_exits_while_one_is_running() {
     let kv = Kv::with_daemon(&[]);
     let mut second = kv
-        .command(&["daemon"])
+        .command(&["daemon", "--autostart"])
         .stdin(Stdio::null())
         .spawn()
         .unwrap();
     let status = wait_with_timeout(&mut second, Duration::from_secs(5));
     assert!(status.is_some_and(|s| s.success()), "{status:?}");
     kv.ok(&["status"], "");
+}
+
+#[test]
+fn kv_daemon_refuses_to_start_beside_a_running_daemon() {
+    let kv = Kv::new();
+    kv.ok(&["status"], "");
+    let error = kv.fails(&["daemon", "--idle-lock", "2h"], "");
+    assert!(error.contains("already running"), "{error}");
+    assert!(error.contains("kv stop"), "{error}");
+}
+
+#[test]
+fn kv_idle_lock_applies_to_daemons_started_on_demand() {
+    let kv = Kv::new();
+    let mut init = kv.command(&["init", "--insecure-fast-kdf"]);
+    init.env("KV_IDLE_LOCK", "1s");
+    let output = run_kv(init, &format!("{PASS}\n"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::thread::sleep(Duration::from_millis(2500));
+    let status = kv.ok(&["status"], "");
+    assert!(status.starts_with("locked"), "{status}");
 }
 
 #[cfg(unix)]

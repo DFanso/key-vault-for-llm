@@ -94,7 +94,7 @@ async fn wait_for(endpoint: &Endpoint) -> io::Result<ClientStream> {
 fn spawn_daemon() -> io::Result<()> {
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .arg("daemon")
+        .args(["daemon", "--autostart"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
