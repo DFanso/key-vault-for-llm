@@ -248,21 +248,52 @@ fn draw_handles(frame: &mut Frame, app: &App, area: Rect) {
     }
     let selected = app.selected_handle();
     let mut lines: Vec<Line> = Vec::new();
+    let mut selected_lines = 0..0;
     for (index, request) in requests.iter().enumerate() {
+        let start = lines.len();
         lines.extend(request_lines(request, index == selected));
+        if index == selected {
+            selected_lines = start..lines.len();
+        }
     }
     if !requests.is_empty() && !handles.is_empty() {
         lines.push(Line::raw(""));
     }
     for (index, handle) in handles.iter().enumerate() {
+        if requests.len() + index == selected {
+            selected_lines = lines.len()..lines.len() + 1;
+        }
         lines.push(handle_line(handle, requests.len() + index == selected));
     }
+    // The keys act on the selected row, so it is always on screen.
+    let scroll = scroll_to(&lines, selected_lines, area.width, area.height);
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         area,
     );
+}
+
+/// How far to scroll a bordered, wrapped paragraph of `lines` in a box of
+/// `width` by `height` so that the lines in `focus` are in view, showing
+/// their first rows if they are taller than the box.
+fn scroll_to(lines: &[Line], focus: std::ops::Range<usize>, width: u16, height: u16) -> u16 {
+    let inner = width.saturating_sub(2).max(1);
+    let rows: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner)
+                .max(1)
+        })
+        .collect();
+    let visible = height.saturating_sub(2) as usize;
+    let start: usize = rows[..focus.start.min(rows.len())].iter().sum();
+    let end: usize = rows[..focus.end.min(rows.len())].iter().sum();
+    end.saturating_sub(visible).min(start) as u16
 }
 
 /// A handle an agent asked for: what it would be, then who asked and why.
@@ -381,23 +412,10 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
     let width = area.width.min(90);
     // Sized and scrolled by wrapped rows, so long text (an agent's hosts,
     // say) can never push the focused field out of sight.
-    let inner = width.saturating_sub(2).max(1);
-    let rows: Vec<usize> = lines
-        .iter()
-        .map(|line| {
-            Paragraph::new(line.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(inner)
-                .max(1)
-        })
-        .collect();
-    let total: usize = rows.iter().sum();
-    let visible = area.height.saturating_sub(2) as usize;
-    let scroll = focused_line.map_or(0, |i| {
-        let start: usize = rows[..i].iter().sum();
-        let end = start + rows[i];
-        end.saturating_sub(visible).min(start)
-    });
+    let total = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.saturating_sub(2).max(1));
+    let scroll = focused_line.map_or(0, |i| scroll_to(&lines, i..i + 1, width, area.height));
     let height = (total as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
@@ -411,7 +429,7 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
         Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0)),
+            .scroll((scroll, 0)),
         popup,
     );
 }

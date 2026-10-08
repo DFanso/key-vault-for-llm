@@ -300,3 +300,22 @@ fn a_long_form_scrolls_to_the_focused_field() {
     let shown = screen_of_height(&app, 20);
     assert!(shown.contains(" Save "), "{shown}");
 }
+
+#[test]
+fn the_handles_list_scrolls_to_the_selected_row() {
+    let requests: Vec<HandleRequest> = (0..16)
+        .map(|i| HandleRequest {
+            name: format!("svc-{i:02}"),
+            ..dokploy()
+        })
+        .collect();
+    let mut app = app(requests, vec![handle("openrouter")]);
+    for _ in 0..16 {
+        press(&mut app, KeyCode::Down);
+    }
+    assert!(screen(&app).contains("▶ openrouter"), "{}", screen(&app));
+    for _ in 0..2 {
+        press(&mut app, KeyCode::Up);
+    }
+    assert!(screen(&app).contains("▶ svc-14"), "{}", screen(&app));
+}

@@ -76,12 +76,14 @@ fn asking_again_for_a_name_replaces_the_request() {
     let mut f = Fixture::new();
     let token = f.token();
     ask(&mut f, None, dokploy_request("dokploy"));
+    let first_id = f.overview(&token).handle_requests[0].id;
     let mut again = dokploy_request("dokploy");
     again.reason = "a better reason".into();
     ask(&mut f, None, again);
     let requests = f.overview(&token).handle_requests;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].request.reason, "a better reason");
+    assert_eq!(requests[0].id, first_id, "the request keeps its id");
 }
 
 #[test]

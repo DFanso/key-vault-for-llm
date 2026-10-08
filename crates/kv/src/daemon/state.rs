@@ -375,11 +375,17 @@ impl Daemon {
             request.allowed_cmds.clear();
         }
         let name = request.name.clone();
-        let requested = RequestedHandle {
-            id: {
+        // A replacement keeps its id, so the user's selection and a
+        // dismiss already on its way still find it.
+        let id = match replaces {
+            Some(index) => self.handle_requests[index].id,
+            None => {
                 self.next_request += 1;
                 self.next_request
-            },
+            }
+        };
+        let requested = RequestedHandle {
+            id,
             client: session.map(|s| printable(&s.client, 64)),
             request,
         };
