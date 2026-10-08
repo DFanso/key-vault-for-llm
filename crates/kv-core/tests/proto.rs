@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ExecCall,
-    ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, Status,
+    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
+    ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, PolicyPatch, SessionInfo,
+    Status, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -63,6 +64,7 @@ fn agent_responses_never_contain_secret_values() {
                 locked: false,
                 handle_count: Some(secrets.len()),
                 locks_in_secs: Some(60),
+                pending_approvals: 0,
             },
         },
     ];
@@ -93,6 +95,7 @@ fn agent_requests_use_a_type_tag() {
 fn a_control_request_is_not_a_valid_agent_request() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        token: None,
         command: ControlCommand::Unlock,
     };
     let json = serde_json::to_string(&control).unwrap();
@@ -103,6 +106,7 @@ fn a_control_request_is_not_a_valid_agent_request() {
 fn control_request_debug_hides_the_passphrase() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        token: None,
         command: ControlCommand::ChangePassphrase {
             new_passphrase: SecretText::new("a brand new passphrase"),
         },
@@ -214,6 +218,7 @@ fn error_code_names_match_the_wire_format() {
         AgentErrorCode::UnknownHandle,
         AgentErrorCode::PolicyDenied,
         AgentErrorCode::ApprovalTimeout,
+        AgentErrorCode::ApprovalDenied,
         AgentErrorCode::UpstreamError,
     ] {
         assert_eq!(
@@ -234,4 +239,80 @@ fn worst_case_escaped_output_fits_in_a_frame() {
         truncated: true,
     });
     assert!(serde_json::to_vec(&reply).unwrap().len() < MAX_FRAME_LEN);
+}
+
+#[test]
+fn a_control_request_without_a_token_still_parses() {
+    let request: ControlRequest =
+        serde_json::from_str(r#"{"passphrase":"pw","command":{"type":"unlock"}}"#).unwrap();
+    assert!(request.token.is_none());
+}
+
+#[test]
+fn session_tokens_never_show_in_debug_output() {
+    let token = "ab".repeat(32);
+    let request = ControlRequest {
+        passphrase: None,
+        token: Some(SecretText::new(token.clone())),
+        command: ControlCommand::Overview,
+    };
+    let response = ControlResponse::Session {
+        token: SecretText::new(token.clone()),
+    };
+    for printed in [format!("{request:?}"), format!("{response:?}")] {
+        assert!(!printed.contains(&token), "{printed}");
+    }
+}
+
+#[test]
+fn hello_names_the_agent_session() {
+    let hello = AgentRequest::Hello(SessionInfo {
+        id: "abc".into(),
+        client: "claude-code".into(),
+    });
+    let json = serde_json::to_string(&hello).unwrap();
+    assert_eq!(
+        json,
+        r#"{"type":"hello","id":"abc","client":"claude-code"}"#
+    );
+}
+
+#[test]
+fn verdicts_use_snake_case_names() {
+    let json = serde_json::to_string(&[
+        Verdict::AllowOnce,
+        Verdict::AllowSession,
+        Verdict::Deny,
+        Verdict::DenyAlways,
+    ])
+    .unwrap();
+    assert_eq!(
+        json,
+        r#"["allow_once","allow_session","deny","deny_always"]"#
+    );
+}
+
+#[test]
+fn a_status_from_before_approvals_still_parses() {
+    let status: Status = serde_json::from_str(
+        r#"{"vault_exists":true,"locked":true,"handle_count":null,"locks_in_secs":null}"#,
+    )
+    .unwrap();
+    assert_eq!(status.pending_approvals, 0);
+}
+
+#[test]
+fn update_fields_are_optional() {
+    let parsed: ControlCommand = serde_json::from_str(r#"{"type":"update","name":"api"}"#).unwrap();
+    assert!(
+        matches!(
+            &parsed,
+            ControlCommand::Update {
+                name,
+                description: None,
+                value: None,
+            } if name == "api"
+        ),
+        "{parsed:?}"
+    );
 }

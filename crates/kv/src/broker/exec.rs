@@ -39,7 +39,7 @@ pub async fn run(job: ExecJob) -> AgentResponse {
     job.audit.record_use(&Use {
         action: "exec",
         handle: &job.handles.join(","),
-        decision: "auto",
+        decision: job.decision,
         summary: &job.argv[0],
         outcome: &outcome,
         duration: job.started.elapsed(),

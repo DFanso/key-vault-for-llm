@@ -26,6 +26,8 @@ pub struct HttpJob {
     pub scrubber: Arc<Scrubber>,
     pub audit: Audit,
     pub started: Instant,
+    /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
+    pub decision: &'static str,
 }
 
 /// An `exec` that passed every check.
@@ -39,6 +41,8 @@ pub struct ExecJob {
     pub scrubber: Arc<Scrubber>,
     pub audit: Audit,
     pub started: Instant,
+    /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
+    pub decision: &'static str,
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement

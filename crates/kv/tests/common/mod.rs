@@ -8,11 +8,11 @@ use std::time::Instant;
 
 use kv::audit::Audit;
 use kv::broker::{ExecJob, HttpJob};
-use kv::daemon::{Daemon, Prepared, Settings};
+use kv::daemon::{Daemon, Prepared, Settings, Waiting};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    ExecCall, HttpCall,
+    ExecCall, HttpCall, Overview, SessionInfo, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 use tempfile::TempDir;
@@ -48,6 +48,7 @@ impl Fixture {
         let (response, _) = self.daemon.handle_control(
             ControlRequest {
                 passphrase: Some(SecretText::new(PASS)),
+                token: None,
                 command,
             },
             self.t0,
@@ -75,6 +76,7 @@ impl Fixture {
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
             Prepared::Exec(_) => panic!("unexpected exec job"),
+            Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
 
@@ -84,7 +86,66 @@ impl Fixture {
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
             Prepared::Http(_) => panic!("unexpected http job"),
+            Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
+    }
+
+    /// Prepares a request from an agent session at `now`, expecting it to
+    /// wait for approval.
+    pub fn wait(
+        &mut self,
+        session: Option<&SessionInfo>,
+        request: AgentRequest,
+        now: Instant,
+    ) -> Waiting {
+        match self.daemon.prepare_in(session, request, now) {
+            Prepared::Wait(waiting) => *waiting,
+            Prepared::Reply(reply) => panic!("expected a wait, got {reply:?}"),
+            Prepared::Http(_) | Prepared::Exec(_) => panic!("expected a wait, got a job"),
+        }
+    }
+
+    /// Opens a `kv tui` session and returns its token.
+    pub fn token(&mut self) -> SecretText {
+        match self.send(Some(PASS), None, ControlCommand::OpenSession) {
+            ControlResponse::Session { token } => token,
+            other => panic!("expected a session, got {other:?}"),
+        }
+    }
+
+    pub fn send(
+        &mut self,
+        passphrase: Option<&str>,
+        token: Option<&SecretText>,
+        command: ControlCommand,
+    ) -> ControlResponse {
+        self.send_at(self.t0, passphrase, token, command)
+    }
+
+    pub fn send_at(
+        &mut self,
+        now: Instant,
+        passphrase: Option<&str>,
+        token: Option<&SecretText>,
+        command: ControlCommand,
+    ) -> ControlResponse {
+        let request = ControlRequest {
+            passphrase: passphrase.map(SecretText::new),
+            token: token.cloned(),
+            command,
+        };
+        self.daemon.handle_control(request, now).0
+    }
+
+    pub fn overview(&mut self, token: &SecretText) -> Overview {
+        match self.send(None, Some(token), ControlCommand::Overview) {
+            ControlResponse::Overview { overview } => overview,
+            other => panic!("expected an overview, got {other:?}"),
+        }
+    }
+
+    pub fn decide(&mut self, token: &SecretText, id: u64, verdict: Verdict) -> ControlResponse {
+        self.send(None, Some(token), ControlCommand::Decide { id, verdict })
     }
 
     pub fn audit_lines(&self) -> Vec<serde_json::Value> {
@@ -177,5 +238,12 @@ pub fn run(handles: &[&str], argv: &[&str], cwd: PathBuf) -> ExecCall {
         argv: argv.iter().map(|a| a.to_string()).collect(),
         cwd,
         timeout_secs: None,
+    }
+}
+
+pub fn session(id: &str) -> SessionInfo {
+    SessionInfo {
+        id: id.into(),
+        client: "test agent".into(),
     }
 }

@@ -44,7 +44,7 @@ pub async fn send(client: &Client, job: HttpJob) -> AgentResponse {
     job.audit.record_use(&Use {
         action: "http_request",
         handle: &job.secret.name,
-        decision: "auto",
+        decision: job.decision,
         summary: &format!("{} {}", job.call.method, job.call.url),
         outcome: &outcome,
         duration: job.started.elapsed(),

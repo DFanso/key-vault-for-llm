@@ -7,10 +7,14 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use kv_core::proto::{AgentRequest, AgentResponse, ExecCall, HttpCall};
+use kv_core::crypto::fill_random;
+use kv_core::proto::{AgentRequest, AgentResponse, ExecCall, HttpCall, SessionInfo};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
-use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
+use rmcp::{
+    ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_handler,
+    tool_router,
+};
 use serde::Deserialize;
 
 use crate::client;
@@ -53,6 +57,9 @@ pub struct KvServer {
     paths: Paths,
     /// Where `kv mcp` was started, normally the agent's project directory.
     cwd: PathBuf,
+    /// Random per `kv mcp` process, so "allow for the session" in `kv tui`
+    /// covers this agent and no other.
+    session_id: String,
 }
 
 #[tool_router]
@@ -61,46 +68,56 @@ impl KvServer {
         description = "List the secret handles you can use, with their kind, description and policy. Never returns secret values."
     )]
     async fn list_handles(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(self.ask(AgentRequest::ListHandles).await)
+        Ok(self.ask(None, AgentRequest::ListHandles).await)
     }
 
     #[tool(description = "Whether the vault exists and is unlocked.")]
     async fn status(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(self.ask(AgentRequest::Status).await)
+        Ok(self.ask(None, AgentRequest::Status).await)
     }
 
     #[tool(
-        description = "Send an HTTP request with a handle's credential attached. Returns the status, headers and body (at most 256 KiB), with secrets replaced by [kv:<handle>]."
+        description = "Send an HTTP request with a handle's credential attached. Returns the status, headers and body (at most 256 KiB), with secrets replaced by [kv:<handle>]. If the handle's mode is ask, this waits up to 60 s for the user to approve it in kv tui."
     )]
     async fn http_request(
         &self,
+        peer: Peer<RoleServer>,
         Parameters(args): Parameters<HttpRequestArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let session = self.session(&peer);
         Ok(self
-            .ask(AgentRequest::HttpRequest(HttpCall {
-                handle: args.handle,
-                method: args.method,
-                url: args.url,
-                headers: args.headers,
-                body: args.body,
-            }))
+            .ask(
+                Some(&session),
+                AgentRequest::HttpRequest(HttpCall {
+                    handle: args.handle,
+                    method: args.method,
+                    url: args.url,
+                    headers: args.headers,
+                    body: args.body,
+                }),
+            )
             .await)
     }
 
     #[tool(
-        description = "Run a program with the variables of one or more env handles set. Returns the exit code, stdout and stderr (each at most 256 KiB), with secrets replaced by [kv:<handle>]."
+        description = "Run a program with the variables of one or more env handles set. Returns the exit code, stdout and stderr (each at most 256 KiB), with secrets replaced by [kv:<handle>]. If a handle's mode is ask, this waits up to 60 s for the user to approve it in kv tui."
     )]
     async fn exec(
         &self,
+        peer: Peer<RoleServer>,
         Parameters(args): Parameters<ExecArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let session = self.session(&peer);
         Ok(self
-            .ask(AgentRequest::Exec(ExecCall {
-                handles: args.handles,
-                argv: args.argv,
-                cwd: args.cwd.unwrap_or_else(|| self.cwd.clone()),
-                timeout_secs: args.timeout_secs,
-            }))
+            .ask(
+                Some(&session),
+                AgentRequest::Exec(ExecCall {
+                    handles: args.handles,
+                    argv: args.argv,
+                    cwd: args.cwd.unwrap_or_else(|| self.cwd.clone()),
+                    timeout_secs: args.timeout_secs,
+                }),
+            )
             .await)
     }
 }
@@ -110,16 +127,31 @@ impl KvServer {
     instructions = "kv lets you use the user's API keys, tokens and other secrets \
 without seeing them. Call list_handles to see what is available and how each handle may be \
 used, then call http_request or exec with a handle name. Secret values never appear in \
-results; where one would, you see [kv:<handle>]. If a call fails with vault_locked, ask the \
-user to run `kv unlock`."
+results; where one would, you see [kv:<handle>]. Handles in ask mode wait for the user to \
+approve each use in kv tui; approval_denied means they said no, so do not retry it. If a call \
+fails with vault_locked, ask the user to run `kv unlock`."
 )]
 impl ServerHandler for KvServer {}
 
 impl KvServer {
+    /// Who is asking: this process's session id and the client's
+    /// self-reported name from MCP initialization.
+    fn session(&self, peer: &Peer<RoleServer>) -> SessionInfo {
+        let client = peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "unknown MCP client".into());
+        SessionInfo {
+            id: self.session_id.clone(),
+            client,
+        }
+    }
+
     /// Sends one request, starting the daemon if needed. Daemon errors come
     /// back as tool errors that start with their code.
-    async fn ask(&self, request: AgentRequest) -> CallToolResult {
-        match client::agent(&self.paths, &request).await {
+    async fn ask(&self, session: Option<&SessionInfo>, request: AgentRequest) -> CallToolResult {
+        match client::agent(&self.paths, session, &request).await {
             Ok(AgentResponse::Error { code, message }) => {
                 CallToolResult::error(vec![ContentBlock::text(format!(
                     "{}: {message}",
@@ -139,9 +171,12 @@ impl KvServer {
 
 /// Serves MCP on stdin and stdout until the client disconnects.
 pub async fn serve(paths: Paths) -> io::Result<()> {
+    let mut id = [0u8; 16];
+    fill_random(&mut id);
     let server = KvServer {
         paths,
         cwd: std::env::current_dir()?,
+        session_id: id.iter().map(|b| format!("{b:02x}")).collect(),
     };
     let running = server
         .serve(rmcp::transport::stdio())

@@ -47,6 +47,7 @@ impl Home {
         let mut child = Command::new(env!("CARGO_BIN_EXE_kv"))
             .args(args)
             .env("KV_HOME", self.dir.path())
+            .env("KV_NOTIFY", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -72,6 +73,7 @@ impl Home {
         command
             .arg("mcp")
             .env("KV_HOME", self.dir.path())
+            .env("KV_NOTIFY", "off")
             .current_dir(cwd);
         ().serve(TokioChildProcess::new(command).unwrap())
             .await
@@ -249,5 +251,88 @@ async fn bad_arguments_are_tool_errors_not_crashes() {
     let (failed, status) = call(&client, "status", serde_json::json!({})).await;
     assert!(!failed, "{status}");
     assert!(status.contains("\"vault_exists\": false"), "{status}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_ask_handle_waits_for_approval_and_shows_the_client() {
+    use kv::paths::Paths;
+    use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
+    use kv_core::secret::SecretText;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("fine"))
+        .mount(&server)
+        .await;
+    let host = server.uri().trim_start_matches("http://").to_owned();
+    let home = Home::new();
+    home.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    home.kv(
+        &[
+            "add",
+            "api",
+            "--kind",
+            "http",
+            "--host",
+            &host,
+            "--allow-plain-http",
+            "true",
+            "--mode",
+            "ask",
+        ],
+        &format!("{PASS}\n{TOKEN}\n"),
+    );
+    let project = TempDir::new().unwrap();
+    let client = home.mcp(project.path()).await;
+    let url = format!("{}/x", server.uri());
+    let call = tokio::spawn({
+        let peer = client.peer().clone();
+        async move {
+            let params = CallToolRequestParams::new("http_request").with_arguments(
+                serde_json::json!({"handle": "api", "method": "GET", "url": url})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            peer.call_tool(params).await.unwrap()
+        }
+    });
+
+    let paths = Paths::under(home.dir.path());
+    let control = |token: Option<SecretText>, passphrase: Option<&str>, command| {
+        let request = ControlRequest {
+            passphrase: passphrase.map(SecretText::new),
+            token,
+            command,
+        };
+        let paths = paths.clone();
+        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+    };
+    let token = match control(None, Some(PASS), ControlCommand::OpenSession).await {
+        ControlResponse::Session { token } => token,
+        other => panic!("{other:?}"),
+    };
+    let approval = loop {
+        if let ControlResponse::Overview { overview } =
+            control(Some(token.clone()), None, ControlCommand::Overview).await
+            && let Some(approval) = overview.approvals.into_iter().next()
+        {
+            break approval;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(
+        approval.client.as_deref().is_some_and(|c| !c.is_empty()),
+        "{approval:?}"
+    );
+    assert!(approval.can_grant, "kv mcp names its session");
+    let decide = ControlCommand::Decide {
+        id: approval.id,
+        verdict: Verdict::AllowOnce,
+    };
+    control(Some(token), None, decide).await;
+    let result = call.await.unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
     client.cancel().await.unwrap();
 }

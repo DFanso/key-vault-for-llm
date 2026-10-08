@@ -69,6 +69,7 @@ impl Fixture {
         self.daemon.handle_control(
             ControlRequest {
                 passphrase: passphrase.map(SecretText::new),
+                token: None,
                 command,
             },
             now,
@@ -82,7 +83,9 @@ impl Fixture {
     fn agent_at(&mut self, now: Instant, request: AgentRequest) -> AgentResponse {
         match self.daemon.prepare(request, now) {
             Prepared::Reply(response) => response,
-            Prepared::Http(_) | Prepared::Exec(_) => panic!("expected a reply, got a job"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Wait(_) => {
+                panic!("expected a reply, got a job")
+            }
         }
     }
 
@@ -393,6 +396,7 @@ fn idle_vault_locks_and_status_polls_do_not_keep_it_open() {
     let mut f = Fixture::with_settings(Settings {
         idle_lock: Duration::from_secs(10),
         locked_exit: Duration::from_secs(600),
+        ..Settings::default()
     });
     f.init();
     let status_at = f.t0 + Duration::from_secs(9);
@@ -416,6 +420,7 @@ fn locked_daemon_exits_after_a_quiet_period() {
     let mut f = Fixture::with_settings(Settings {
         idle_lock: Duration::from_secs(10),
         locked_exit: Duration::from_secs(60),
+        ..Settings::default()
     });
     assert_eq!(
         f.daemon
@@ -462,6 +467,7 @@ fn time_asleep_counts_toward_the_idle_lock() {
     let mut f = Fixture::with_settings(Settings {
         idle_lock: Duration::from_secs(8 * 3600),
         locked_exit: Duration::from_secs(600),
+        ..Settings::default()
     });
     f.init();
     // One awake minute later, but the wall clock says the lid was shut all night.
@@ -476,6 +482,7 @@ fn a_wall_clock_set_backwards_does_not_keep_the_vault_open() {
     let mut f = Fixture::with_settings(Settings {
         idle_lock: Duration::from_secs(10),
         locked_exit: Duration::from_secs(600),
+        ..Settings::default()
     });
     f.init();
     let wall = SystemTime::now() - Duration::from_secs(3600);

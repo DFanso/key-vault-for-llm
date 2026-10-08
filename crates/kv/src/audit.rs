@@ -1,13 +1,13 @@
 //! Append-only JSON-lines audit log of what was done with which handle.
 //! Records names and outcomes, never secret values.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const KEEP_ROTATED: usize = 5;
@@ -34,7 +34,7 @@ pub struct Use<'a> {
     pub action: &'a str,
     /// Handle name, or several joined with commas.
     pub handle: &'a str,
-    /// `auto`, `policy`, `locked` or `approval`.
+    /// `auto`, `approved`, `denied`, `policy` or `locked`.
     pub decision: &'a str,
     /// What was asked for, already scrubbed: method and URL, or the program.
     pub summary: &'a str,
@@ -128,6 +128,73 @@ impl Audit {
             }
         }
         fs::rename(&self.path, rotated(&self.path, 1))
+    }
+}
+
+/// One line of the audit log, as `kv tui` shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Entry {
+    pub ts: String,
+    pub socket: String,
+    pub action: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub outcome: String,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+/// How much of the end of the log `tail` reads.
+const TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `max` entries of the log, newest first. Reads only the end of
+/// the file; a missing log has no entries, and lines that do not parse are
+/// skipped. Control characters are replaced, so the text is safe to draw.
+pub fn tail(path: &Path, max: usize) -> io::Result<Vec<Entry>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let start = file.metadata()?.len().saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    if start > 0 {
+        // The first line is most likely cut off.
+        lines.next();
+    }
+    Ok(lines
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
+        .map(Entry::made_safe)
+        .take(max)
+        .collect())
+}
+
+impl Entry {
+    fn made_safe(self) -> Self {
+        let safe = |text: String| -> String {
+            text.chars()
+                .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+                .collect()
+        };
+        Self {
+            ts: safe(self.ts),
+            socket: safe(self.socket),
+            action: safe(self.action),
+            handle: self.handle.map(safe),
+            decision: self.decision.map(safe),
+            summary: self.summary.map(safe),
+            outcome: safe(self.outcome),
+            duration_ms: self.duration_ms,
+        }
     }
 }
 

@@ -64,6 +64,8 @@ enum Command {
     Passwd,
     /// Serve MCP on stdin and stdout, for agents such as Claude Code
     Mcp,
+    /// Approve agent requests, see handles and lock the vault in a terminal UI
+    Tui,
     /// Run the daemon in the foreground (other commands start it on demand)
     Daemon {
         /// Lock the vault after it has gone unused for this long. Daemons
@@ -76,6 +78,20 @@ enum Command {
         /// Started by another command: exit quietly if a daemon already runs
         #[arg(long, hide = true)]
         autostart: bool,
+        /// Show a desktop notification when a request waits for approval:
+        /// on or off. Daemons started on demand read KV_NOTIFY.
+        #[arg(
+            long,
+            env = "KV_NOTIFY",
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "on",
+            default_missing_value = "on",
+            value_name = "ON|OFF",
+            hide_possible_values = true,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        notify: bool,
     },
 }
 
@@ -228,12 +244,15 @@ async fn run(cli: Cli) -> Result<()> {
             idle_lock,
             locked_exit,
             autostart,
+            notify,
         } => {
             let outcome = daemon::run(
                 paths,
                 Settings {
                     idle_lock,
                     locked_exit,
+                    notify,
+                    ..Settings::default()
                 },
             )
             .await?;
@@ -272,14 +291,14 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Status => {
-            match client::agent(&paths, &AgentRequest::Status).await? {
+            match client::agent(&paths, None, &AgentRequest::Status).await? {
                 AgentResponse::Status { status } => println!("{}", describe_status(&status)),
                 other => return Err(unexpected(&other)),
             }
             Ok(())
         }
         Command::List { json } => {
-            let handles = match client::agent(&paths, &AgentRequest::ListHandles).await? {
+            let handles = match client::agent(&paths, None, &AgentRequest::ListHandles).await? {
                 AgentResponse::Handles { handles } => handles,
                 AgentResponse::Error { message, .. } => return Err(CliError(message)),
                 other => return Err(unexpected(&other)),
@@ -353,6 +372,10 @@ async fn run(cli: Cli) -> Result<()> {
             crate::mcp::serve(paths).await?;
             Ok(())
         }
+        Command::Tui => {
+            crate::tui::run(paths).await?;
+            Ok(())
+        }
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;
@@ -376,6 +399,7 @@ async fn control(
 ) -> Result<()> {
     let request = ControlRequest {
         passphrase,
+        token: None,
         command,
     };
     match client::control(paths, &request, true).await? {
@@ -386,6 +410,9 @@ async fn control(
             Ok(())
         }
         ControlResponse::Error { message, .. } => Err(CliError(message)),
+        other => Err(CliError(format!(
+            "unexpected reply from the daemon: {other:?}"
+        ))),
     }
 }
 
@@ -393,11 +420,15 @@ async fn control(
 async fn stop_or_lock(paths: &Paths, command: ControlCommand) -> Result<()> {
     let request = ControlRequest {
         passphrase: None,
+        token: None,
         command,
     };
     match client::control_if_running(paths, &request).await? {
         None | Some(ControlResponse::Done { .. }) => Ok(()),
         Some(ControlResponse::Error { message, .. }) => Err(CliError(message)),
+        Some(other) => Err(CliError(format!(
+            "unexpected reply from the daemon: {other:?}"
+        ))),
     }
 }
 
@@ -514,13 +545,21 @@ fn describe_status(status: &Status) -> String {
     }
     let count = status.handle_count.unwrap_or(0);
     let plural = if count == 1 { "" } else { "s" };
-    match status.locks_in_secs {
+    let mut line = match status.locks_in_secs {
         Some(secs) => format!(
             "unlocked: {count} handle{plural}, locks after {} unused",
             humantime::format_duration(Duration::from_secs(secs))
         ),
         None => format!("unlocked: {count} handle{plural}"),
+    };
+    match status.pending_approvals {
+        0 => {}
+        1 => line.push_str("\n1 request is waiting for approval: run `kv tui`"),
+        n => line.push_str(&format!(
+            "\n{n} requests are waiting for approval: run `kv tui`"
+        )),
     }
+    line
 }
 
 fn handle_table(handles: &[HandleInfo]) -> String {
@@ -599,6 +638,22 @@ fn unexpected(response: &AgentResponse) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_takes_on_or_off() {
+        let notify = |args: &[&str]| match Cli::try_parse_from([&["kv", "daemon"], args].concat()) {
+            Ok(Cli {
+                command: Command::Daemon { notify, .. },
+                ..
+            }) => notify,
+            Ok(_) => unreachable!(),
+            Err(e) => panic!("{args:?}: {e}"),
+        };
+        assert!(!notify(&["--notify", "off"]));
+        assert!(!notify(&["--notify=false"]));
+        assert!(notify(&["--notify", "on"]));
+        assert!(notify(&["--notify"]));
+    }
 
     #[test]
     fn trimmed_strips_surrounding_whitespace_only() {
