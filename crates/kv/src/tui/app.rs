@@ -77,8 +77,10 @@ pub struct App {
     passphrase: Zeroizing<String>,
     overview: Option<Overview>,
     audit: Vec<Entry>,
-    /// Index into the waiting requests.
-    selected: usize,
+    /// The id of the waiting request the decision keys act on. Kept by id,
+    /// not position, so a request leaving the list never shifts a key press
+    /// onto one the user has not read.
+    selected: Option<u64>,
     /// Index into the handles.
     selected_handle: usize,
     editor: Option<Editor>,
@@ -101,7 +103,7 @@ impl App {
             passphrase: Zeroizing::new(String::new()),
             overview: None,
             audit: Vec::new(),
-            selected: 0,
+            selected: None,
             selected_handle: 0,
             editor: None,
             removing: None,
@@ -146,8 +148,8 @@ impl App {
         self.passphrase.chars().count()
     }
 
-    /// The waiting request the decision keys act on.
-    pub fn selected(&self) -> usize {
+    /// The id of the waiting request the decision keys act on.
+    pub fn selected(&self) -> Option<u64> {
         self.selected
     }
 
@@ -159,6 +161,15 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Effect> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Effect::Quit);
+        }
+        // Ctrl and Alt letters are neither text nor commands: Ctrl+S must
+        // not allow anything, and must not type an s into a secret.
+        if matches!(key.code, KeyCode::Char(_))
+            && key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
         }
         if self.editor.is_some() {
             return self.form_key(key);
@@ -180,15 +191,35 @@ impl App {
                 self.message = None;
             }
             Outcome::Overview(overview) => {
-                let last = |n: usize| n.saturating_sub(1);
-                self.selected = self.selected.min(last(overview.approvals.len()));
-                self.selected_handle = self.selected_handle.min(last(overview.handles.len()));
+                let was_empty = self
+                    .overview
+                    .as_ref()
+                    .is_none_or(|o| o.approvals.is_empty());
+                let ids: Vec<u64> = overview.approvals.iter().map(|a| a.id).collect();
+                match self.selected {
+                    Some(id) if !ids.contains(&id) => {
+                        self.selected = None;
+                        if !ids.is_empty() {
+                            self.message = Some(
+                                "the request you selected is no longer waiting; select one with ↑↓"
+                                    .into(),
+                            );
+                        }
+                    }
+                    // Only a list that was empty gets a selection on its own;
+                    // otherwise the user picks with ↑↓.
+                    None if was_empty => self.selected = ids.first().copied(),
+                    _ => {}
+                }
+                let last = overview.handles.len().saturating_sub(1);
+                self.selected_handle = self.selected_handle.min(last);
                 self.overview = Some(overview);
             }
             Outcome::Audit(entries) => self.audit = entries,
             Outcome::Ended(reason) => {
                 self.screen = Screen::Unlock;
                 self.overview = None;
+                self.selected = None;
                 self.audit.clear();
                 self.editor = None;
                 self.removing = None;
@@ -206,6 +237,24 @@ impl App {
                 }
                 self.message = (!warnings.is_empty()).then(|| warnings.join("; "));
             }
+        }
+    }
+
+    /// A paste is one input: it goes into the passphrase or the focused
+    /// form field, and is ignored everywhere else, so pasted text can never
+    /// act as a run of commands.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(editor) = &mut self.editor {
+            if !editor.saving
+                && let Reply::Message(message) = editor.form.paste(text)
+            {
+                self.message = Some(message);
+            }
+            return;
+        }
+        if self.screen == Screen::Unlock {
+            self.passphrase
+                .extend(text.chars().filter(|c| *c != '\n' && *c != '\r'));
         }
     }
 
@@ -233,6 +282,7 @@ impl App {
             KeyCode::Char('L') => {
                 self.screen = Screen::Unlock;
                 self.overview = None;
+                self.selected = None;
                 self.audit.clear();
                 self.message = Some("locked".into());
                 return Some(Effect::Lock);
@@ -257,14 +307,22 @@ impl App {
     }
 
     fn approvals_key(&mut self, key: KeyEvent) -> Option<Effect> {
-        let waiting = self.overview.as_ref().map_or(0, |o| o.approvals.len());
+        let ids: Vec<u64> = self
+            .overview
+            .as_ref()
+            .map_or(Vec::new(), |o| o.approvals.iter().map(|a| a.id).collect());
+        let at = self
+            .selected
+            .and_then(|id| ids.iter().position(|i| *i == id));
         let verdict = match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                let index = at.map_or(0, |i| i.saturating_sub(1));
+                self.selected = ids.get(index).copied();
                 return None;
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(waiting.saturating_sub(1));
+                let index = at.map_or(0, |i| (i + 1).min(ids.len().saturating_sub(1)));
+                self.selected = ids.get(index).copied();
                 return None;
             }
             KeyCode::Char('a') => Verdict::AllowOnce,
@@ -273,7 +331,13 @@ impl App {
             KeyCode::Char('D') => Verdict::DenyAlways,
             _ => return None,
         };
-        let approval = self.overview.as_ref()?.approvals.get(self.selected)?;
+        let selected = self.selected?;
+        let approval = self
+            .overview
+            .as_ref()?
+            .approvals
+            .iter()
+            .find(|a| a.id == selected)?;
         if verdict == Verdict::AllowSession && !approval.can_grant {
             self.message = Some(
                 "this request did not name its agent session, so it can only be allowed once"

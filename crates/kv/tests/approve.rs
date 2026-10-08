@@ -278,3 +278,49 @@ fn too_many_waiting_requests_are_refused() {
         _ => panic!("expected a refusal"),
     }
 }
+
+#[test]
+fn agent_text_cannot_fake_lines_or_hide_characters() {
+    let mut f = fixture();
+    let token = f.token();
+    let agent = SessionInfo {
+        id: "s1".into(),
+        client: "claude\u{202e}edoc   \u{200b}x".into(),
+    };
+    let mut call = get("openrouter", "https://openrouter.ai/a    b\u{2066}c");
+    call.method = "GET".into();
+    f.wait(Some(&agent), AgentRequest::HttpRequest(call), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    let client = approval.client.unwrap();
+    for text in [&client, &approval.detail] {
+        assert!(!text.contains("  "), "{text:?}");
+        assert!(
+            !text
+                .chars()
+                .any(|c| matches!(c, '\u{200b}' | '\u{202e}' | '\u{2066}')),
+            "{text:?}"
+        );
+    }
+    // The URL as it will be sent, not as the agent typed it.
+    assert_eq!(
+        approval.detail,
+        "GET https://openrouter.ai/a%20%20%20%20b%E2%81%A6c"
+    );
+}
+
+#[test]
+fn a_base_url_request_shows_its_path_not_the_address() {
+    let mut f = Fixture::new();
+    let mut secret = dokploy();
+    secret.policy.mode = Mode::Ask;
+    f.add(secret);
+    let token = f.token();
+    f.wait(
+        None,
+        AgentRequest::HttpRequest(get("dokploy", "/projects?all=1")),
+        f.t0,
+    );
+    let approval = f.overview(&token).approvals.remove(0);
+    // The agent's path; the base path is part of the hidden address.
+    assert_eq!(approval.detail, "GET /projects?all=1");
+}

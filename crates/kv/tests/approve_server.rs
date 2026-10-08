@@ -104,3 +104,40 @@ async fn locking_answers_a_waiting_request_at_once() {
             .is_empty()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_whose_agent_hung_up_is_withdrawn() {
+    let daemon = Daemon::start().await;
+    let call = daemon.agent_call();
+    let id = daemon.waiting_id().await;
+    call.abort();
+    let _ = call.await;
+    // Well before the 2 s approval wait runs out.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match daemon.with_token(ControlCommand::Overview).await {
+            ControlResponse::Overview { overview } if overview.approvals.is_empty() => break,
+            ControlResponse::Overview { .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(Instant::now() < deadline, "the request is still waiting");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let late = daemon
+        .with_token(ControlCommand::Decide {
+            id,
+            verdict: Verdict::AllowOnce,
+        })
+        .await;
+    assert!(matches!(late, ControlResponse::Error { .. }), "{late:?}");
+    assert!(
+        daemon
+            .upstream
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let audit = std::fs::read_to_string(&daemon.paths.audit).unwrap();
+    assert!(audit.contains(r#""outcome":"cancelled""#), "{audit}");
+}

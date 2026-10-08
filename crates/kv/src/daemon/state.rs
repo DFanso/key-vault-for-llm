@@ -320,7 +320,14 @@ impl Daemon {
             return refuse(self, "denied", too_many_waiting());
         }
         self.touch(now);
-        let detail = format!("{} {}", call.method, call.url);
+        // The URL as it will be sent; for a base_url handle, the agent's
+        // path, since the base path is part of the hidden address.
+        let detail = match &secret.value {
+            SecretValue::Http {
+                base_url: Some(_), ..
+            } => format!("{} {}", call.method, call.url),
+            _ => format!("{} {}", call.method, url.as_str()),
+        };
         let handle = call.handle.clone();
         let job = Prepared::Http(Box::new(HttpJob {
             secret,
@@ -523,6 +530,17 @@ impl Daemon {
                 self.settings.approval_wait.as_secs()
             ),
         ))
+    }
+
+    /// Takes back a request whose agent hung up before anyone answered, so
+    /// it can no longer be approved. Returns whether it was still waiting.
+    pub fn withdraw(&mut self, id: u64, now: Instant) -> bool {
+        let Some(index) = self.approvals.iter().position(|p| p.id == id) else {
+            return false;
+        };
+        let pending = self.approvals.remove(index);
+        self.record_unanswered(&pending, "denied", "cancelled", now);
+        true
     }
 
     fn decide(&mut self, id: u64, verdict: Verdict, now: Instant) -> Result<Vec<String>, Failure> {
@@ -1247,17 +1265,38 @@ fn too_many_waiting() -> AgentResponse {
 
 /// Agent-supplied text for the terminal: control characters, which could
 /// drive the user's terminal, become U+FFFD, and long text is cut.
+/// Makes agent-supplied text safe to show the user: control characters
+/// become U+FFFD, invisible format characters (bidi overrides, zero-width
+/// spaces) are dropped and runs of whitespace become one space, so the text
+/// can neither drive the terminal nor pose as extra lines in the TUI.
 fn printable(text: &str, max_chars: usize) -> String {
-    let mut out: String = text
-        .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-        .take(max_chars)
-        .collect();
-    if text.chars().count() > max_chars {
+    let mut clean = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !clean.ends_with(' ') {
+                clean.push(' ');
+            }
+        } else if c.is_control() {
+            clean.push('\u{FFFD}');
+        } else if !is_format(c) {
+            clean.push(c);
+        }
+    }
+    let mut out: String = clean.chars().take(max_chars).collect();
+    if clean.chars().count() > max_chars {
         out.pop();
         out.push('…');
     }
     out
+}
+
+/// Unicode format characters that change how text is laid out without
+/// being visible.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
 fn check_method(method: &str) -> Result<(), String> {

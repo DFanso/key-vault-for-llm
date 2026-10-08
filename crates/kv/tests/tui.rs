@@ -239,3 +239,115 @@ fn warnings_from_the_daemon_are_shown() {
     app.apply(Outcome::Done(vec!["openrouter: token is short".into()]));
     assert!(screen(&app).contains("token is short"));
 }
+
+fn overview_of(approvals: Vec<Approval>) -> Outcome {
+    Outcome::Overview(overview(approvals))
+}
+
+#[test]
+fn decisions_follow_the_request_not_its_place_in_the_list() {
+    let mut app = unlocked(vec![
+        approval(1, true),
+        approval(2, true),
+        approval(3, true),
+    ]);
+    press(&mut app, KeyCode::Down);
+    app.apply(overview_of(vec![approval(2, true), approval(3, true)]));
+    assert_eq!(
+        key(&mut app, 'a'),
+        Some(Effect::Decide {
+            id: 2,
+            verdict: Verdict::AllowOnce
+        })
+    );
+}
+
+#[test]
+fn when_the_selected_request_goes_nothing_is_selected() {
+    let mut app = unlocked(vec![
+        approval(1, true),
+        approval(2, true),
+        approval(3, true),
+    ]);
+    press(&mut app, KeyCode::Down);
+    app.apply(overview_of(vec![approval(1, true), approval(3, true)]));
+    assert_eq!(key(&mut app, 'a'), None);
+    assert!(
+        app.message().unwrap().contains("no longer waiting"),
+        "{:?}",
+        app.message()
+    );
+    assert!(!screen(&app).contains("a allow once"), "{}", screen(&app));
+    press(&mut app, KeyCode::Down);
+    assert_eq!(
+        key(&mut app, 'a'),
+        Some(Effect::Decide {
+            id: 1,
+            verdict: Verdict::AllowOnce
+        })
+    );
+}
+
+#[test]
+fn the_selected_request_is_numbered_and_stays_in_view() {
+    let mut app = unlocked((1..=10).map(|id| approval(id, true)).collect());
+    for _ in 0..9 {
+        press(&mut app, KeyCode::Down);
+    }
+    let drawn = screen(&app);
+    assert!(drawn.contains("page=10"), "{drawn}");
+    assert!(drawn.contains("#10"), "{drawn}");
+}
+
+#[test]
+fn control_and_alt_letters_are_not_commands() {
+    let mut app = unlocked(vec![approval(7, true)]);
+    for (c, modifiers) in [
+        ('a', KeyModifiers::CONTROL),
+        ('s', KeyModifiers::CONTROL),
+        ('d', KeyModifiers::ALT),
+        ('q', KeyModifiers::ALT),
+    ] {
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), modifiers)),
+            None
+        );
+    }
+    let mut app = App::new();
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    match press(&mut app, KeyCode::Enter) {
+        Some(Effect::OpenSession(passphrase)) => assert_eq!(passphrase.expose(), ""),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_paste_is_not_a_string_of_commands() {
+    let mut app = unlocked(vec![approval(7, true)]);
+    app.paste("sk-abcDq2");
+    assert_eq!(app.screen(), Screen::Main);
+    assert_eq!(app.tab(), Tab::Approvals, "a pasted 2 is not a tab switch");
+    key(&mut app, '2');
+    app.paste("exn");
+    assert!(app.form().is_none() && app.removing().is_none());
+    key(&mut app, '1');
+    assert!(app.message().is_none(), "{:?}", app.message());
+    assert_eq!(
+        key(&mut app, 'a'),
+        Some(Effect::Decide {
+            id: 7,
+            verdict: Verdict::AllowOnce
+        })
+    );
+}
+
+#[test]
+fn a_pasted_passphrase_is_one_input() {
+    let mut app = App::new();
+    app.paste("pass word\n");
+    assert!(!screen(&app).contains("pass"), "{}", screen(&app));
+    match press(&mut app, KeyCode::Enter) {
+        Some(Effect::OpenSession(passphrase)) => assert_eq!(passphrase.expose(), "pass word"),
+        other => panic!("{other:?}"),
+    }
+}

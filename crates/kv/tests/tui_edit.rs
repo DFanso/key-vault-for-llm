@@ -564,3 +564,90 @@ fn a_value_pasted_before_its_name_is_not_shown() {
     type_text(&mut app, AWS_KEY);
     assert!(!screen(&app).contains("EXAMPLE"), "{}", screen(&app));
 }
+
+#[test]
+fn a_multi_line_paste_stays_in_the_hidden_field() {
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    focus(&mut app, "name");
+    type_text(&mut app, "api");
+    focus(&mut app, "token");
+    app.paste("  line1\nline2\r\nSECRETVALUE \n");
+    assert_eq!(app.form().unwrap().focused(), Some("token"));
+    let drawn = screen(&app);
+    assert!(
+        !drawn.contains("SECRET") && !drawn.contains("line2"),
+        "{drawn}"
+    );
+    match added(save(&mut app)).value {
+        SecretValue::Http { token, .. } => assert_eq!(token.expose(), "line1line2SECRETVALUE"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn enter_never_leaves_a_hidden_field() {
+    // Without bracketed paste a pasted newline arrives as Enter; moving on
+    // would put the rest of the secret in the next, visible field.
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    focus(&mut app, "token");
+    type_text(&mut app, "part-one");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "part-two");
+    assert_eq!(app.form().unwrap().focused(), Some("token"));
+    assert!(!screen(&app).contains("part"), "{}", screen(&app));
+}
+
+#[test]
+fn a_pasted_env_block_becomes_variables() {
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    press(&mut app, KeyCode::Right);
+    focus(&mut app, "name");
+    type_text(&mut app, "svc");
+    focus(&mut app, "vars");
+    app.paste("A_KEY=first-value\nB_KEY=second-value\n");
+    let drawn = screen(&app);
+    assert!(drawn.contains("A_KEY, B_KEY"), "{drawn}");
+    assert!(
+        !drawn.contains("first") && !drawn.contains("second"),
+        "{drawn}"
+    );
+    match added(save(&mut app)).value {
+        SecretValue::Env { vars } => {
+            assert_eq!(vars["A_KEY"].expose(), "first-value");
+            assert_eq!(vars["B_KEY"].expose(), "second-value");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_value_with_equals_signs_typed_first_is_not_shown() {
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    press(&mut app, KeyCode::Right);
+    focus(&mut app, "vars");
+    for secret in [
+        "postgres://app:pw-hunter2@db/app?sslmode=require",
+        "c2Vj+cmV0/dmFs==",
+    ] {
+        type_text(&mut app, secret);
+        let drawn = screen(&app);
+        assert!(
+            !drawn.contains("hunter2") && !drawn.contains("c2Vj"),
+            "{drawn}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.message().unwrap().contains("NAME=value"),
+            "{:?}",
+            app.message()
+        );
+        assert!(!screen(&app).contains("hunter2"), "{}", screen(&app));
+        for _ in 0..secret.chars().count() {
+            press(&mut app, KeyCode::Backspace);
+        }
+    }
+}

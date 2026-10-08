@@ -330,9 +330,19 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 
 - Shows: client name from MCP `clientInfo` (labelled as self-reported),
   handle, tool, key arguments (method + URL, argv, first 200 characters of a
-  query), working directory, seconds left to answer. Agent-supplied text has
-  control characters replaced with U+FFFD and is cut to 64 characters (client)
-  or 300 (arguments, working directory), so it cannot drive the terminal.
+  query), working directory, seconds left to answer. The URL shown is the one
+  that will be sent (for a `base_url` handle, the agent's path). Agent-supplied
+  text has control characters replaced with U+FFFD, invisible format
+  characters (bidi overrides, zero-width spaces) dropped and whitespace runs
+  collapsed, and is cut to 64 characters (client) or 300 (arguments, working
+  directory), so it can neither drive the terminal nor pose as extra lines.
+- Decision keys act on the selected request by id. If it stops waiting,
+  nothing is selected until the user picks again with the arrow keys, so a
+  list that shifts never turns a key press into a decision on a request the
+  user has not read. Pastes arrive as one input (bracketed paste) and are
+  never read as commands; Ctrl and Alt letters do nothing.
+- A request whose agent hangs up is withdrawn at once and audited with
+  outcome `cancelled`; it can no longer be approved.
 - Actions: `a` allow once; `s` allow for `grant_ttl`, scoped to that MCP
   session + handle (only offered when the request named a session); `d` deny;
   `D` deny and set the secret to `mode: deny`. Decisions are audited as

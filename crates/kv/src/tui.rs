@@ -13,7 +13,10 @@ use std::time::Duration;
 use kv_core::proto::{ControlCommand, ControlErrorCode, ControlRequest, ControlResponse};
 use kv_core::secret::SecretText;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 
 use crate::paths::Paths;
 use crate::{audit, client};
@@ -149,7 +152,11 @@ pub async fn run(paths: Paths) -> io::Result<()> {
         return Err(io::Error::other("kv tui needs a terminal"));
     }
     let mut terminal = ratatui::init();
+    // A paste then arrives as one event instead of keystrokes. Terminals
+    // without it still work: hidden fields ignore Enter, see `form`.
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let result = event_loop(&mut terminal, paths).await;
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -164,14 +171,16 @@ async fn refresh(app: &mut App, driver: &mut Driver) {
 }
 
 async fn event_loop(terminal: &mut DefaultTerminal, paths: Paths) -> io::Result<()> {
-    let (keys_tx, mut keys) = tokio::sync::mpsc::unbounded_channel();
+    let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     // crossterm's reader blocks, so it gets a thread of its own.
     std::thread::spawn(move || {
         while let Ok(event) = event::read() {
-            if let Event::Key(key) = event
-                && key.kind == KeyEventKind::Press
-                && keys_tx.send(key).is_err()
-            {
+            let wanted = match &event {
+                Event::Key(key) => key.kind == KeyEventKind::Press,
+                Event::Paste(_) => true,
+                _ => false,
+            };
+            if wanted && events_tx.send(event).is_err() {
                 break;
             }
         }
@@ -182,8 +191,16 @@ async fn event_loop(terminal: &mut DefaultTerminal, paths: Paths) -> io::Result<
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
         tokio::select! {
-            key = keys.recv() => {
-                let Some(key) = key else { return Ok(()) };
+            event = events.recv() => {
+                let key = match event {
+                    Some(Event::Key(key)) => key,
+                    Some(Event::Paste(text)) => {
+                        app.paste(&text);
+                        continue;
+                    }
+                    Some(_) => continue,
+                    None => return Ok(()),
+                };
                 let Some(effect) = app.handle_key(key) else { continue };
                 if effect == Effect::Quit {
                     return Ok(());

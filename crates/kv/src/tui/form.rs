@@ -187,6 +187,12 @@ impl Form {
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
             KeyCode::Enter if self.save_focused() => return Reply::Submit,
+            // Without bracketed paste a pasted newline arrives as Enter;
+            // moving on would send the rest of a secret into the next,
+            // visible field. Tab moves on from a hidden field.
+            KeyCode::Enter if matches!(self.fields[self.focus].input, Input::Hidden) => {
+                return Reply::Nothing;
+            }
             KeyCode::Enter => return self.enter(),
             _ => {}
         }
@@ -213,18 +219,45 @@ impl Form {
         Reply::Nothing
     }
 
+    /// Pasted text goes into the focused field as one input: line breaks
+    /// and surrounding spaces are dropped from text and hidden fields, and
+    /// a pairs field takes one `NAME=value` per line. Nothing else takes a
+    /// paste.
+    pub fn paste(&mut self, text: &str) -> Reply {
+        let Some(field) = self.fields.get_mut(self.focus) else {
+            return Reply::Nothing;
+        };
+        match field.input {
+            Input::Text | Input::Hidden => {
+                let one_line: String = text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect();
+                field.text.push_str(one_line.trim());
+                Reply::Nothing
+            }
+            Input::Pairs => {
+                let mut pairs = Vec::new();
+                for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                    match parse_pair(line) {
+                        Some(pair) => pairs.push(pair),
+                        None => return Reply::Message(PAIR_HELP.into()),
+                    }
+                }
+                for (name, value) in pairs {
+                    field.pairs.retain(|(n, _)| *n != name);
+                    field.pairs.push((name, value));
+                }
+                Reply::Nothing
+            }
+            Input::Choice(_) => Reply::Nothing,
+        }
+    }
+
     /// Enter adds a typed pair, or moves on.
     fn enter(&mut self) -> Reply {
         let field = &mut self.fields[self.focus];
         if matches!(field.input, Input::Pairs) && !field.text.is_empty() {
-            let Some((name, value)) = field.text.split_once('=') else {
-                return Reply::Message("type a variable as NAME=value, then press Enter".into());
+            let Some((name, value)) = parse_pair(&field.text) else {
+                return Reply::Message(PAIR_HELP.into());
             };
-            let name = name.trim().to_owned();
-            if name.is_empty() {
-                return Reply::Message("type a variable as NAME=value, then press Enter".into());
-            }
-            let value = SecretText::new(value);
             field.pairs.retain(|(n, _)| *n != name);
             field.pairs.push((name, value));
             field.text.clear();
@@ -259,4 +292,24 @@ impl Form {
         }
         self.focus = next;
     }
+}
+
+const PAIR_HELP: &str =
+    "type a variable as NAME=value (letters, digits and _ in the name), then press Enter";
+
+/// `NAME=value` with a variable name and a value, or `None`.
+fn parse_pair(text: &str) -> Option<(String, SecretText)> {
+    let (name, value) = text.split_once('=')?;
+    let name = name.trim();
+    (is_variable_name(name) && !value.is_empty()).then(|| (name.to_owned(), SecretText::new(value)))
+}
+
+/// Letters, digits and `_`, not starting with a digit: what shells accept,
+/// and what the TUI is willing to draw before the value.
+pub fn is_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

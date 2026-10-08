@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::app::{App, Screen, Tab};
-use super::form::{Field, Form, Input};
+use super::form::{Field, Form, Input, is_variable_name};
 use crate::audit::Entry;
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -153,10 +153,37 @@ fn draw_approvals(frame: &mut Frame, app: &App, area: Rect) {
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     }
+    let cards: Vec<Vec<Line>> = approvals
+        .iter()
+        .map(|approval| {
+            let mut lines = approval_lines(approval, Some(approval.id) == app.selected());
+            lines.push(Line::raw(""));
+            lines
+        })
+        .collect();
+    // Skip whole cards from the top until the selected one fits, so it is
+    // never decided while off screen.
+    let width = area.width.saturating_sub(2).max(1) as usize;
+    let height = area.height.saturating_sub(2) as usize;
+    let rows = |card: &Vec<Line>| -> usize {
+        card.iter()
+            .map(|line| line.width().div_ceil(width).max(1))
+            .sum()
+    };
+    let selected = approvals
+        .iter()
+        .position(|a| Some(a.id) == app.selected())
+        .unwrap_or(0);
+    let mut skip = 0;
+    while skip < selected && 1 + cards[skip..=selected].iter().map(rows).sum::<usize>() > height {
+        skip += 1;
+    }
     let mut text = Text::default();
-    for (index, approval) in approvals.iter().enumerate() {
-        text.extend(approval_lines(approval, index == app.selected()));
-        text.push_line(Line::raw(""));
+    if skip > 0 {
+        text.push_line(Line::styled(format!("↑ {skip} more"), dim()));
+    }
+    for card in cards.into_iter().skip(skip) {
+        text.extend(card);
     }
     frame.render_widget(
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
@@ -178,7 +205,8 @@ fn approval_lines(approval: &Approval, selected: bool) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::styled(
             format!(
-                "{marker}{client} · {} · {}",
+                "{marker}#{} {client} · {} · {}",
+                approval.id,
                 approval.tool,
                 approval.handles.join(", ")
             ),
@@ -345,8 +373,10 @@ fn field_line(field: &Field, focused: bool) -> Line<'static> {
             // be a value pasted on its own.
             let dots = |text: &str| "•".repeat(text.chars().count());
             let typed = match field.text.split_once('=') {
-                Some((name, value)) => format!("{name}={}", dots(value)),
-                None => dots(&field.text),
+                Some((name, value)) if is_variable_name(name.trim()) => {
+                    format!("{name}={}", dots(value))
+                }
+                _ => dots(&field.text),
             };
             if focused || !typed.is_empty() {
                 spans.push(Span::styled(format!("+ {typed}"), dim()));
@@ -366,7 +396,7 @@ fn key_hints(app: &App) -> String {
     let mut hints = Vec::new();
     if app.tab() == Tab::Approvals {
         let approvals = app.overview().map_or(&[][..], |o| &o.approvals[..]);
-        if let Some(approval) = approvals.get(app.selected()) {
+        if let Some(approval) = approvals.iter().find(|a| Some(a.id) == app.selected()) {
             hints.push("a allow once");
             if approval.can_grant {
                 hints.push("s allow for session");

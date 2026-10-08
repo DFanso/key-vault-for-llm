@@ -10,6 +10,7 @@ use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlErrorCode, ControlRequest, ControlResponse,
     SessionInfo, Verdict,
 };
+use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
 use super::harden;
@@ -138,7 +139,10 @@ async fn serve_agent(
                 if notify {
                     notify::approval_needed(waiting.notice.clone());
                 }
-                wait_then_run(&daemon, &http, *waiting).await
+                match wait_then_run(&daemon, &http, &mut stream, *waiting).await {
+                    Some(response) => response,
+                    None => return,
+                }
             }
             prepared => run_job(prepared, &http).await,
         };
@@ -162,8 +166,14 @@ async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
 }
 
 /// Waits for the user's decision without holding the daemon lock, then runs
-/// the job or explains why not.
-async fn wait_then_run(daemon: &Shared, http: &reqwest::Client, waiting: Waiting) -> AgentResponse {
+/// the job or explains why not. `None` when the agent hung up while it
+/// waited: the request is withdrawn and nothing runs.
+async fn wait_then_run(
+    daemon: &Shared,
+    http: &reqwest::Client,
+    stream: &mut ServerStream,
+    waiting: Waiting,
+) -> Option<AgentResponse> {
     let Waiting {
         id,
         mut verdict,
@@ -171,20 +181,35 @@ async fn wait_then_run(daemon: &Shared, http: &reqwest::Client, waiting: Waiting
         wait,
         ..
     } = waiting;
-    let decided = match tokio::time::timeout(wait, &mut verdict).await {
-        Ok(decided) => decided.ok(),
-        Err(_) => {
-            let shared = daemon.clone();
-            let expired =
-                tokio::task::spawn_blocking(move || lock(&shared).expire(id, Instant::now())).await;
-            if let Ok(Some(response)) = expired {
-                return response;
+    // The agent sends nothing until it has its reply, so any read that
+    // returns means it closed the connection (or broke the protocol).
+    let mut byte = [0u8; 1];
+    let decided = tokio::select! {
+        waited = tokio::time::timeout(wait, &mut verdict) => match waited {
+            Ok(decided) => decided.ok(),
+            Err(_) => {
+                let shared = daemon.clone();
+                let expired = tokio::task::spawn_blocking(move || {
+                    lock(&shared).expire(id, Instant::now())
+                })
+                .await;
+                if let Ok(Some(response)) = expired {
+                    return Some(response);
+                }
+                // Decided, or locked, just as the wait ran out.
+                verdict.try_recv().ok()
             }
-            // Decided, or locked, just as the wait ran out.
-            verdict.try_recv().ok()
+        },
+        _ = stream.read(&mut byte) => {
+            let shared = daemon.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                lock(&shared).withdraw(id, Instant::now())
+            })
+            .await;
+            return None;
         }
     };
-    match decided {
+    Some(match decided {
         Some(Verdict::AllowOnce | Verdict::AllowSession) => run_job(then, http).await,
         Some(Verdict::Deny | Verdict::DenyAlways) => AgentResponse::Error {
             code: AgentErrorCode::ApprovalDenied,
@@ -196,7 +221,7 @@ async fn wait_then_run(daemon: &Shared, http: &reqwest::Client, waiting: Waiting
                 "the vault was locked before the request was approved; ask the user to unlock it"
                     .into(),
         },
-    }
+    })
 }
 
 async fn serve_control(mut stream: ServerStream, daemon: Shared, stop: watch::Sender<bool>) {
