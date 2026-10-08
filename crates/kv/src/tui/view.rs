@@ -259,11 +259,17 @@ fn draw_handles(frame: &mut Frame, app: &App, area: Rect) {
     if !requests.is_empty() && !handles.is_empty() {
         lines.push(Line::raw(""));
     }
+    let role_warnings = app.overview().map(|o| &o.role_warnings);
     for (index, handle) in handles.iter().enumerate() {
         if requests.len() + index == selected {
             selected_lines = lines.len()..lines.len() + 1;
         }
-        lines.push(handle_line(handle, requests.len() + index == selected));
+        let can_write = role_warnings.is_some_and(|w| w.contains_key(&handle.name));
+        lines.push(handle_line(
+            handle,
+            requests.len() + index == selected,
+            can_write,
+        ));
     }
     // The keys act on the selected row, so it is always on screen.
     let scroll = scroll_to(&lines, selected_lines, area.width, area.height);
@@ -322,7 +328,9 @@ fn request_lines(requested: &RequestedHandle, selected: bool) -> Vec<Line<'stati
     vec![first, Line::styled(why, dim())]
 }
 
-fn handle_line(handle: &HandleInfo, selected: bool) -> Line<'static> {
+/// `can_write`: a read-only handle whose database role turned out to have
+/// write access.
+fn handle_line(handle: &HandleInfo, selected: bool, can_write: bool) -> Line<'static> {
     let mode = match handle.mode {
         Mode::Auto => "auto",
         Mode::Ask => "ask",
@@ -334,11 +342,19 @@ fn handle_line(handle: &HandleInfo, selected: bool) -> Line<'static> {
     if !handle.description.is_empty() {
         text.push_str(&format!(" {}", handle.description));
     }
-    if selected {
-        Line::styled(text, Style::new().add_modifier(Modifier::BOLD))
+    let style = if selected {
+        Style::new().add_modifier(Modifier::BOLD)
     } else {
-        Line::raw(text)
+        Style::new()
+    };
+    let mut spans = vec![Span::styled(text, style)];
+    if can_write {
+        spans.push(Span::styled(
+            "  read-only, but the role can write",
+            Style::new().fg(Color::Red),
+        ));
     }
+    Line::from(spans)
 }
 
 fn draw_audit(frame: &mut Frame, entries: &[Entry], area: Rect) {

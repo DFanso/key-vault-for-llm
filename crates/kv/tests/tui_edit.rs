@@ -653,3 +653,38 @@ fn a_value_with_equals_signs_typed_first_is_not_shown() {
         }
     }
 }
+
+#[test]
+fn a_read_only_handle_whose_role_can_write_is_flagged() {
+    let pg = HandleInfo {
+        kind: SecretKind::Postgres,
+        read_only: true,
+        auth: None,
+        allowed_hosts: Vec::new(),
+        ..http_handle("prod-db")
+    };
+    let mut app = handles(vec![pg.clone(), http_handle("openrouter")]);
+    assert!(!screen(&app).contains("role can write"));
+    app.apply(Outcome::Overview(Overview {
+        status: Status {
+            vault_exists: true,
+            locked: false,
+            handle_count: Some(2),
+            locks_in_secs: None,
+            pending_approvals: 0,
+        },
+        handles: vec![pg, http_handle("openrouter")],
+        approvals: Vec::new(),
+        handle_requests: Vec::new(),
+        role_warnings: [(
+            "prod-db".to_owned(),
+            "prod-db is read-only, but...".to_owned(),
+        )]
+        .into(),
+    }));
+    let shown = screen(&app);
+    let line = shown.lines().find(|l| l.contains("prod-db")).unwrap();
+    assert!(line.contains("the role can write"), "{shown}");
+    let other = shown.lines().find(|l| l.contains("openrouter")).unwrap();
+    assert!(!other.contains("role can write"), "{shown}");
+}

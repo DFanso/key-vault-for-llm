@@ -237,3 +237,28 @@ async fn redis_replies_come_back_as_json_with_secrets_scrubbed() {
     let (code, _) = f.db(query("cache-ro", "DEL kv:test")).unwrap_err();
     assert_eq!(code, AgentErrorCode::PolicyDenied);
 }
+
+#[tokio::test]
+async fn kv_add_can_check_a_role_on_its_own() {
+    let Some(url) = server("KV_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = admin(&url, "kv_cr").await;
+    admin
+        .batch_execute(
+            "DROP ROLE IF EXISTS kv_cr_reader;
+             CREATE ROLE kv_cr_reader LOGIN PASSWORD 'reader-password-4567';",
+        )
+        .await
+        .unwrap();
+    let warning = db::check_role("pg", &url).await.unwrap();
+    assert!(warning.unwrap().contains("role can write"));
+    let mut reader = url::Url::parse(&url).unwrap();
+    reader.set_username("kv_cr_reader").unwrap();
+    reader.set_password(Some("reader-password-4567")).unwrap();
+    assert_eq!(db::check_role("pg", reader.as_str()).await.unwrap(), None);
+    let mut closed = url::Url::parse(&url).unwrap();
+    closed.set_port(Some(1)).unwrap();
+    let error = db::check_role("pg", closed.as_str()).await.unwrap_err();
+    assert!(!error.contains("reader-password"), "{error}");
+}

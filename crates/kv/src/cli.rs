@@ -317,6 +317,12 @@ async fn run(cli: Cli) -> Result<()> {
             let value = read_value(&args, &mut input)?;
             let mut policy = Policy::default();
             args.policy.patch().apply(&mut policy);
+            // Checked here, where the URL already is, so a slow database
+            // never holds up the daemon.
+            let role_url = match &value {
+                SecretValue::Postgres { url } if policy.read_only => Some(url.clone()),
+                _ => None,
+            };
             let secret = Secret {
                 name: args.name.clone(),
                 description: args.description.clone(),
@@ -335,6 +341,15 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await?;
             println!("added {}", args.name);
+            if let Some(url) = role_url {
+                match crate::broker::db::check_role(&args.name, url.expose()).await {
+                    Ok(None) => {}
+                    Ok(Some(warning)) => eprintln!("warning: {warning}"),
+                    Err(why) => eprintln!(
+                        "note: could not check the database role ({why}); kv checks it again on first use"
+                    ),
+                }
+            }
             Ok(())
         }
         Command::Rm { name } => {

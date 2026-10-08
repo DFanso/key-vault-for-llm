@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use kv_core::db::split_command;
+use kv_core::policy::Policy;
 use kv_core::proto::{
     AgentErrorCode, AgentResponse, MAX_OUTPUT_LEN, RedisReply, ResultSet, RowsReply,
 };
 use kv_core::scrub::Scrubber;
-use kv_core::secret::SecretValue;
+use kv_core::secret::{Secret, SecretText, SecretValue};
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_postgres::SimpleQueryMessage;
 
@@ -198,6 +199,38 @@ async fn connect(
         .map_err(|e| upstream(scrubber, &e))?;
     tokio::spawn(connection);
     Ok(client)
+}
+
+/// Checks the role behind a Postgres URL on its own connection, for
+/// `kv add`: the warning to show if it can write, or why it could not be
+/// checked, with the URL's secrets scrubbed.
+pub async fn check_role(handle: &str, url: &str) -> Result<Option<String>, String> {
+    let secret = Secret {
+        name: handle.to_owned(),
+        description: String::new(),
+        value: SecretValue::Postgres {
+            url: SecretText::new(url),
+        },
+        policy: Policy::default(),
+        created_at: 0,
+        updated_at: 0,
+    };
+    let values = secret.sensitive_values();
+    let scrubber = Scrubber::new(values.iter().map(|v| (handle, v.as_str())));
+    let message = |response: AgentResponse| match response {
+        AgentResponse::Error { message, .. } => message,
+        _ => String::new(),
+    };
+    let check = async {
+        let client = connect(url, "", &scrubber).await.map_err(message)?;
+        role_can_write(&client)
+            .await
+            .map_err(|e| message(upstream(&scrubber, &e)))
+    };
+    match tokio::time::timeout(CONNECT_TIMEOUT * 2, check).await {
+        Ok(can_write) => Ok(can_write?.then(|| role_warning(handle))),
+        Err(_) => Err("the database did not answer in time".into()),
+    }
 }
 
 fn role_warning(handle: &str) -> String {
