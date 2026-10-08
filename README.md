@@ -78,7 +78,9 @@ Agents cannot add secrets: no tool takes a value. Instead an agent calls
 the hosts or commands, and why it wants it), and kv shows a notification. The
 request waits at the top of the Handles tab. `Enter` opens the New handle form
 already filled in with the focus on the secret: type or paste it, add the base
-URL if the agent asked for one, check the rest and save. `x` dismisses the
+URL if the agent asked for one, check the hosts (at most 4, in plain ASCII) and
+save. Programs an `env` handle may run are shown as a hint rather than filled
+in, since one could be a shell; type the ones you allow. `x` dismisses the
 request. At most 16 wait at once; they survive a lock but not a daemon restart.
 
 ## Day to day

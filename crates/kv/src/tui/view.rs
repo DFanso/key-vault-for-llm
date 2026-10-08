@@ -358,11 +358,16 @@ fn audit_lines(entry: &Entry) -> Vec<Line<'static>> {
 
 fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
+    let mut focused_line = None;
     for (field, focused) in form.shown() {
+        if focused {
+            focused_line = Some(lines.len());
+        }
         lines.push(field_line(field, focused));
     }
     lines.push(Line::raw(""));
     let save = if form.save_focused() {
+        focused_line = Some(lines.len());
         Span::styled(" Save ", Style::new().add_modifier(Modifier::REVERSED))
     } else {
         Span::raw(" Save ")
@@ -373,8 +378,27 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
         "  Tab next · ←→ choose · Enter next or save · Esc cancel",
         dim(),
     ));
-    let height = (lines.len() as u16 + 2).min(area.height);
     let width = area.width.min(90);
+    // Sized and scrolled by wrapped rows, so long text (an agent's hosts,
+    // say) can never push the focused field out of sight.
+    let inner = width.saturating_sub(2).max(1);
+    let rows: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner)
+                .max(1)
+        })
+        .collect();
+    let total: usize = rows.iter().sum();
+    let visible = area.height.saturating_sub(2) as usize;
+    let scroll = focused_line.map_or(0, |i| {
+        let start: usize = rows[..i].iter().sum();
+        let end = start + rows[i];
+        end.saturating_sub(visible).min(start)
+    });
+    let height = (total as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y,
@@ -386,7 +410,8 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .wrap(Wrap { trim: false }),
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
         popup,
     );
 }

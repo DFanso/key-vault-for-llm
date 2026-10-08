@@ -24,7 +24,11 @@ fn key(app: &mut App, c: char) -> Option<Effect> {
 }
 
 fn screen(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    screen_of_height(app, 30)
+}
+
+fn screen_of_height(app: &App, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
     terminal.draw(|frame| view::draw(frame, app)).unwrap();
     let buffer = terminal.backend().buffer();
     let width = buffer.area.width as usize;
@@ -211,7 +215,12 @@ fn an_env_request_names_the_variables_to_add() {
     press(&mut app, KeyCode::Enter);
     let form = app.form().unwrap();
     assert_eq!(form.chosen("kind"), "env");
-    assert_eq!(form.text("cmds"), "terraform");
+    assert_eq!(form.text("cmds"), "", "the user names the programs");
+    assert!(
+        form.field("cmds").hint.contains("terraform"),
+        "{}",
+        form.field("cmds").hint
+    );
     assert_eq!(form.focused(), Some("vars"));
     let hint = &form.field("vars").hint;
     assert!(
@@ -256,4 +265,38 @@ fn the_selection_stays_on_the_list_when_requests_go() {
     )));
     key(&mut app, 'e');
     assert_eq!(app.form().unwrap().title(), "Edit openrouter");
+}
+
+#[test]
+fn a_new_request_does_not_move_the_cursor_off_a_handle() {
+    let mut app = app(Vec::new(), vec![handle("alpha"), handle("beta")]);
+    press(&mut app, KeyCode::Down);
+    app.apply(Outcome::Overview(overview(
+        vec![dokploy()],
+        vec![handle("alpha"), handle("beta")],
+    )));
+    key(&mut app, 'e');
+    assert_eq!(app.form().unwrap().title(), "Edit beta");
+}
+
+#[test]
+fn a_long_form_scrolls_to_the_focused_field() {
+    let mut request = dokploy();
+    // The most a request may carry: 4 hosts of up to 253 characters.
+    request.allowed_hosts = (0..3)
+        .map(|i| format!("api-{i}.{}.example.com", "a".repeat(230)))
+        .chain(["evil.example".to_owned()])
+        .collect();
+    let mut app = app(vec![request], Vec::new());
+    press(&mut app, KeyCode::Enter);
+    while app.form().unwrap().focused() != Some("hosts") {
+        press(&mut app, KeyCode::Tab);
+    }
+    let shown = screen_of_height(&app, 20);
+    assert!(shown.contains("evil.example"), "{shown}");
+    while app.form().unwrap().focused().is_some() {
+        press(&mut app, KeyCode::Tab);
+    }
+    let shown = screen_of_height(&app, 20);
+    assert!(shown.contains(" Save "), "{shown}");
 }

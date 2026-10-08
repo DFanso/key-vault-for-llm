@@ -215,8 +215,18 @@ impl App {
                     None if was_empty => self.selected = ids.first().copied(),
                     _ => {}
                 }
+                // Stay on the same request or handle when rows come and go
+                // above it, so a key never lands on a row the user did not
+                // pick; if it left, keep the place in the list.
+                let row = self
+                    .overview
+                    .as_ref()
+                    .and_then(|o| Row::at(o, self.selected_handle));
                 let rows = overview.handle_requests.len() + overview.handles.len();
-                self.selected_handle = self.selected_handle.min(rows.saturating_sub(1));
+                self.selected_handle = row
+                    .and_then(|row| row.index_in(&overview))
+                    .unwrap_or(self.selected_handle)
+                    .min(rows.saturating_sub(1));
                 self.overview = Some(overview);
             }
             Outcome::Audit(entries) => self.audit = entries,
@@ -427,6 +437,38 @@ impl App {
                     None
                 }
             },
+        }
+    }
+}
+
+/// A row of the handles tab, by identity rather than position.
+#[derive(PartialEq)]
+enum Row {
+    Request(u64),
+    Handle(String),
+}
+
+impl Row {
+    fn at(overview: &Overview, index: usize) -> Option<Row> {
+        let requests = &overview.handle_requests;
+        match requests.get(index) {
+            Some(request) => Some(Row::Request(request.id)),
+            None => overview
+                .handles
+                .get(index - requests.len())
+                .map(|h| Row::Handle(h.name.clone())),
+        }
+    }
+
+    fn index_in(&self, overview: &Overview) -> Option<usize> {
+        let requests = &overview.handle_requests;
+        match self {
+            Row::Request(id) => requests.iter().position(|r| r.id == *id),
+            Row::Handle(name) => overview
+                .handles
+                .iter()
+                .position(|h| h.name == *name)
+                .map(|i| requests.len() + i),
         }
     }
 }

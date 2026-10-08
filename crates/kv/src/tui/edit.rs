@@ -65,7 +65,14 @@ pub fn requested_handle(requested: &RequestedHandle) -> Form {
             "asked for: agents send only a path; type the service's URL".into();
     }
     form.field_mut("hosts").text = request.allowed_hosts.join(", ").into();
-    form.field_mut("cmds").text = request.allowed_cmds.join(", ").into();
+    // A program the agent names could be a shell that runs anything, so
+    // the user types the ones they allow.
+    if !request.allowed_cmds.is_empty() {
+        form.field_mut("cmds").hint = format!(
+            "asked for {}; type the ones you allow",
+            request.allowed_cmds.join(", ")
+        );
+    }
     if !request.env_vars.is_empty() {
         form.field_mut("vars").hint = format!(
             "NAME=value, Enter adds; asked for {}",

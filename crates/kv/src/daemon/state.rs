@@ -9,7 +9,9 @@ use std::time::{Duration, Instant, SystemTime};
 use kv_core::VaultError;
 use kv_core::crypto::KdfParams;
 use kv_core::crypto::fill_random;
-use kv_core::policy::{Decision, DenyReason, Mode, Operation, evaluate, http_target};
+use kv_core::policy::{
+    Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry,
+};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ControlCommand, ControlErrorCode,
     ControlRequest, ControlResponse, ExecCall, HandleRequest, HttpCall, Overview, PolicyPatch,
@@ -66,6 +68,7 @@ const MAX_PENDING: usize = 32;
 
 /// Handle requests kept for the user at once.
 const MAX_HANDLE_REQUESTS: usize = 16;
+const MAX_REQUESTED_HOSTS: usize = 4;
 
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
@@ -130,6 +133,8 @@ pub struct Daemon {
     /// secrets, so they outlast a lock.
     handle_requests: Vec<RequestedHandle>,
     next_request: u64,
+    /// The name of a handle request not yet announced; only new names are.
+    request_notice: Option<String>,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -222,6 +227,7 @@ impl Daemon {
             next_approval: 0,
             handle_requests: Vec::new(),
             next_request: 0,
+            request_notice: None,
             grants: Vec::new(),
         }
     }
@@ -281,6 +287,11 @@ impl Daemon {
         }
     }
 
+    /// The name of a newly requested handle to announce, once.
+    pub fn take_request_notice(&mut self) -> Option<String> {
+        self.request_notice.take()
+    }
+
     /// Queues a handle for the user to add in `kv tui`, keeping only what
     /// fits its kind and making agent text safe to show.
     fn request_handle(
@@ -312,6 +323,24 @@ impl Daemon {
                 "{MAX_HANDLE_REQUESTS} handle requests are already waiting; ask the user to open kv tui"
             ));
         }
+        // Few enough to read in full in the form, which is where the user
+        // decides where the token may go.
+        if request.kind == SecretKind::Http && request.allowed_hosts.len() > MAX_REQUESTED_HOSTS {
+            return bad(format!(
+                "ask for at most {MAX_REQUESTED_HOSTS} hosts; the user can add more"
+            ));
+        }
+        if request.kind == SecretKind::Http
+            && let Some(host) = request
+                .allowed_hosts
+                .iter()
+                .find(|h| !is_host_entry(h.trim()))
+        {
+            return bad(format!(
+                "{:?} is not a host or host:port in plain ASCII (use punycode for other letters)",
+                printable(host, 253)
+            ));
+        }
         request.description = printable(&request.description, 300);
         request.reason = printable(&request.reason, 300);
         let list = |items: Vec<String>, keep: &dyn Fn(&str) -> bool, max: usize| -> Vec<String> {
@@ -332,7 +361,7 @@ impl Daemon {
                     param: printable(&param, 100),
                 },
             });
-            request.allowed_hosts = list(request.allowed_hosts, &|_| true, 16);
+            request.allowed_hosts = list(request.allowed_hosts, &|_| true, MAX_REQUESTED_HOSTS);
         } else {
             request.auth = None;
             request.base_url = false;
@@ -356,7 +385,10 @@ impl Daemon {
         };
         match replaces {
             Some(index) => self.handle_requests[index] = requested,
-            None => self.handle_requests.push(requested),
+            None => {
+                self.handle_requests.push(requested);
+                self.request_notice = Some(name.clone());
+            }
         }
         AgentResponse::Requested { name }
     }

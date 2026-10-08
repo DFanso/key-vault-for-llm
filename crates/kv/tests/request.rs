@@ -176,3 +176,47 @@ fn requests_survive_a_lock() {
     let token = f.token();
     assert_eq!(f.overview(&token).handle_requests.len(), 1);
 }
+
+#[test]
+fn requested_hosts_must_be_plain_ascii_host_names() {
+    let mut f = Fixture::new();
+    for host in [
+        "api.githu\u{042c}.com",
+        "api.github.com,evil.example",
+        "https://api.github.com/",
+        "user@api.github.com",
+    ] {
+        let mut request = dokploy_request("gh");
+        request.allowed_hosts = vec![host.into()];
+        let message = refused(ask(&mut f, None, request));
+        assert!(message.contains("host"), "{host}: {message}");
+    }
+    let mut request = dokploy_request("gh");
+    request.allowed_hosts = vec!["api.github.com".into(), "[::1]:8443".into()];
+    assert!(matches!(
+        ask(&mut f, None, request),
+        AgentResponse::Requested { .. }
+    ));
+}
+
+#[test]
+fn only_a_new_name_is_announced() {
+    let mut f = Fixture::new();
+    ask(&mut f, None, dokploy_request("dokploy"));
+    assert_eq!(f.daemon.take_request_notice().as_deref(), Some("dokploy"));
+    assert_eq!(f.daemon.take_request_notice(), None);
+    ask(&mut f, None, dokploy_request("dokploy"));
+    assert_eq!(
+        f.daemon.take_request_notice(),
+        None,
+        "asking again is not news"
+    );
+}
+
+#[test]
+fn a_request_names_at_most_four_hosts() {
+    let mut f = Fixture::new();
+    let mut request = dokploy_request("gh");
+    request.allowed_hosts = (0..5).map(|i| format!("api-{i}.example.com")).collect();
+    assert!(refused(ask(&mut f, None, request)).contains("4 hosts"));
+}

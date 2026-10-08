@@ -281,6 +281,13 @@ fn check_http(
     Ok(())
 }
 
+/// Whether `entry` is an `allowed_hosts` entry written in plain ASCII, so
+/// what the user reads is the host the token goes to: no lookalike letters
+/// and no commas that a list would split on.
+pub fn is_host_entry(entry: &str) -> bool {
+    entry.is_ascii() && !entry.contains(',') && host_entry("https", entry).is_some()
+}
+
 fn normalize_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }

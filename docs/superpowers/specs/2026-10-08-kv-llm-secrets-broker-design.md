@@ -216,13 +216,18 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 `request_handle` lets an agent ask for a handle it lacks without ever
 carrying a value: unknown arguments such as `token` are refused, and the
 request type has no field for one. The daemon refuses a name that is invalid
-or already a handle, keeps at most 16 requests (asking again for a name
-replaces the earlier request), cleans the agent's text as for approvals, and
+or already a handle, and more than 4 hosts or a host that is not a plain-ASCII
+`host` or `host:port` (so lookalike letters cannot pose as a known host). It
+keeps at most 16 requests (asking again for a name replaces the earlier request
+and is not announced again), cleans the agent's text as for approvals, and
 drops fields that do not belong to the kind. Requests live in memory, survive
 a lock, appear in `overview`, and leave when a handle with that name is added
 or the user dismisses them (`dismiss_request`, audited). The TUI lists them
-first on the Handles tab; `Enter` opens the New handle form filled in from the
-request with mode `ask` and the focus on the secret field, and `x` dismisses.
+first on the Handles tab, selected by identity so rows arriving above never
+move the cursor; `Enter` opens the New handle form filled in from the request
+with mode `ask` and the focus on the secret field, and `x` dismisses. Requested
+programs are a hint, not a prefilled policy, because one could be a shell. The
+form scrolls by wrapped rows so the focused field is always in view.
 A notification announces each request.
 
 ### Request pipeline (daemon)
