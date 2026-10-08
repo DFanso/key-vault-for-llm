@@ -5,9 +5,10 @@ secrets (`prod-db`, `openrouter`, `github`) and the broker does the
 authenticated work, so API keys, database URLs and other credentials never
 show up in a chat transcript or in the model's context.
 
-Status: agents can make HTTP requests and run programs with your secrets over
-MCP, and `kv tui` approves `--mode ask` requests as they arrive. Database
-access comes next.
+Status: agents can make HTTP requests, run programs and query Postgres and
+Redis with your secrets over MCP, and `kv tui` approves `--mode ask` requests
+as they arrive. A local database proxy for tools that need a connection comes
+next.
 
 ## Setup
 
@@ -18,15 +19,18 @@ kv init                       # create the vault and choose a passphrase
 kv add openrouter --kind http --host openrouter.ai --mode auto
 kv add aws --kind env --var AWS_ACCESS_KEY_ID --var AWS_SECRET_ACCESS_KEY \
   --cmd terraform             # mode ask: each use waits for you in kv tui
+kv add prod-db --kind postgres --read-only true   # prompts for the postgres:// URL
 
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
 
-The agent then sees five tools:
+The agent then sees six tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
 - `exec`: runs a program (never a shell) with an `env` handle's variables set.
+- `db_query`: runs SQL on a `postgres` handle or a command on a `redis`
+  handle (see below).
 - `request_handle`: asks you to add a handle it needs (see below).
 - `status`: whether the vault is unlocked.
 
@@ -44,6 +48,27 @@ from everything it gets back:
 ```sh
 kv add dokploy --kind http --base-url --header x-api-key --template '{}' --mode auto
 ```
+
+### Databases
+
+`db_query` opens a connection of its own for each query. Postgres takes one or
+more statements and returns one result per statement, every value as text; a
+Redis command line such as `HGETALL user:1` returns the reply as JSON. Results
+stop at 256 KiB, and a query stops after 30 seconds unless the agent asks for
+up to 300. The database's address is scrubbed from results like the password,
+unless it is `localhost`. TLS certificates are always checked against the
+system's trust store; `sslmode=disable` in the URL turns TLS off.
+
+With `--read-only true`:
+
+- Redis runs only read commands, such as `GET`, `HGETALL`, `SCAN` and
+  `ZRANGE`.
+- Postgres sessions start with `default_transaction_read_only=on`, and kv
+  refuses queries that mention a way to change that, and `DO` blocks. This is
+  best effort; the real guarantee is a database role that can only read. kv
+  checks the role when you `kv add` the handle and on its first query after
+  each unlock, and warns (in `kv add`, the query result and the Handles tab of
+  `kv tui`) when it can write.
 
 ## Approving requests
 
@@ -120,8 +145,8 @@ audit log (`audit.jsonl`), without values.
 
 ## Planned for v1
 
-- Local database proxy (Postgres, Redis) that connects upstream with the real
-  credentials, with optional read-only enforcement
+- `db_connect`: a local database proxy (Postgres, Redis) for tools that need a
+  connection, which connects upstream with the real credentials
 - Touch ID and Windows Hello unlock, and prebuilt binaries
 
 ## What kv protects against
