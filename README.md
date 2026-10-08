@@ -6,8 +6,8 @@ authenticated work, so API keys, database URLs and other credentials never
 show up in a chat transcript or in the model's context.
 
 Status: agents can make HTTP requests and run programs with your secrets over
-MCP. Approval prompts (`--mode ask`) arrive with `kv tui`; until then only
-handles set to `--mode auto` can be used. Database access comes after that.
+MCP, and `kv tui` approves `--mode ask` requests as they arrive. Database
+access comes next.
 
 ## Setup
 
@@ -17,7 +17,7 @@ cargo install --path crates/kv
 kv init                       # create the vault and choose a passphrase
 kv add openrouter --kind http --host openrouter.ai --mode auto
 kv add aws --kind env --var AWS_ACCESS_KEY_ID --var AWS_SECRET_ACCESS_KEY \
-  --cmd terraform --mode auto
+  --cmd terraform             # mode ask: each use waits for you in kv tui
 
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
@@ -44,6 +44,32 @@ from everything it gets back:
 kv add dokploy --kind http --base-url --header x-api-key --template '{}' --mode auto
 ```
 
+## Approving requests
+
+Handles in `--mode ask` (the default) make the agent wait until you answer in
+`kv tui`, for up to 60 seconds. kv also shows a desktop notification; set
+`KV_NOTIFY=off` and run `kv stop` to turn that off.
+
+```sh
+kv tui
+```
+
+Unlock with the passphrase once; the TUI then holds a session token that
+works until the vault locks. On the Approvals tab each waiting request shows
+the agent's name (as the agent reports it), the tool, the handles and what it
+asked for:
+
+- `a` allow once
+- `s` allow the same handles for this agent session until the handle's
+  `grant_ttl` (15 minutes unless set with `kv policy --grant-ttl`)
+- `d` deny
+- `D` deny, and set the handles to `--mode deny`
+
+The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
+their policy (`p`). Secret values are typed into hidden fields and never shown
+again; leave one blank when editing to keep it. The Audit tab shows the
+newest entries of the audit log. `L` locks the vault, `q` quits.
+
 ## Day to day
 
 ```sh
@@ -63,8 +89,9 @@ arguments, where they would end up in shell history.
 `X-HTTP-Method-Override`, but kv cannot see a `_method` field inside a request
 body, so for a strictly read-only key prefer one the service itself limits.
 
-Every command that changes the vault asks for the passphrase, so an agent
-running commands as you cannot add, remove or loosen secrets. The vault locks
+Every command that changes the vault asks for the passphrase, or runs inside
+an unlocked `kv tui`, so an agent running commands as you cannot add, remove
+or loosen secrets. The vault locks
 itself after 8 hours without use. To change that, set `KV_IDLE_LOCK=2h` (any
 duration) in your shell profile and run `kv stop` so the next command picks it
 up.
@@ -80,8 +107,6 @@ audit log (`audit.jsonl`), without values.
 
 ## Planned for v1
 
-- `kv tui`: approval prompts for `--mode ask` handles, editing and the audit
-  log in a terminal UI
 - Local database proxy (Postgres, Redis) that connects upstream with the real
   credentials, with optional read-only enforcement
 - Touch ID and Windows Hello unlock, and prebuilt binaries

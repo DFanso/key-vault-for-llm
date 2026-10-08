@@ -84,16 +84,30 @@ on Windows. Both sockets verify the peer runs as the same OS user
 
 - **Agent socket**: `list_handles`, `http_request`, `db_query`, `db_connect`,
   `exec`, `status`. No message type on this socket can carry a secret value;
-  this is enforced by the types in `kv-core`, not by runtime checks.
-- **Control socket**: `init`, `unlock`, `lock`, `stop`, `approve`, `deny`,
-  secret and policy CRUD, passphrase change. Every command except `lock` and
-  `stop` must prove the user is present:
+  this is enforced by the types in `kv-core`, not by runtime checks. A
+  connection may open with a `hello` frame naming its agent session (a random
+  id `kv mcp` picks per MCP connection, at most 128 bytes) and client (the MCP
+  `clientInfo` name, self-reported, at most 1024 bytes). It gets no reply;
+  approvals use it to scope grants and to tell the user who is asking.
+- **Control socket**: `init`, `unlock`, `lock`, `stop`, `open_session`,
+  `overview`, `decide`, secret and policy CRUD (`add`, `update`, `remove`,
+  `set_policy`), passphrase change. Every command except `lock` and `stop`
+  must prove the user is present:
   - CLI commands (`kv add`, `kv rm`, `kv policy`, `kv passwd`, `kv unlock`)
     carry the vault passphrase, checked per command. Nothing reusable outlives
     the command, so an agent running commands as the user has nothing to
     replay. Wrong passphrases count toward the unlock backoff.
-  - The TUI (Plan 4) unlocks once and then holds a session token in memory
-    for approvals and edits.
+  - `kv tui` sends the passphrase once with `open_session`, which unlocks the
+    vault if needed and returns a random 256-bit token (64 hex characters)
+    held only in TUI memory. The token stands in for the passphrase on every
+    command except `init`, `open_session` and `passphrase change`. Tokens are
+    compared in constant time, at most 16 are open at once (the oldest is
+    dropped), and every lock and passphrase change ends them all. A wrong or
+    ended token gets `session_ended`; it does not count toward the unlock
+    backoff, since 256 bits cannot be guessed.
+  - `overview` (status, handles and waiting requests) needs a token, is not
+    audited and does not count as use of the vault, so a TUI left open does
+    not keep the vault from locking.
 - Malformed frames get a `bad_request` reply and the connection is closed;
   control-socket replies never echo request content, which may include the
   passphrase. Frames are capped at 4 MiB, so a reply with 256 KiB of stdout
@@ -203,10 +217,10 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 1. Vault locked → `vault_locked`.
 2. Policy check → `policy_denied` with the failing rule.
 3. `mode: ask` and no matching grant → enqueue approval, send OS notification,
-   wait up to 60 s → `approval_denied` / `approval_timeout` on failure.
-   Until the TUI exists (Plan 4) there is no one to ask, so these requests
-   fail at once with `approval_timeout` and a message pointing at
-   `kv policy <handle> --mode auto`.
+   wait up to 60 s → `approval_denied` / `approval_timeout` on failure. The
+   wait happens outside the daemon lock, so other requests keep flowing. At
+   most 32 requests wait at once; more get `approval_timeout` at once. Locking
+   answers every waiting request with `vault_locked` and drops all grants.
 4. Execute.
 5. Scrub output.
 6. Write audit record.
@@ -316,18 +330,32 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 
 - Shows: client name from MCP `clientInfo` (labelled as self-reported),
   handle, tool, key arguments (method + URL, argv, first 200 characters of a
-  query), working directory.
+  query), working directory, seconds left to answer. Agent-supplied text has
+  control characters replaced with U+FFFD and is cut to 64 characters (client)
+  or 300 (arguments, working directory), so it cannot drive the terminal.
 - Actions: `a` allow once; `s` allow for `grant_ttl`, scoped to that MCP
-  session + handle; `d` deny; `D` deny and set the secret to `mode: deny`.
-- OS notification via `notify-rust` when a request is queued.
+  session + handle (only offered when the request named a session); `d` deny;
+  `D` deny and set the secret to `mode: deny`. Decisions are audited as
+  `decide`; the request itself is audited with decision `approved` or
+  `denied`, and an unanswered one as `denied` with outcome `approval_timeout`.
+- OS notification via `notify-rust` when a request is queued, naming the
+  client and handles but no arguments. On by default; `KV_NOTIFY=off` (or
+  `kv daemon --notify off`) turns it off.
+- Handles tab: add, edit (description, or a new value of the same kind;
+  blank secret fields keep the old value, and an http value without a base
+  URL keeps the handle's), change policy, remove after a yes. Secret fields
+  are drawn as dots.
+- Audit tab: the newest 200 entries, read from the end of `audit.jsonl` by
+  the TUI itself, with control characters replaced.
 
 ### Audit log
 
-- JSONL at `<data dir>/kv/audit.jsonl`: timestamp, MCP session id, client
-  name, handle, tool, scrubbed argument summary, decision
+- JSONL at `<data dir>/kv/audit.jsonl`: timestamp, handle, tool, scrubbed
+  argument summary, decision
   (`auto|approved|denied|policy|locked|invalid`; `invalid` covers malformed
   requests and unknown handles), outcome (HTTP status / exit code /
-  error code), duration.
+  error code), duration. Recording the MCP session id and client name is
+  planned, not yet done.
 - Never contains secret values. Rotates at 10 MB, keeps 5 files. Viewable in
   the TUI.
 - Not tamper-proof against the same OS user.

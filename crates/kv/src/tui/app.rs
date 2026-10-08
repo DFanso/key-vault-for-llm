@@ -3,6 +3,8 @@
 //! update what is shown.
 
 use kv_core::proto::{Overview, PolicyPatch, Verdict};
+
+use crate::audit::Entry;
 use kv_core::secret::{Secret, SecretText, SecretValue};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroizing;
@@ -20,6 +22,7 @@ pub enum Screen {
 pub enum Tab {
     Approvals,
     Handles,
+    Audit,
 }
 
 /// Something only the daemon can do.
@@ -56,6 +59,8 @@ pub enum Outcome {
     Failed(String),
     /// Done, with any warnings the daemon gave.
     Done(Vec<String>),
+    /// The end of the audit log, newest first.
+    Audit(Vec<Entry>),
 }
 
 /// An open form and what saving it means.
@@ -71,6 +76,7 @@ pub struct App {
     tab: Tab,
     passphrase: Zeroizing<String>,
     overview: Option<Overview>,
+    audit: Vec<Entry>,
     /// Index into the waiting requests.
     selected: usize,
     /// Index into the handles.
@@ -94,6 +100,7 @@ impl App {
             tab: Tab::Approvals,
             passphrase: Zeroizing::new(String::new()),
             overview: None,
+            audit: Vec::new(),
             selected: 0,
             selected_handle: 0,
             editor: None,
@@ -116,6 +123,11 @@ impl App {
 
     pub fn overview(&self) -> Option<&Overview> {
         self.overview.as_ref()
+    }
+
+    /// The end of the audit log, newest first.
+    pub fn audit(&self) -> &[Entry] {
+        &self.audit
     }
 
     /// The open form, if any.
@@ -173,9 +185,11 @@ impl App {
                 self.selected_handle = self.selected_handle.min(last(overview.handles.len()));
                 self.overview = Some(overview);
             }
+            Outcome::Audit(entries) => self.audit = entries,
             Outcome::Ended(reason) => {
                 self.screen = Screen::Unlock;
                 self.overview = None;
+                self.audit.clear();
                 self.editor = None;
                 self.removing = None;
                 self.message = Some(reason);
@@ -219,19 +233,25 @@ impl App {
             KeyCode::Char('L') => {
                 self.screen = Screen::Unlock;
                 self.overview = None;
+                self.audit.clear();
                 self.message = Some("locked".into());
                 return Some(Effect::Lock);
             }
             KeyCode::Char('1') => self.tab = Tab::Approvals,
             KeyCode::Char('2') => self.tab = Tab::Handles,
+            KeyCode::Char('3') => self.tab = Tab::Audit,
             KeyCode::Tab => {
                 self.tab = match self.tab {
                     Tab::Approvals => Tab::Handles,
-                    Tab::Handles => Tab::Approvals,
+                    Tab::Handles => Tab::Audit,
+                    Tab::Audit => Tab::Approvals,
                 }
             }
-            _ if self.tab == Tab::Approvals => return self.approvals_key(key),
-            _ => self.handles_key(key),
+            _ => match self.tab {
+                Tab::Approvals => return self.approvals_key(key),
+                Tab::Handles => self.handles_key(key),
+                Tab::Audit => {}
+            },
         }
         None
     }

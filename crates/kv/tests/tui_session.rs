@@ -144,3 +144,17 @@ async fn adding_and_removing_a_handle_through_the_tui() {
     refresh(&mut app, &mut driver).await;
     assert_eq!(names(&app), ["api"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_driver_reads_the_daemons_audit_log() {
+    let daemon = Daemon::start().await;
+    let mut driver = Driver::new(daemon.paths.clone());
+    let mut app = App::new();
+    unlock(&mut app, &mut driver, PASS).await;
+    match driver.audit().await {
+        Outcome::Audit(entries) => {
+            assert_eq!(entries[0].action, "open_session", "{entries:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -15,12 +15,15 @@ use kv_core::secret::SecretText;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use crate::client;
 use crate::paths::Paths;
-use app::{App, Effect, Outcome};
+use crate::{audit, client};
+use app::{App, Effect, Outcome, Tab};
 
 /// How often the screen asks the daemon for news.
 const REFRESH: Duration = Duration::from_millis(500);
+
+/// How many audit log lines the audit tab shows.
+const AUDIT_LINES: usize = 200;
 
 /// Carries out effects against the daemon and holds the session token.
 pub struct Driver {
@@ -100,6 +103,17 @@ impl Driver {
         Some(self.send(ControlCommand::Overview).await)
     }
 
+    /// Reads the end of the audit log. The log holds no secret values, so
+    /// this needs no session.
+    pub async fn audit(&self) -> Outcome {
+        let path = self.paths.audit.clone();
+        match tokio::task::spawn_blocking(move || audit::tail(&path, AUDIT_LINES)).await {
+            Ok(Ok(entries)) => Outcome::Audit(entries),
+            Ok(Err(e)) => Outcome::Failed(format!("could not read the audit log: {e}")),
+            Err(e) => Outcome::Failed(format!("could not read the audit log: {e}")),
+        }
+    }
+
     async fn send(&mut self, command: ControlCommand) -> Outcome {
         let Some(token) = self.token.clone() else {
             return Outcome::Ended("unlock first".into());
@@ -140,6 +154,15 @@ pub async fn run(paths: Paths) -> io::Result<()> {
     result
 }
 
+async fn refresh(app: &mut App, driver: &mut Driver) {
+    if let Some(outcome) = driver.refresh().await {
+        app.apply(outcome);
+    }
+    if app.screen() == app::Screen::Main && app.tab() == Tab::Audit {
+        app.apply(driver.audit().await);
+    }
+}
+
 async fn event_loop(terminal: &mut DefaultTerminal, paths: Paths) -> io::Result<()> {
     let (keys_tx, mut keys) = tokio::sync::mpsc::unbounded_channel();
     // crossterm's reader blocks, so it gets a thread of its own.
@@ -167,15 +190,9 @@ async fn event_loop(terminal: &mut DefaultTerminal, paths: Paths) -> io::Result<
                 }
                 let outcome = driver.run(effect).await;
                 app.apply(outcome);
-                if let Some(outcome) = driver.refresh().await {
-                    app.apply(outcome);
-                }
+                refresh(&mut app, &mut driver).await;
             }
-            _ = tick.tick() => {
-                if let Some(outcome) = driver.refresh().await {
-                    app.apply(outcome);
-                }
-            }
+            _ = tick.tick() => refresh(&mut app, &mut driver).await,
         }
     }
 }

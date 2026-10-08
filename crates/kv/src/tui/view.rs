@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::app::{App, Screen, Tab};
 use super::form::{Field, Form, Input};
+use crate::audit::Entry;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     match app.screen() {
@@ -71,6 +72,7 @@ fn draw_main(frame: &mut Frame, app: &App) {
     match app.tab() {
         Tab::Approvals => draw_approvals(frame, app, body),
         Tab::Handles => draw_handles(frame, app, body),
+        Tab::Audit => draw_audit(frame, app.audit(), body),
     }
     if let Some(form) = app.form() {
         draw_form(frame, form, body);
@@ -138,6 +140,8 @@ fn tab_line(app: &App) -> Line<'static> {
         ),
         Span::raw(" "),
         tab("2 Handles".into(), app.tab() == Tab::Handles),
+        Span::raw(" "),
+        tab("3 Audit".into(), app.tab() == Tab::Audit),
     ])
 }
 
@@ -225,6 +229,52 @@ fn handle_line(handle: &HandleInfo, selected: bool) -> Line<'static> {
     } else {
         Line::raw(text)
     }
+}
+
+fn draw_audit(frame: &mut Frame, entries: &[Entry], area: Rect) {
+    let block = Block::bordered().title(" Audit log, newest first (UTC) ");
+    if entries.is_empty() {
+        let text = Line::styled("No audit entries yet.", dim());
+        frame.render_widget(Paragraph::new(text).block(block), area);
+        return;
+    }
+    let lines: Vec<Line> = entries.iter().flat_map(audit_lines).collect();
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// What happened on one line, and what was asked for under it.
+fn audit_lines(entry: &Entry) -> Vec<Line<'static>> {
+    // `2026-10-08T12:03:04.123Z` → `2026-10-08 12:03:04`
+    let time: String = entry
+        .ts
+        .chars()
+        .take(19)
+        .map(|c| if c == 'T' { ' ' } else { c })
+        .collect();
+    let decision = entry.decision.as_deref().unwrap_or("");
+    let style = match decision {
+        "denied" | "policy" | "locked" => Style::new().fg(Color::Red),
+        "approved" => Style::new().fg(Color::Green),
+        _ => Style::new(),
+    };
+    let mut spans = vec![
+        Span::styled(format!("{time}  "), dim()),
+        Span::raw(format!(
+            "{:<14} {:<16} ",
+            entry.action,
+            entry.handle.as_deref().unwrap_or("")
+        )),
+        Span::styled(format!("{decision:<9}"), style),
+        Span::raw(format!("{:<16}", entry.outcome)),
+    ];
+    if let Some(ms) = entry.duration_ms {
+        spans.push(Span::styled(format!("{ms}ms"), dim()));
+    }
+    let mut lines = vec![Line::from(spans)];
+    if let Some(summary) = &entry.summary {
+        lines.push(Line::raw(format!("    {summary}")));
+    }
+    lines
 }
 
 fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
@@ -330,7 +380,7 @@ fn key_hints(app: &App) -> String {
             hints.extend(["e edit", "p policy", "x remove", "↑↓ select"]);
         }
     }
-    hints.extend(["1/2 tabs", "L lock", "q quit"]);
+    hints.extend(["1/2/3 tabs", "L lock", "q quit"]);
     hints.join(" · ")
 }
 
