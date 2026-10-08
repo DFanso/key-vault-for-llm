@@ -109,6 +109,31 @@ fn spawn_daemon() -> io::Result<()> {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        stop_inheriting_std_handles();
     }
     command.spawn().map(drop)
+}
+
+/// Windows gives a child every inheritable handle, including this process's
+/// own stdin, stdout and stderr, which are often a caller's pipes. A daemon
+/// holding them would keep the caller waiting for output until it exits.
+#[cfg(windows)]
+fn stop_inheriting_std_handles() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle returns this process's own handle, or null or
+        // INVALID_HANDLE_VALUE when there is none. Clearing the inherit flag
+        // only changes what future children receive.
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }

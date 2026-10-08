@@ -486,3 +486,27 @@ fn lock_fails_loudly_when_the_daemon_cannot_be_reached() {
         assert!(stderr.starts_with("kv: "), "{stderr}");
     }
 }
+
+#[test]
+fn output_pipes_close_when_a_command_that_started_the_daemon_exits() {
+    let kv = Kv::new();
+    let mut child = kv
+        .command(&["status"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut text);
+        let _ = sender.send(text);
+    });
+    let text = receiver
+        .recv_timeout(Duration::from_secs(15))
+        .expect("stdout stayed open after kv exited, so the daemon inherited it");
+    assert!(text.contains("no vault yet"), "{text}");
+    child.wait().unwrap();
+}
