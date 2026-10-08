@@ -510,3 +510,31 @@ fn output_pipes_close_when_a_command_that_started_the_daemon_exits() {
     assert!(text.contains("no vault yet"), "{text}");
     child.wait().unwrap();
 }
+
+#[test]
+fn a_base_url_handle_lists_as_paths_only_without_its_address() {
+    let kv = Kv::initialized();
+    kv.ok(
+        &[
+            "add",
+            "dokploy",
+            "--kind",
+            "http",
+            "--base-url",
+            "--header",
+            "x-api-key",
+            "--template",
+            "{}",
+        ],
+        &format!("{PASS}\ndokploy-token-0123456789\n  https://dokploy.internal.example/api  \n"),
+    );
+    let list = kv.ok(&["list"], "");
+    assert!(list.contains("paths-only"), "{list}");
+    assert!(!list.contains("dokploy.internal"), "{list}");
+    let json = kv.ok(&["list", "--json"], "");
+    assert!(
+        json.contains(r#""takes_path": true"#) || json.contains(r#""takes_path":true"#),
+        "{json}"
+    );
+    assert!(!json.contains("dokploy.internal"), "{json}");
+}

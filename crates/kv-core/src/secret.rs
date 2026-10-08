@@ -62,6 +62,10 @@ pub enum SecretValue {
     Http {
         token: SecretText,
         placement: AuthPlacement,
+        /// Keeps the service's address hidden too: agents send a path, which
+        /// is appended to this URL, e.g. `https://dokploy.example.com/api`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
     },
     Postgres {
         url: SecretText,
@@ -113,6 +117,9 @@ pub struct HandleInfo {
     pub grant_ttl: Duration,
     /// Names of the variables an `env` secret injects.
     pub env_vars: Vec<String>,
+    /// `http_request` with this handle takes a path such as `/v1/items`
+    /// instead of a URL; the service's address stays hidden.
+    pub takes_path: bool,
 }
 
 impl Secret {
@@ -137,15 +144,36 @@ impl Secret {
             allowed_cmds: self.policy.allowed_cmds.clone(),
             grant_ttl: self.policy.grant_ttl,
             env_vars,
+            takes_path: matches!(
+                self.value,
+                SecretValue::Http {
+                    base_url: Some(_),
+                    ..
+                }
+            ),
         }
     }
 
-    /// Every string that must never appear in output: the token or URL, and
-    /// for connection URLs the password both as written and percent-decoded.
+    /// Every string that must never appear in output: the token or URL, for
+    /// connection URLs the password both as written and percent-decoded, and
+    /// for an http `base_url` the URL and its host.
     pub fn sensitive_values(&self) -> Vec<Zeroizing<String>> {
         let mut out = Vec::new();
         match &self.value {
-            SecretValue::Http { token, .. } => out.push(Zeroizing::new(token.expose().to_owned())),
+            SecretValue::Http {
+                token, base_url, ..
+            } => {
+                out.push(Zeroizing::new(token.expose().to_owned()));
+                if let Some(base) = base_url {
+                    out.push(Zeroizing::new(base.trim_end_matches('/').to_owned()));
+                    if let Some(host) = url::Url::parse(base)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_owned))
+                    {
+                        out.push(Zeroizing::new(host));
+                    }
+                }
+            }
             SecretValue::Postgres { url } | SecretValue::Redis { url } => {
                 out.push(Zeroizing::new(url.expose().to_owned()));
                 if let Ok(parsed) = url::Url::parse(url.expose())

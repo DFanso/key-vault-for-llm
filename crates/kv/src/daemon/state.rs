@@ -396,9 +396,30 @@ fn unknown(name: &str) -> Failure {
 fn validate_value(value: &SecretValue) -> Result<(), Failure> {
     let invalid = |message: &str| Err(fail(ControlErrorCode::Invalid, message));
     match value {
-        SecretValue::Http { token, placement } => {
+        SecretValue::Http {
+            token,
+            placement,
+            base_url,
+        } => {
             if token.expose().is_empty() {
                 return invalid("the token is empty");
+            }
+            if let Some(base) = base_url {
+                let Ok(parsed) = url::Url::parse(base) else {
+                    return invalid("the base URL is not a valid URL");
+                };
+                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                    return invalid("the base URL must start with https:// or http://");
+                }
+                if !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.query().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return invalid(
+                        "the base URL cannot contain credentials, a query or a fragment",
+                    );
+                }
             }
             match placement {
                 AuthPlacement::Header { name, template } => {
@@ -456,7 +477,15 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
         ));
     }
     match &secret.value {
-        SecretValue::Http { .. } if secret.policy.allowed_hosts.is_empty() => {
+        SecretValue::Http {
+            base_url: Some(base),
+            ..
+        } if base.starts_with("http:") && !secret.policy.allow_plain_http => {
+            warnings.push(format!(
+                "{name} has a plain http:// base URL, so every request with it is denied until you run `kv policy {name} --allow-plain-http true`"
+            ));
+        }
+        SecretValue::Http { base_url: None, .. } if secret.policy.allowed_hosts.is_empty() => {
             warnings.push(format!(
                 "{name} has no allowed hosts, so every request with it is denied; add one with `kv policy {name} --host <host>`"
             ));

@@ -31,6 +31,7 @@ fn secrets() -> Vec<Secret> {
                     name: "Authorization".into(),
                     template: "Bearer {}".into(),
                 },
+                base_url: None,
             },
         ),
         make(

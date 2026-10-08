@@ -94,6 +94,10 @@ struct AddArgs {
     /// http: send the token as this query parameter instead of a header
     #[arg(long, conflicts_with_all = ["header", "template"])]
     query_param: Option<String>,
+    /// http: keep the service's address hidden too. Prompts for a base URL
+    /// such as https://dokploy.example.com/api; agents then send only paths
+    #[arg(long)]
+    base_url: bool,
     /// env: variable to inject (repeat for several); each value is prompted for
     #[arg(long = "var", value_name = "NAME")]
     vars: Vec<String>,
@@ -404,9 +408,17 @@ fn read_value(args: &AddArgs, input: &mut Input) -> Result<SecretValue> {
                     template: args.template.clone(),
                 },
             };
+            let token = trimmed(input.secret(&format!("Token for {name}: "))?);
+            let base_url = if args.base_url {
+                let base = trimmed(input.secret(&format!("Base URL for {name}: "))?);
+                Some(base.expose().to_owned())
+            } else {
+                None
+            };
             SecretValue::Http {
-                token: trimmed(input.secret(&format!("Token for {name}: "))?),
+                token,
                 placement,
+                base_url,
             }
         }
         Kind::Postgres => SecretValue::Postgres {
@@ -545,6 +557,9 @@ fn constraints(handle: &HandleInfo) -> String {
     let mut parts = Vec::new();
     if !handle.allowed_hosts.is_empty() {
         parts.push(format!("hosts={}", handle.allowed_hosts.join(",")));
+    }
+    if handle.takes_path {
+        parts.push("paths-only".into());
     }
     if handle.allow_plain_http {
         parts.push("plain-http".into());

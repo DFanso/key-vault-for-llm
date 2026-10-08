@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kv_core::policy::{Decision, DenyReason, Mode, Operation, Policy, evaluate};
+use kv_core::policy::{Decision, DenyReason, Mode, Operation, Policy, evaluate, http_target};
 use kv_core::secret::{AuthPlacement, Secret, SecretKind, SecretText, SecretValue};
 
 fn secret(value: SecretValue, policy: Policy) -> Secret {
@@ -21,6 +21,7 @@ fn http(policy: Policy) -> Secret {
             placement: AuthPlacement::Query {
                 param: "key".into(),
             },
+            base_url: None,
         },
         policy,
     )
@@ -343,4 +344,123 @@ fn empty_allowed_cmds_denies_everything() {
         exec(&s, "psql"),
         Decision::Deny(DenyReason::CommandNotAllowed { .. })
     ));
+}
+
+fn base_handle(base: &str, policy: Policy) -> Secret {
+    secret(
+        SecretValue::Http {
+            token: SecretText::new("token-token-token"),
+            placement: AuthPlacement::Header {
+                name: "Authorization".into(),
+                template: "Bearer {}".into(),
+            },
+            base_url: Some(base.into()),
+        },
+        policy,
+    )
+}
+
+fn auto() -> Policy {
+    Policy {
+        mode: Mode::Auto,
+        ..Policy::default()
+    }
+}
+
+#[test]
+fn a_base_url_handle_appends_the_path_and_keeps_the_query() {
+    for base in [
+        "https://dokploy.example.com/api",
+        "https://dokploy.example.com/api/",
+    ] {
+        let s = base_handle(base, auto());
+        let url = http_target(&s, "/project.all?limit=5").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://dokploy.example.com/api/project.all?limit=5"
+        );
+        assert_eq!(get(&s, url.as_str()), Decision::Allow);
+    }
+}
+
+#[test]
+fn a_base_url_handle_rejects_paths_that_leave_the_base() {
+    let s = base_handle("https://dokploy.example.com/api", auto());
+    for path in [
+        "https://evil.example/x",
+        "//evil.example/x",
+        "project.all",
+        "/../admin",
+        "/a/%2e%2e/b",
+        "/a/%2E/b",
+        "/a%2fb",
+        "/a%5Cb",
+        "/a\\b",
+        "/x#frag",
+        "",
+    ] {
+        assert!(
+            http_target(&s, path).is_err(),
+            "{path:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn a_base_url_at_the_root_takes_any_path() {
+    let s = base_handle("https://api.example.com", auto());
+    assert_eq!(
+        http_target(&s, "/v1/items").unwrap().as_str(),
+        "https://api.example.com/v1/items"
+    );
+}
+
+#[test]
+fn a_base_url_handle_only_reaches_its_own_origin() {
+    let s = base_handle("https://dokploy.example.com/api", auto());
+    assert_eq!(
+        get(&s, "https://dokploy.example.com/elsewhere"),
+        Decision::Allow,
+        "redirects may leave the prefix but not the origin"
+    );
+    assert_eq!(
+        get(&s, "https://other.example.com/api/x"),
+        Decision::Deny(DenyReason::OutsideBaseUrl)
+    );
+    assert_eq!(
+        get(&s, "https://dokploy.example.com:8443/api/x"),
+        Decision::Deny(DenyReason::OutsideBaseUrl)
+    );
+}
+
+#[test]
+fn the_outside_base_url_message_does_not_name_the_host() {
+    let message = DenyReason::OutsideBaseUrl.to_string();
+    assert!(!message.contains("dokploy"), "{message}");
+}
+
+#[test]
+fn a_plain_http_base_url_needs_allow_plain_http() {
+    let s = base_handle("http://10.0.0.5:3000/api", auto());
+    let url = http_target(&s, "/x").unwrap();
+    assert_eq!(get(&s, url.as_str()), Decision::Deny(DenyReason::PlainHttp));
+    let mut allowed = auto();
+    allowed.allow_plain_http = true;
+    let s = base_handle("http://10.0.0.5:3000/api", allowed);
+    assert_eq!(get(&s, url.as_str()), Decision::Allow);
+}
+
+#[test]
+fn a_url_handle_takes_a_full_url_not_a_path() {
+    let s = http(hosts(Mode::Auto));
+    assert!(matches!(
+        http_target(&s, "/v1/items"),
+        Err(DenyReason::InvalidUrl(_))
+    ));
+    assert_eq!(
+        http_target(&s, "https://api.openrouter.ai/v1")
+            .unwrap()
+            .as_str(),
+        "https://api.openrouter.ai/v1"
+    );
 }
