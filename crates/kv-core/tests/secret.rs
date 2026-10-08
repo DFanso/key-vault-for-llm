@@ -97,6 +97,18 @@ fn handle_info_lists_env_var_names() {
 }
 
 #[test]
+fn handle_info_carries_every_policy_constraint() {
+    let mut secret = http_secret();
+    secret.policy.allow_plain_http = true;
+    secret.policy.grant_ttl = std::time::Duration::from_secs(300);
+    let info = secret.info();
+    assert!(info.allow_plain_http);
+    assert_eq!(info.grant_ttl.as_secs(), 300);
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(json.contains(r#""grant_ttl":"5m""#), "{json}");
+}
+
+#[test]
 fn sensitive_values_include_db_password_raw_and_decoded() {
     let secret = pg_secret("postgres://app:p%40ss%2Fw0rd@db.internal:5432/app");
     let values: Vec<String> = secret

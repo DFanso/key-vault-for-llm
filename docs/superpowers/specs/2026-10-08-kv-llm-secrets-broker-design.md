@@ -85,14 +85,27 @@ on Windows. Both sockets verify the peer runs as the same OS user
 - **Agent socket**: `list_handles`, `http_request`, `db_query`, `db_connect`,
   `exec`, `status`. No message type on this socket can carry a secret value;
   this is enforced by the types in `kv-core`, not by runtime checks.
-- **Control socket**: `unlock`, `lock`, `approve`, `deny`, secret and policy
-  CRUD, audit log reads. Every message except `unlock` must carry the control
-  session token issued at unlock.
+- **Control socket**: `init`, `unlock`, `lock`, `stop`, `approve`, `deny`,
+  secret and policy CRUD, passphrase change. Every command except `lock` and
+  `stop` must prove the user is present:
+  - CLI commands (`kv add`, `kv rm`, `kv policy`, `kv passwd`, `kv unlock`)
+    carry the vault passphrase, checked per command. Nothing reusable outlives
+    the command, so an agent running commands as the user has nothing to
+    replay. Wrong passphrases count toward the unlock backoff.
+  - The TUI (Plan 4) unlocks once and then holds a session token in memory
+    for approvals and edits.
+- Malformed frames get a `bad_request` reply and the connection is closed;
+  control-socket replies never echo request content, which may include the
+  passphrase. Frames are capped at 1 MiB.
 
 ### Daemon lifecycle
 
-- `kv mcp` and `kv tui` connect to the daemon; if none is running they spawn
-  `kv daemon` detached. A lock file prevents two daemons starting at once.
+- Every `kv` command except `lock` and `stop` connects to the daemon and, if
+  none is running, spawns `kv daemon` detached and waits for it. A lock file
+  prevents two daemons starting at once; the loser exits quietly. Stale socket
+  files from a crashed daemon are replaced once the lock is held.
+- `kv stop` locks and shuts the daemon down. `KV_HOME` puts the vault, audit
+  log and sockets under one directory instead of the platform defaults.
 - The daemon starts locked and exits after an idle period while locked. No
   launchd/systemd/Windows service install is required.
 - If the daemon crashes, the key is gone with it. `kv mcp` respawns it, and it
@@ -250,12 +263,18 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 
 ### Unlock
 
-- `kv tui` prompts for passphrase or biometric. The daemon unwraps the vault
-  key, holds it in locked (`mlock`/`VirtualLock`), zeroized memory, and
-  returns a random 256-bit control session token held only in TUI memory.
+- `kv unlock` (or any control command) and, from Plan 4, `kv tui` prompt for
+  the passphrase, or a biometric from Plan 6. The daemon unwraps the vault key
+  and holds it in memory-locked (`mlock`/`VirtualLock`, best effort), zeroized
+  memory. The TUI additionally receives a random 256-bit control session token
+  held only in TUI memory.
+- The daemon disables core dumps and, on Linux, marks itself non-dumpable so
+  other processes running as the same user cannot attach a debugger or read
+  its memory through `/proc`.
 - After 5 failed attempts, unlock backs off exponentially.
-- v1 lock triggers: idle timeout (default 8 h, configurable), `kv lock`, `L`
-  in the TUI, daemon exit.
+- v1 lock triggers: idle timeout (default 8 h, `kv daemon --idle-lock`),
+  `kv lock`, `kv stop`, `L` in the TUI, daemon exit. Only use of the vault
+  resets the idle timer; `status` polls do not.
 
 ### Approval (TUI)
 

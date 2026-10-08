@@ -320,3 +320,36 @@ fn bak_does_not_open_with_the_old_passphrase_after_a_change() {
     assert_eq!(from_bak.secrets(), vault.secrets());
     assert!(!path.with_file_name("vault.kv.bak.tmp").exists());
 }
+
+#[test]
+fn verify_passphrase_accepts_only_the_current_passphrase() {
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    assert!(vault.verify_passphrase(PASS).is_ok());
+    assert!(matches!(
+        vault.verify_passphrase("wrong horse battery"),
+        Err(VaultError::WrongPassphrase)
+    ));
+    vault
+        .change_passphrase("a brand new passphrase", FAST)
+        .unwrap();
+    assert!(matches!(
+        vault.verify_passphrase(PASS),
+        Err(VaultError::WrongPassphrase)
+    ));
+    assert!(vault.verify_passphrase("a brand new passphrase").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn vault_directory_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = setup();
+    Vault::create(&path, PASS, FAST).unwrap();
+    let mode = fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+}
