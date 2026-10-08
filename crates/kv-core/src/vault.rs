@@ -126,10 +126,13 @@ impl Vault {
     /// Encrypts with a fresh nonce and atomically replaces the file, keeping
     /// the previous version as `<path>.bak`.
     pub fn save(&self) -> Result<(), VaultError> {
-        self.write(&self.wrapped_keys)
+        let bytes = self.encode(&self.key, &self.wrapped_keys);
+        write_atomic(&self.path, &bytes, Backup::KeepPrevious)?;
+        Ok(())
     }
 
-    fn write(&self, wrapped_keys: &[WrappedKey]) -> Result<(), VaultError> {
+    /// Serializes and encrypts the vault under `key` with a fresh nonce.
+    fn encode(&self, key: &SymmetricKey, wrapped_keys: &[WrappedKey]) -> Vec<u8> {
         let nonce = crypto::random_nonce();
         let header = Header {
             wrapped_keys: wrapped_keys.to_vec(),
@@ -145,10 +148,9 @@ impl Vault {
         out.extend_from_slice(&header_json);
 
         let plaintext = Zeroizing::new(serde_json::to_vec(&self.data).expect("secrets serialize"));
-        let ciphertext = crypto::seal(&self.key, &nonce, &out, &plaintext);
+        let ciphertext = crypto::seal(key, &nonce, &out, &plaintext);
         out.extend_from_slice(&ciphertext);
-        write_atomic(&self.path, &out)?;
-        Ok(())
+        out
     }
 
     pub fn path(&self) -> &Path {
@@ -189,22 +191,21 @@ impl Vault {
         self.data.secrets.len() != before
     }
 
-    /// Re-wraps the vault key under a new passphrase and saves. If the save
-    /// fails, the old passphrase stays in effect.
+    /// Generates a new vault key, wraps it under the new passphrase and
+    /// re-encrypts everything, so the old passphrase opens neither the new
+    /// file nor `.bak`. Other unlock methods are dropped and must be enrolled
+    /// again. If the save fails, nothing changes.
     pub fn change_passphrase(
         &mut self,
         new_passphrase: &str,
         kdf: KdfParams,
     ) -> Result<(), VaultError> {
         check_passphrase(new_passphrase)?;
-        let mut wrapped_keys: Vec<WrappedKey> = self
-            .wrapped_keys
-            .iter()
-            .filter(|w| !matches!(w, WrappedKey::Passphrase { .. }))
-            .cloned()
-            .collect();
-        wrapped_keys.push(wrap_with_passphrase(&self.key, new_passphrase, kdf)?);
-        self.write(&wrapped_keys)?;
+        let key = SymmetricKey::generate();
+        let wrapped_keys = vec![wrap_with_passphrase(&key, new_passphrase, kdf)?];
+        let bytes = self.encode(&key, &wrapped_keys);
+        write_atomic(&self.path, &bytes, Backup::Replace)?;
+        self.key = key;
         self.wrapped_keys = wrapped_keys;
         Ok(())
     }
@@ -252,26 +253,47 @@ fn parse(bytes: &[u8]) -> Result<(Header, &[u8], &[u8]), VaultError> {
     Ok((header, &bytes[..header_end], &bytes[header_end..]))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// What `.bak` holds after a write.
+enum Backup {
+    /// The version being replaced, for recovering from a bad edit.
+    KeepPrevious,
+    /// The new version too, so no older copy (for example one that opens with
+    /// a retired passphrase) is left beside the vault.
+    Replace,
+}
+
+fn write_atomic(path: &Path, bytes: &[u8], backup: Backup) -> io::Result<()> {
     let dir = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(dir)?;
     let tmp = with_suffix(path, ".tmp");
-    let _ = fs::remove_file(&tmp);
-    {
-        let mut file = open_private(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    if path.exists() {
-        fs::copy(path, with_suffix(path, ".bak"))?;
+    write_new_file(&tmp, bytes)?;
+    let bak = with_suffix(path, ".bak");
+    match backup {
+        Backup::KeepPrevious => {
+            if path.exists() {
+                fs::copy(path, &bak)?;
+            }
+        }
+        Backup::Replace => {
+            let bak_tmp = with_suffix(path, ".bak.tmp");
+            write_new_file(&bak_tmp, bytes)?;
+            fs::rename(&bak_tmp, &bak)?;
+        }
     }
     fs::rename(&tmp, path)?;
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let _ = fs::remove_file(path);
+    let mut file = open_private(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 fn open_private(path: &Path) -> io::Result<File> {
@@ -310,5 +332,33 @@ mod b64 {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(d)?;
         STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FAST: KdfParams = KdfParams {
+        m_kib: 8,
+        t: 1,
+        p: 1,
+    };
+
+    #[test]
+    fn change_passphrase_rotates_the_vault_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("vault.kv");
+        let mut vault = Vault::create(&path, "correct horse battery", FAST).unwrap();
+        let old_key = SymmetricKey::from_slice(vault.key.as_bytes()).unwrap();
+
+        vault
+            .change_passphrase("a brand new passphrase", FAST)
+            .unwrap();
+
+        assert_ne!(old_key.as_bytes(), vault.key.as_bytes());
+        let bytes = fs::read(&path).unwrap();
+        let (header, aad, payload) = parse(&bytes).unwrap();
+        assert!(crypto::open(&old_key, &header.payload_nonce, aad, payload).is_none());
     }
 }

@@ -91,7 +91,10 @@ fn replaces_json_escape_styles_from_common_libraries() {
         r#"{"pw":"[kv:prod-db]"}"#
     );
     let s = Scrubber::new([("pw", "pässwörd-sëcret")]);
-    for encoded in [r#""pässwörd-sëcret""#, r#""pässwörd-sëcret""#] {
+    for encoded in [
+        r#""p\u00e4ssw\u00f6rd-s\u00ebcret""#,
+        r#""p\u00E4ssw\u00F6rd-s\u00EBcret""#,
+    ] {
         assert_eq!(scrub(&s, encoded), r#""[kv:pw]""#, "{encoded}");
     }
 }
