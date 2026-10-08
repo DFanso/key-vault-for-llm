@@ -11,3 +11,4 @@ pub mod mcp;
 pub mod notify;
 pub mod paths;
 pub mod throttle;
+pub mod tui;
