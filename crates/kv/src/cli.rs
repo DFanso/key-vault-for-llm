@@ -80,7 +80,17 @@ enum Command {
         autostart: bool,
         /// Show a desktop notification when a request waits for approval:
         /// on or off. Daemons started on demand read KV_NOTIFY.
-        #[arg(long, env = "KV_NOTIFY", default_value = "on", value_parser = clap::builder::BoolishValueParser::new())]
+        #[arg(
+            long,
+            env = "KV_NOTIFY",
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "on",
+            default_missing_value = "on",
+            value_name = "ON|OFF",
+            hide_possible_values = true,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
         notify: bool,
     },
 }
@@ -628,6 +638,22 @@ fn unexpected(response: &AgentResponse) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_takes_on_or_off() {
+        let notify = |args: &[&str]| match Cli::try_parse_from([&["kv", "daemon"], args].concat()) {
+            Ok(Cli {
+                command: Command::Daemon { notify, .. },
+                ..
+            }) => notify,
+            Ok(_) => unreachable!(),
+            Err(e) => panic!("{args:?}: {e}"),
+        };
+        assert!(!notify(&["--notify", "off"]));
+        assert!(!notify(&["--notify=false"]));
+        assert!(notify(&["--notify", "on"]));
+        assert!(notify(&["--notify"]));
+    }
 
     #[test]
     fn trimmed_strips_surrounding_whitespace_only() {
