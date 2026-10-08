@@ -115,8 +115,15 @@ Path: `<config dir>/kv/vault.kv` (from `dirs::config_dir()`).
     `KeyCredentialManager` signature over a fixed per-vault challenge.
 - Layout: header (magic, format version, KDF params, list of wrapped keys),
   then nonce + AEAD ciphertext of the serialized secrets.
-- Writes are atomic (temp file, fsync, rename) and keep one `.bak`.
-- Changing the passphrase re-wraps the vault key only.
+- Writes are atomic (temp file, fsync, rename) and keep one `.bak` holding
+  the previous version.
+- Changing the passphrase generates a new vault key, re-encrypts everything
+  and writes the new version to `.bak` as well, so the old passphrase opens
+  no file kv leaves behind, and an old copy plus the old passphrase reveals
+  nothing about later versions. Other unlock methods (Touch ID, Windows
+  Hello) are dropped and must be enrolled again. Copies made by other tools
+  (Time Machine, cloud sync) before the change still open with the old
+  passphrase.
 
 The OS keyring never holds anything that can decrypt the vault without user
 presence. On Windows and Linux any same-user process can read keyring items,
@@ -136,7 +143,9 @@ created_at, updated_at
 Kind-specific values:
 
 - `http`: token plus placement — header with a template (`Authorization:
-  Bearer {}`, `x-api-key: {}`) or a query parameter.
+  Bearer {}`, `x-api-key: {}`) or a query parameter. Optional `base_url`
+  (e.g. `https://dokploy.example.com/api`) for services whose address should
+  stay hidden too; see `http_request` in section 4.
 - `postgres`, `redis`: full connection URL.
 - `env`: one or more `NAME=value` pairs for `exec`.
 
@@ -144,18 +153,25 @@ Kind-specific values:
 
 ```
 mode:            auto | ask | deny
-allowed_hosts:   [api.openrouter.ai]   # http: required, exact host match
+allowed_hosts:   [api.openrouter.ai]   # http: host (default port) or host:port
 allow_plain_http: false                # http
 allowed_methods: [GET, POST]           # http, optional
 read_only:       true                  # postgres, redis
-allowed_cmds:    [terraform, psql]     # env: matched on program name
+allowed_cmds:    [terraform, psql]     # env: bare name (PATH) or absolute path
 grant_ttl:       15m                   # duration of a session grant
 ```
 
 New secrets default to `mode: ask` with empty allow-lists.
 
+`allowed_hosts` entries are `host` (the scheme's default port only) or
+`host:port`. `allowed_cmds` entries are either a bare name, which matches only
+a bare argv[0] that the runner resolves through PATH, or an absolute path,
+which matches only that exact path. Case and a `.exe` suffix are ignored only
+on Windows. An `http` secret with a `base_url` needs no `allowed_hosts`: the
+base URL's origin is the only destination.
+
 `list_handles` returns name, kind, description, mode and constraints. It never
-returns values or the hostname inside a DB URL.
+returns values, the hostname inside a DB URL, or a secret's `base_url`.
 
 ## 4. MCP tools and request flow
 
@@ -181,11 +197,17 @@ returns values or the hostname inside a DB URL.
 
 ### Per tool
 
-- **`http_request`**: URL host must exactly match `allowed_hosts`; HTTPS only
-  unless `allow_plain_http`. The daemon attaches auth and sends via `reqwest`
-  with rustls. Redirects are followed only to allowed hosts, and auth is
-  stripped on any cross-host hop. The response is scrubbed, since some APIs
-  echo the key in errors.
+- **`http_request`**: URL host and port must match `allowed_hosts`; HTTPS
+  only unless `allow_plain_http`. The daemon attaches auth and sends via
+  `reqwest` with rustls. Redirects are followed only to allowed hosts, and
+  auth is stripped on any cross-host hop. The response is scrubbed, since
+  some APIs echo the key in errors.
+  - With a `base_url`, the agent sends a path (`/project.all`) instead of a
+    URL. The daemon appends it to the base URL's path; the result must keep
+    the base URL's origin and path prefix, so absolute URLs, `//host` and
+    `..` segments that escape the prefix are rejected. Redirects may only
+    stay on that origin. The base URL and its host are added to the
+    scrubber, so responses and errors never reveal the address.
 - **`db_query`**: the daemon connects itself (`tokio-postgres` / `redis`) and
   returns rows. Preferred path for agents.
 - **`db_connect`**: starts a loopback proxy on a random port and returns e.g.
@@ -302,7 +324,13 @@ or unscrubbed paths.
 ## 8. Out of scope for v1
 
 - v1.1: SSH (key-holding agent, `ssh_exec`); Claude Code guard hooks that
-  block reads of `.env`, `~/.ssh/id_*`, `printenv`.
+  block reads of `.env`, `~/.ssh/id_*`, `printenv`; `kv run --env <handle>...
+  -- <command>` to launch long-running tools the user trusts, such as MCP
+  servers (a Dokploy MCP, for example), with `env` secrets injected, so
+  their keys leave plaintext config files like `settings.local.json`. The
+  same policy and approval as `exec` apply at launch, stdout and stderr pass
+  through the streaming scrubber, and the launched process does hold the
+  secret.
 - Later: lock on sleep / screen lock; pluggable backends (1Password,
   Bitwarden, Infisical); MySQL, Mongo and other DB proxies.
 - Not planned: team sharing or sync; sandboxing a same-user agent.
