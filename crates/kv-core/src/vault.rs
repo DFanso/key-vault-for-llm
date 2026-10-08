@@ -126,9 +126,13 @@ impl Vault {
     /// Encrypts with a fresh nonce and atomically replaces the file, keeping
     /// the previous version as `<path>.bak`.
     pub fn save(&self) -> Result<(), VaultError> {
+        self.write(&self.wrapped_keys)
+    }
+
+    fn write(&self, wrapped_keys: &[WrappedKey]) -> Result<(), VaultError> {
         let nonce = crypto::random_nonce();
         let header = Header {
-            wrapped_keys: self.wrapped_keys.clone(),
+            wrapped_keys: wrapped_keys.to_vec(),
             payload_nonce: nonce.to_vec(),
         };
         let header_json = serde_json::to_vec(&header).expect("header serializes");
@@ -185,18 +189,24 @@ impl Vault {
         self.data.secrets.len() != before
     }
 
-    /// Re-wraps the vault key under a new passphrase and saves.
+    /// Re-wraps the vault key under a new passphrase and saves. If the save
+    /// fails, the old passphrase stays in effect.
     pub fn change_passphrase(
         &mut self,
         new_passphrase: &str,
         kdf: KdfParams,
     ) -> Result<(), VaultError> {
         check_passphrase(new_passphrase)?;
-        let wrapped = wrap_with_passphrase(&self.key, new_passphrase, kdf)?;
-        self.wrapped_keys
-            .retain(|w| !matches!(w, WrappedKey::Passphrase { .. }));
-        self.wrapped_keys.push(wrapped);
-        self.save()
+        let mut wrapped_keys: Vec<WrappedKey> = self
+            .wrapped_keys
+            .iter()
+            .filter(|w| !matches!(w, WrappedKey::Passphrase { .. }))
+            .cloned()
+            .collect();
+        wrapped_keys.push(wrap_with_passphrase(&self.key, new_passphrase, kdf)?);
+        self.write(&wrapped_keys)?;
+        self.wrapped_keys = wrapped_keys;
+        Ok(())
     }
 }
 

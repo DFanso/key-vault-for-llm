@@ -278,3 +278,23 @@ fn debug_output_hides_contents() {
     let printed = format!("{vault:?}");
     assert!(!printed.contains("s3cretpass"), "{printed}");
 }
+
+#[cfg(unix)]
+#[test]
+fn failed_passphrase_change_leaves_the_old_passphrase_in_effect() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    let dir = path.parent().unwrap();
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = vault.change_passphrase("a brand new passphrase", FAST);
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.is_err());
+
+    vault.save().unwrap();
+    assert!(Vault::unlock(&path, PASS).is_ok());
+    assert!(matches!(
+        Vault::unlock(&path, "a brand new passphrase"),
+        Err(VaultError::WrongPassphrase)
+    ));
+}
