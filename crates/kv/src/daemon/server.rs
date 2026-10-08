@@ -12,7 +12,7 @@ use kv_core::proto::{
 use tokio::sync::watch;
 
 use super::harden;
-use super::state::{After, Daemon, Settings};
+use super::state::{After, Daemon, Prepared, Settings};
 use crate::audit::Audit;
 use crate::frame::{read_frame, write_frame};
 use crate::ipc::{self, ServerStream};
@@ -106,7 +106,13 @@ async fn serve_agent(mut stream: ServerStream, daemon: Shared) {
         };
         let daemon = daemon.clone();
         let handled = tokio::task::spawn_blocking(move || {
-            lock(&daemon).handle_agent(request, Instant::now())
+            match lock(&daemon).prepare(request, Instant::now()) {
+                Prepared::Reply(response) => response,
+                Prepared::Http(_) | Prepared::Exec(_) => AgentResponse::Error {
+                    code: AgentErrorCode::BadRequest,
+                    message: "not supported yet".into(),
+                },
+            }
         })
         .await;
         let Ok(response) = handled else { return };

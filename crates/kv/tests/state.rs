@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use kv::audit::Audit;
-use kv::daemon::{After, Daemon, Settings};
+use kv::daemon::{After, Daemon, Prepared, Settings};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlErrorCode, ControlRequest,
@@ -76,7 +76,14 @@ impl Fixture {
     }
 
     fn agent(&mut self, request: AgentRequest) -> AgentResponse {
-        self.daemon.handle_agent(request, self.t0)
+        self.agent_at(self.t0, request)
+    }
+
+    fn agent_at(&mut self, now: Instant, request: AgentRequest) -> AgentResponse {
+        match self.daemon.prepare(request, now) {
+            Prepared::Reply(response) => response,
+            Prepared::Http(_) | Prepared::Exec(_) => panic!("expected a reply, got a job"),
+        }
     }
 
     fn handles(&mut self) -> Vec<String> {
@@ -389,7 +396,7 @@ fn idle_vault_locks_and_status_polls_do_not_keep_it_open() {
     });
     f.init();
     let status_at = f.t0 + Duration::from_secs(9);
-    match f.daemon.handle_agent(AgentRequest::Status, status_at) {
+    match f.agent_at(status_at, AgentRequest::Status) {
         AgentResponse::Status { status } => {
             assert!(!status.locked);
             assert_eq!(status.locks_in_secs, Some(1));
@@ -415,8 +422,7 @@ fn locked_daemon_exits_after_a_quiet_period() {
             .tick(f.t0 + Duration::from_secs(59), SystemTime::now()),
         After::Continue
     );
-    f.daemon
-        .handle_agent(AgentRequest::Status, f.t0 + Duration::from_secs(59));
+    f.agent_at(f.t0 + Duration::from_secs(59), AgentRequest::Status);
     assert_eq!(
         f.daemon
             .tick(f.t0 + Duration::from_secs(100), SystemTime::now()),
