@@ -283,12 +283,16 @@ A notification announces each request.
     secret comes back as the scrubbed string).
   - The timeout defaults to 30 s and may be at most 300 s; Postgres also gets
     it as `statement_timeout`, so the server stops an abandoned query.
-    Results are cut at 256 KB and marked `truncated`.
+    Results are cut at 256 KB and marked `truncated`. A Redis reply, or one
+    Postgres row, is held in memory whole before it is cut.
   - Commands that hold or change the connection (`SUBSCRIBE` and friends,
     `MONITOR`, `AUTH`, `HELLO`, `QUIT`, `RESET`, `SYNC`) are refused for every
     Redis handle.
   - TLS certificates are always verified against the platform trust store,
-    whatever `sslmode` says (`sslmode=disable` still turns TLS off).
+    whatever `sslmode` says (`sslmode=disable` still turns TLS off). A
+    Postgres URL that names no `sslmode` and a host other than loopback or a
+    Unix socket gets `sslmode=require`, since `prefer` can be downgraded to
+    plain text by an attacker on the network.
   - Connection URLs must use `postgres://`/`postgresql://` or
     `redis://`/`rediss://`. The host is scrubbed like the password unless it
     is loopback, and errors are scrubbed, since they can quote the query.
@@ -329,10 +333,16 @@ A notification announces each request.
   In `db_query` the check reads comments as spaces and keeps quoted text, and
   refuses any query mentioning `read_only`, `read write`, `characteristics`,
   `set_config`, `default_transaction` or `U&` escapes, and `DO` blocks, which
-  can build such a statement at run time. The checks run before approval.
+  can build such a statement at run time. It also refuses statements that end
+  the transaction (`COMMIT`, `END`, `ROLLBACK`, `ABORT`, `PREPARE
+  TRANSACTION`) and `CALL`: a function such as `query_to_xml` can run a
+  `set_config` built from string pieces, which only takes effect in the next
+  transaction. The checks run before approval.
   The real guarantee is a read-only role: kv checks the role's privileges
-  (superuser, INSERT/UPDATE/DELETE/TRUNCATE on any table or CREATE on any
-  schema outside the system schemas) when the secret is added and again on
+  (superuser; membership in `pg_write_server_files` or
+  `pg_execute_server_program`; INSERT or UPDATE on any column, or DELETE or
+  TRUNCATE, of any table, view or foreign table; or CREATE on any schema;
+  outside the system schemas) when the secret is added and again on
   first use after each unlock, and warns in the `kv add` output, the query
   result and the TUI when a `read_only` secret uses a role with write access.
   `kv add` runs the check itself, with the URL it just read, so a slow

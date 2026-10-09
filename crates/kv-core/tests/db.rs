@@ -1,4 +1,6 @@
-use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
+use kv_core::db::{
+    RedisRefusal, check_redis, pg_read_only_violation, postgres_requires_tls, split_command,
+};
 
 fn args(line: &str) -> Vec<Vec<u8>> {
     split_command(line).unwrap()
@@ -124,5 +126,51 @@ fn commands_that_hold_the_connection_are_never_run() {
                 "{line}"
             );
         }
+    }
+}
+
+#[test]
+fn ending_the_transaction_is_refused_on_a_read_only_handle() {
+    // Built from pieces so no guarded word appears, then committed so the
+    // next statement would start a read-write transaction.
+    let bypass = "select query_to_xml('select set_con'||'fig(''default_trans''||''action_rea''||''d_only'',''off'',false)', true, false, ''); commit; create table t(x int)";
+    for sql in [
+        bypass,
+        "select 1; COMMIT",
+        "select 1; end",
+        "select 1; rollback",
+        "select 1; abort",
+        "prepare transaction 'x'",
+        "CALL refresh_all()",
+        "select 1;\n  /* c */ commit and chain",
+    ] {
+        assert!(pg_read_only_violation(sql).is_some(), "{sql}");
+    }
+    for sql in [
+        "select 'commit' as word",
+        "prepare q as select 1; execute q",
+        "select endpoint from services",
+    ] {
+        assert_eq!(pg_read_only_violation(sql), None, "{sql}");
+    }
+}
+
+#[test]
+fn tls_is_required_for_remote_postgres_unless_the_url_says_otherwise() {
+    for (url, required) in [
+        ("postgres://app:pw@db.example.com/app", true),
+        ("postgresql://app:pw@10.0.0.5:5432/app", true),
+        (
+            "postgres://app:pw@db.example.com/app?sslmode=disable",
+            false,
+        ),
+        ("postgres://app:pw@db.example.com/app?sslmode=prefer", false),
+        ("postgres://app:pw@localhost/app", false),
+        ("postgres://app:pw@127.0.0.1:5432/app", false),
+        ("postgres://app:pw@[::1]/app", false),
+        ("postgres://app:pw@/app?host=/var/run/postgresql", false),
+        ("postgres://app:pw@localhost/app?host=db.example.com", true),
+    ] {
+        assert_eq!(postgres_requires_tls(url), required, "{url}");
     }
 }

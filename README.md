@@ -56,19 +56,28 @@ more statements and returns one result per statement, every value as text; a
 Redis command line such as `HGETALL user:1` returns the reply as JSON. Results
 stop at 256 KiB, and a query stops after 30 seconds unless the agent asks for
 up to 300. The database's address is scrubbed from results like the password,
-unless it is `localhost`. TLS certificates are always checked against the
-system's trust store; `sslmode=disable` in the URL turns TLS off.
+unless it is `localhost`. TLS certificates are checked against the system's
+trust store. For Postgres, `sslmode=disable` in the URL turns TLS off, and a
+remote server with no `sslmode` in its URL must use TLS; for Redis, use
+`rediss://`, and note that a URL ending in `#insecure` skips the certificate
+check. A Redis reply, or a
+single Postgres row, is held in memory whole before it is cut, so avoid
+commands such as `KEYS *` on very large keyspaces.
 
 With `--read-only true`:
 
 - Redis runs only read commands, such as `GET`, `HGETALL`, `SCAN` and
   `ZRANGE`.
 - Postgres sessions start with `default_transaction_read_only=on`, and kv
-  refuses queries that mention a way to change that, and `DO` blocks. This is
-  best effort; the real guarantee is a database role that can only read. kv
-  checks the role when you `kv add` the handle and on its first query after
-  each unlock, and warns (in `kv add`, the query result and the Handles tab of
-  `kv tui`) when it can write.
+  refuses queries that mention a way to change that, `DO` blocks, and
+  statements that end the transaction (`COMMIT`, `ROLLBACK`, `END`, `ABORT`,
+  `CALL`). This is best effort; the real guarantee is a database role that can
+  only read. kv checks the role when you `kv add` the handle and on its first
+  query after each unlock, and warns (in `kv add`, the query result and the
+  Handles tab of `kv tui`) when it can write: when it is a superuser, can
+  write server files or run programs, can create in a schema, or can insert,
+  update, delete or truncate in any table, view or foreign table, column
+  grants included.
 
 ## Approving requests
 

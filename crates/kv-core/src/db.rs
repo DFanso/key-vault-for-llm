@@ -6,8 +6,10 @@
 ///
 /// Sessions for read-only handles start with
 /// `default_transaction_read_only=on`; this refuses statements that would
-/// switch that off, and `DO` blocks, which can build such a statement at
-/// run time. Comments are read as spaces, as Postgres reads them, and
+/// switch that off, `DO` blocks, which can build such a statement at run
+/// time, and statements that end the transaction (or call a procedure,
+/// which can): a query can build the switch from string pieces inside a
+/// function, but it only takes effect in the next transaction. Comments are read as spaces, as Postgres reads them, and
 /// quoted text is kept, so a mention inside a string is refused too: when
 /// in doubt it says no. The real guarantee is a role without write
 /// privileges.
@@ -23,19 +25,61 @@ pub fn pg_read_only_violation(sql: &str) -> Option<&'static str> {
             "the handle is read-only, and this query mentions a way to change that; kv refuses it",
         );
     }
-    let starts_do = text.split(';').any(|statement| {
-        let statement = statement.trim_start();
-        statement.strip_prefix("do").is_some_and(|rest| {
+    let starts = |statement: &str, word: &str| {
+        statement.strip_prefix(word).is_some_and(|rest| {
             !rest
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_alphanumeric() || c == '_')
         })
-    });
-    if starts_do {
-        return Some("the handle is read-only, and kv refuses DO blocks on read-only handles");
+    };
+    for statement in text.split(';').map(str::trim_start) {
+        if starts(statement, "do") {
+            return Some("the handle is read-only, and kv refuses DO blocks on read-only handles");
+        }
+        let ends_transaction = ["commit", "end", "rollback", "abort", "call"]
+            .iter()
+            .any(|word| starts(statement, word))
+            || starts(statement, "prepare transaction");
+        if ends_transaction {
+            return Some(
+                "the handle is read-only, and kv refuses statements that end the transaction \
+                 or call procedures on read-only handles",
+            );
+        }
     }
     None
+}
+
+/// Whether kv should insist on TLS for a Postgres URL: it names no
+/// `sslmode`, and some host it names is not on this machine. Postgres
+/// clients default to `prefer`, which an attacker on the network can turn
+/// into plain text by answering that the server has no TLS.
+pub fn postgres_requires_tls(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.query_pairs().any(|(key, _)| key == "sslmode") {
+        return false;
+    }
+    let hosts = parsed
+        .query_pairs()
+        .filter(|(key, _)| key == "host" || key == "hostaddr")
+        .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .chain(parsed.host_str().map(str::to_owned));
+    hosts
+        .filter(|host| !host.is_empty())
+        .any(|host| !is_local(&host))
+}
+
+/// `localhost`, a loopback address, or a Unix socket directory.
+fn is_local(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Lowercases `sql`, turns comments into a space and collapses whitespace,

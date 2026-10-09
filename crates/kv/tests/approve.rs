@@ -390,3 +390,20 @@ fn changing_a_handle_withdraws_the_requests_waiting_on_it() {
             .any(|l| l["decision"] == "withdrawn" && l["outcome"] == "handle_changed")
     );
 }
+
+#[test]
+fn deny_always_also_withdraws_other_requests_for_the_handle() {
+    let mut f = fixture();
+    let token = f.token();
+    let denied = f.wait(Some(&session("s1")), ask_get(), f.t0);
+    let other = f.wait(Some(&session("s2")), ask_get(), f.t0);
+    done(&f.decide(&token, denied.id, Verdict::DenyAlways));
+    assert!(f.overview(&token).approvals.is_empty());
+    assert!(matches!(
+        f.daemon.take_ended(other.id),
+        Some(AgentResponse::Error {
+            code: AgentErrorCode::PolicyDenied,
+            ..
+        })
+    ));
+}

@@ -262,3 +262,71 @@ async fn kv_add_can_check_a_role_on_its_own() {
     let error = db::check_role("pg", closed.as_str()).await.unwrap_err();
     assert!(!error.contains("reader-password"), "{error}");
 }
+
+#[tokio::test]
+async fn big_redis_replies_are_cut() {
+    let Some(url) = server("KV_TEST_REDIS_URL") else {
+        return;
+    };
+    let mut f = Fixture::new();
+    f.add(redis("cache", &url, false, Mode::Auto));
+    let big = "x".repeat(300 * 1024);
+    run(&mut f, query("cache", &format!("SET kv:big {big}"))).await;
+    match run(&mut f, query("cache", "GET kv:big")).await {
+        AgentResponse::Redis(RedisReply { value, truncated }) => {
+            assert!(truncated);
+            let text = value.as_str().unwrap();
+            assert!(
+                text.len() < 256 * 1024 && text.len() > 200 * 1024,
+                "{}",
+                text.len()
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let keys: Vec<String> = (0..100_000).map(|i| format!("kv:missing:{i}")).collect();
+    match run(&mut f, query("cache", &format!("MGET {}", keys.join(" ")))).await {
+        AgentResponse::Redis(RedisReply { value, truncated }) => {
+            assert!(truncated);
+            let shown = value.as_array().unwrap().len();
+            assert!(shown < 100_000, "{shown}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_role_check_sees_column_grants_views_and_server_file_roles() {
+    let Some(url) = server("KV_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = admin(&url, "kv_cg").await;
+    admin
+        .batch_execute(
+            "CREATE TABLE kv_cg.t (a int, b int);
+             CREATE VIEW kv_cg.v AS SELECT a FROM kv_cg.t;
+             DROP ROLE IF EXISTS kv_cg_column;
+             DROP ROLE IF EXISTS kv_cg_view;
+             DROP ROLE IF EXISTS kv_cg_files;
+             CREATE ROLE kv_cg_column LOGIN PASSWORD 'column-password-0123';
+             CREATE ROLE kv_cg_view LOGIN PASSWORD 'view-password-0123';
+             CREATE ROLE kv_cg_files LOGIN PASSWORD 'files-password-0123';
+             GRANT USAGE ON SCHEMA kv_cg TO kv_cg_column, kv_cg_view;
+             GRANT UPDATE (a) ON kv_cg.t TO kv_cg_column;
+             GRANT INSERT ON kv_cg.v TO kv_cg_view;
+             GRANT pg_write_server_files TO kv_cg_files;",
+        )
+        .await
+        .unwrap();
+    for (user, password) in [
+        ("kv_cg_column", "column-password-0123"),
+        ("kv_cg_view", "view-password-0123"),
+        ("kv_cg_files", "files-password-0123"),
+    ] {
+        let mut role = url::Url::parse(&url).unwrap();
+        role.set_username(user).unwrap();
+        role.set_password(Some(password)).unwrap();
+        let warning = db::check_role("pg", role.as_str()).await.unwrap();
+        assert!(warning.is_some(), "{user} can write");
+    }
+}

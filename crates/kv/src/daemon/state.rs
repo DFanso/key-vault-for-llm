@@ -884,6 +884,13 @@ impl Daemon {
         }
         // The request may have given up already; then nothing is waiting.
         let _ = pending.reply.send(verdict);
+        // The handles' policy changed, so what else waits on them may not
+        // be approved under the old one.
+        if verdict == Verdict::DenyAlways {
+            for handle in &pending.ask {
+                self.handle_changed(handle, now);
+            }
+        }
         Ok(warnings)
     }
 

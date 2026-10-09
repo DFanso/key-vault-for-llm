@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use kv_core::db::split_command;
+use kv_core::db::{postgres_requires_tls, split_command};
 use kv_core::policy::Policy;
 use kv_core::proto::{
     AgentErrorCode, AgentResponse, MAX_OUTPUT_LEN, RedisReply, ResultSet, RowsReply,
@@ -192,6 +192,9 @@ async fn connect(
         .options(all.trim())
         .application_name("kv")
         .connect_timeout(CONNECT_TIMEOUT);
+    if postgres_requires_tls(url) {
+        config.ssl_mode(tokio_postgres::config::SslMode::Require);
+    }
     let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config()?);
     let (client, connection) = config
         .connect(tls)
@@ -240,19 +243,23 @@ fn role_warning(handle: &str) -> String {
     )
 }
 
-/// Whether the session's role can change data: a superuser, or one with
-/// INSERT, UPDATE, DELETE or TRUNCATE on any table, or CREATE on any
-/// schema, outside the system schemas.
+/// Whether the session's role can change data: a superuser; a member of
+/// the roles that write server files or run server programs (`COPY ... TO`
+/// works in a read-only transaction); or one with INSERT, UPDATE, DELETE or
+/// TRUNCATE on any table, view or foreign table, including on single
+/// columns, or CREATE on any schema, outside the system schemas.
 async fn role_can_write(client: &tokio_postgres::Client) -> Result<bool, tokio_postgres::Error> {
     const CHECK: &str = "\
 SELECT r.rolsuper
+  OR pg_has_role(current_user, 'pg_write_server_files', 'MEMBER')
+  OR pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER')
   OR EXISTS (
     SELECT 1 FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('r', 'p')
+    WHERE c.relkind IN ('r', 'p', 'v', 'f')
       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
       AND n.nspname NOT LIKE 'pg\\_%'
-      AND (has_table_privilege(c.oid, 'INSERT') OR has_table_privilege(c.oid, 'UPDATE')
+      AND (has_any_column_privilege(c.oid, 'INSERT') OR has_any_column_privilege(c.oid, 'UPDATE')
         OR has_table_privilege(c.oid, 'DELETE') OR has_table_privilege(c.oid, 'TRUNCATE')))
   OR EXISTS (
     SELECT 1 FROM pg_catalog.pg_namespace n
@@ -267,7 +274,8 @@ FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
 }
 
 /// Certificates are always checked against the platform's trust store,
-/// whatever `sslmode` says; `sslmode=disable` still turns TLS off.
+/// whatever `sslmode` says; `sslmode=disable` still turns TLS off. A remote
+/// server with no `sslmode` in the URL must use TLS.
 fn tls_config() -> Result<rustls::ClientConfig, AgentResponse> {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     rustls::ClientConfig::builder_with_provider(provider)
@@ -315,7 +323,7 @@ async fn redis(job: &DbJob, url: &str) -> Result<AgentResponse, AgentResponse> {
 }
 
 /// A Redis value as JSON, scrubbed, spending `budget` bytes at most.
-/// Anything past the budget is left out and `truncated` is set.
+/// Anything past the budget is cut or left out and `truncated` is set.
 fn to_json(
     scrubber: &Scrubber,
     value: redis::Value,
@@ -324,45 +332,25 @@ fn to_json(
 ) -> serde_json::Value {
     use redis::Value;
     use serde_json::Value as Json;
-    let text = |bytes: &[u8], budget: &mut usize| {
-        let text = scrub_text(scrubber, bytes);
-        *budget = budget.saturating_sub(text.len() + 3);
-        Json::String(text)
-    };
-    // A number could be a numeric secret, so it goes through the scrubber
-    // too, and comes back as a string if it was replaced.
-    let number = |digits: String, json: Json, budget: &mut usize| {
-        *budget = budget.saturating_sub(digits.len() + 1);
-        let scrubbed = scrub_text(scrubber, digits.as_bytes());
-        if scrubbed == digits {
-            json
-        } else {
-            Json::String(scrubbed)
-        }
-    };
-    let list = |items: Vec<Value>, budget: &mut usize, truncated: &mut bool| {
-        let mut out = Vec::new();
-        for item in items {
-            if *budget == 0 {
-                *truncated = true;
-                break;
-            }
-            out.push(to_json(scrubber, item, budget, truncated));
-        }
-        Json::Array(out)
-    };
     match value {
-        Value::Nil => Json::Null,
-        Value::Okay => text(b"OK", budget),
-        Value::Int(n) => number(n.to_string(), Json::from(n), budget),
-        Value::Double(n) => number(n.to_string(), Json::from(n), budget),
-        Value::Boolean(b) => Json::Bool(b),
-        Value::BulkString(bytes) => text(&bytes, budget),
-        Value::SimpleString(s) => text(s.as_bytes(), budget),
-        Value::VerbatimString { text: s, .. } => text(s.as_bytes(), budget),
-        Value::BigNumber(digits) => text(&digits, budget),
-        Value::Array(items) | Value::Set(items) => list(items, budget, truncated),
+        Value::Nil => {
+            charge(budget, 4);
+            Json::Null
+        }
+        Value::Boolean(b) => {
+            charge(budget, 5);
+            Json::Bool(b)
+        }
+        Value::Okay => text(scrubber, b"OK", budget, truncated),
+        Value::Int(n) => number(scrubber, n.to_string(), Json::from(n), budget),
+        Value::Double(n) => number(scrubber, n.to_string(), Json::from(n), budget),
+        Value::BulkString(bytes) => text(scrubber, &bytes, budget, truncated),
+        Value::SimpleString(s) => text(scrubber, s.as_bytes(), budget, truncated),
+        Value::VerbatimString { text: s, .. } => text(scrubber, s.as_bytes(), budget, truncated),
+        Value::BigNumber(digits) => text(scrubber, &digits, budget, truncated),
+        Value::Array(items) | Value::Set(items) => list(scrubber, items, budget, truncated),
         Value::Map(pairs) => list(
+            scrubber,
             pairs
                 .into_iter()
                 .map(|(k, v)| Value::Array(vec![k, v]))
@@ -371,10 +359,70 @@ fn to_json(
             truncated,
         ),
         Value::Attribute { data, .. } => to_json(scrubber, *data, budget, truncated),
-        Value::Push { data, .. } => list(data, budget, truncated),
-        Value::ServerError(e) => text(e.to_string().as_bytes(), budget),
+        Value::Push { data, .. } => list(scrubber, data, budget, truncated),
+        Value::ServerError(e) => text(scrubber, e.to_string().as_bytes(), budget, truncated),
         _ => Json::Null,
     }
+}
+
+fn charge(budget: &mut usize, bytes: usize) {
+    *budget = budget.saturating_sub(bytes);
+}
+
+/// Scrubbed first and cut after, so a cut never splits a secret in two
+/// halves the scrubber cannot see.
+fn text(
+    scrubber: &Scrubber,
+    bytes: &[u8],
+    budget: &mut usize,
+    truncated: &mut bool,
+) -> serde_json::Value {
+    let mut text = scrub_text(scrubber, bytes);
+    let room = budget.saturating_sub(3);
+    if text.len() > room {
+        let mut end = room;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        *truncated = true;
+    }
+    charge(budget, text.len() + 3);
+    serde_json::Value::String(text)
+}
+
+/// A number could be a numeric secret, so it goes through the scrubber
+/// too, and comes back as a string if it was replaced.
+fn number(
+    scrubber: &Scrubber,
+    digits: String,
+    json: serde_json::Value,
+    budget: &mut usize,
+) -> serde_json::Value {
+    charge(budget, digits.len() + 1);
+    let scrubbed = scrub_text(scrubber, digits.as_bytes());
+    if scrubbed == digits {
+        json
+    } else {
+        serde_json::Value::String(scrubbed)
+    }
+}
+
+fn list(
+    scrubber: &Scrubber,
+    items: Vec<redis::Value>,
+    budget: &mut usize,
+    truncated: &mut bool,
+) -> serde_json::Value {
+    let mut out = Vec::new();
+    for item in items {
+        if *budget == 0 {
+            *truncated = true;
+            break;
+        }
+        out.push(to_json(scrubber, item, budget, truncated));
+    }
+    serde_json::Value::Array(out)
 }
 
 fn scrub_text(scrubber: &Scrubber, bytes: &[u8]) -> String {
