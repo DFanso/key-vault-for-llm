@@ -5,7 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Local secrets broker that lets AI agents use secrets without seeing them"
+homepage.workspace = true
+description = "Local secrets broker and MCP server that lets AI agents use secrets without seeing them"
+readme = "../../README.md"
+keywords = ["mcp", "secrets", "ai-agents", "llm", "vault"]
+categories = ["command-line-utilities", "cryptography", "authentication", "development-tools"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
