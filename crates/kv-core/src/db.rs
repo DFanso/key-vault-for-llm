@@ -150,6 +150,13 @@ fn normalize_sql(sql: &str) -> String {
                     }
                 }
             }
+            // After a name character, `$` is part of the name (`a$x$`).
+            '$' if i > 0
+                && (chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '_' | '$')) =>
+            {
+                out.push('$');
+                i += 1;
+            }
             '$' => match dollar_tag(&chars[i..]) {
                 Some(tag) => {
                     let tag: Vec<char> = tag.chars().collect();

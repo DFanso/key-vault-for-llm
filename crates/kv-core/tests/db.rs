@@ -50,6 +50,12 @@ fn comments_and_quotes_cannot_hide_a_statement() {
     assert!(pg_read_only_violation("select $tag$ -- $tag$; begin read write").is_some());
     assert!(pg_read_only_violation("select e'\\' --'; begin read write").is_some());
     assert!(pg_read_only_violation("select /* /* nested */ */ 1; begin read write").is_some());
+    // `a$x$` is one name: the `$x$` in it does not open a dollar quote.
+    assert!(
+        pg_read_only_violation("select 1 as a$x$, '$x$ -- '; commit; create table t(x int)")
+            .is_some()
+    );
+    assert!(pg_read_only_violation("select 1 as a$x$, '$x$ -- '; begin read write").is_some());
 }
 
 #[test]

@@ -197,8 +197,11 @@ fn a_database_host_is_scrubbed_unless_it_is_loopback() {
             .collect()
     };
     assert!(
-        values("postgres://app:pw-0123456789@kyc.postgres.database.azure.com/app")
-            .contains(&"kyc.postgres.database.azure.com".to_string())
+        values(&format!(
+            "postgres://app:{}@db.example.com/app",
+            "pw-0123456789"
+        ))
+        .contains(&"db.example.com".to_string())
     );
     for url in [
         "postgres://app:pw-0123456789@localhost/app",
