@@ -9,6 +9,7 @@ use kv::tui::view;
 use kv_core::policy::Mode;
 use kv_core::proto::{Approval, Overview, Status, Verdict};
 use kv_core::secret::{HandleInfo, SecretKind};
+use kv_core::vault::DeviceKind;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -81,6 +82,7 @@ fn overview(approvals: Vec<Approval>) -> Overview {
             handle_count: Some(1),
             locks_in_secs: Some(8 * 3600),
             pending_approvals: approvals.len(),
+            devices: Vec::new(),
         },
         handles: vec![handle("openrouter", Mode::Ask)],
         approvals,
@@ -352,4 +354,34 @@ fn a_pasted_passphrase_is_one_input() {
         Some(Effect::OpenSession(passphrase)) => assert_eq!(passphrase.expose(), "pass word"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn the_unlock_screen_offers_touch_id_only_when_it_is_set_up() {
+    let mut app = App::new();
+    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_t), None, "no device, no Ctrl-T");
+    assert!(!screen(&app).contains("Touch ID"));
+
+    app.set_device(Some(DeviceKind::TouchId));
+    assert!(screen(&app).contains("Ctrl-T Touch ID"), "{}", screen(&app));
+    type_text(&mut app, "half");
+    assert_eq!(app.handle_key(ctrl_t), Some(Effect::DeviceUnlock));
+    assert!(screen(&app).contains("asking Touch ID"), "{}", screen(&app));
+
+    // A refusal leaves the passphrase to type, and Ctrl-T to try again.
+    app.apply(Outcome::Failed(
+        "Touch ID: canceled; type the passphrase".into(),
+    ));
+    assert_eq!(app.screen(), Screen::Unlock);
+    assert!(screen(&app).contains("canceled"));
+    assert_eq!(app.handle_key(ctrl_t), Some(Effect::DeviceUnlock));
+}
+
+#[test]
+fn ctrl_t_does_nothing_once_unlocked() {
+    let mut app = unlocked(Vec::new());
+    app.set_device(Some(DeviceKind::TouchId));
+    let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_t), None);
 }

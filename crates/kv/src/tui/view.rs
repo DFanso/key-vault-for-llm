@@ -48,7 +48,11 @@ fn draw_unlock(frame: &mut Frame, app: &App) {
             Style::new().fg(Color::Yellow),
         ));
     }
-    lines.push(Line::styled("Enter unlock · Esc quit", dim()));
+    let hint = match app.device() {
+        Some(device) => format!("Enter unlock · Ctrl-T {} · Esc quit", device.label()),
+        None => "Enter unlock · Esc quit".into(),
+    };
+    lines.push(Line::styled(hint, dim()));
     let block = Block::bordered().title(" kv: unlock ");
     frame.render_widget(
         Paragraph::new(lines)

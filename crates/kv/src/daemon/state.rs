@@ -7,22 +7,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::VaultError;
-use kv_core::crypto::KdfParams;
-use kv_core::crypto::fill_random;
+use kv_core::crypto::{KdfParams, SymmetricKey, fill_random};
 use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
 use kv_core::policy::{
     Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry,
 };
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ConnectCall, ControlCommand,
-    ControlErrorCode, ControlRequest, ControlResponse, DbCall, ExecCall, HandleRequest, HttpCall,
-    Overview, PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
+    ControlErrorCode, ControlRequest, ControlResponse, DbCall, DeviceCredential, ExecCall,
+    HandleRequest, HttpCall, Overview, PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
-use kv_core::vault::Vault;
+use kv_core::vault::{DeviceKind, DeviceSlot, Vault, device_slots};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -1057,9 +1056,11 @@ impl Daemon {
         self.last_request = now;
         let ControlRequest {
             passphrase,
+            device,
             token,
             command,
         } = request;
+        let device = device.as_ref();
         // Polled by `kv tui` several times a second: not use of the vault,
         // not audited, and it leaves the cached scrubber alone.
         if let ControlCommand::Overview = command {
@@ -1083,25 +1084,43 @@ impl Daemon {
                 .init(passphrase.as_ref(), insecure_fast_kdf, now)
                 .map(done),
             ControlCommand::OpenSession => self
-                .authenticate(passphrase.as_ref(), None, now)
+                .authenticate(passphrase.as_ref(), device, None, now)
                 .map(drop)
                 .map(|()| self.open_session()),
             ControlCommand::Decide { id, verdict } => self
-                .authenticate(passphrase.as_ref(), token.as_ref(), now)
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .map(drop)
                 .and_then(|()| self.decide(id, verdict, now))
                 .map(done),
-            // A session token is not enough to change the passphrase, and
-            // the change ends every session.
+            // Neither a session token nor a device is enough to change the
+            // passphrase or set up a device, and a new passphrase ends every
+            // session and drops every device.
             command @ ControlCommand::ChangePassphrase { .. } => self
-                .authenticate(passphrase.as_ref(), None, now)
-                .and_then(|vault| run_authenticated(vault, command))
+                .authenticate(passphrase.as_ref(), None, None, now)
+                .and_then(|vault| {
+                    let devices = vault.devices();
+                    run_authenticated(vault, command)?;
+                    Ok(devices
+                        .iter()
+                        .map(|slot| {
+                            format!(
+                                "{} unlock is off: a new passphrase drops it. Run `kv biometric \
+                                 enable` to turn it on again",
+                                slot.kind.label()
+                            )
+                        })
+                        .collect())
+                })
                 .map(|warnings| {
                     self.sessions.clear();
                     done(warnings)
                 }),
+            command @ ControlCommand::EnrollDevice { .. } => self
+                .authenticate(passphrase.as_ref(), None, None, now)
+                .and_then(|vault| run_authenticated(vault, command))
+                .map(done),
             ControlCommand::DismissRequest { id } => self
-                .authenticate(passphrase.as_ref(), token.as_ref(), now)
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .map(drop)
                 .and_then(|()| self.dismiss_request(id))
                 .map(|name| {
@@ -1114,7 +1133,7 @@ impl Daemon {
                     ControlCommand::Add { secret, .. } => Some(secret.name.clone()),
                     _ => None,
                 };
-                self.authenticate(passphrase.as_ref(), token.as_ref(), now)
+                self.authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                     .and_then(|vault| run_authenticated(vault, command))
                     .map(|warnings| {
                         if let Some(name) = added {
@@ -1254,6 +1273,13 @@ impl Daemon {
                     .as_secs()
             }),
             pending_approvals: self.approvals.len(),
+            devices: match &self.vault {
+                Some(vault) => vault.devices(),
+                None => device_slots(&self.vault_path).unwrap_or_default(),
+            }
+            .into_iter()
+            .map(|slot| slot.kind)
+            .collect(),
         }
     }
 
@@ -1306,12 +1332,14 @@ impl Daemon {
         }
     }
 
-    /// Checks the passphrase, unlocking the vault if it is locked, or else
-    /// a session token, and returns the unlocked vault. Wrong passphrases
-    /// count toward the backoff; a token is too long to guess.
+    /// Checks the passphrase or a device key, unlocking the vault if it is
+    /// locked, or else a session token, and returns the unlocked vault.
+    /// Wrong passphrases and device keys count toward the backoff; a token is
+    /// too long to guess.
     fn authenticate(
         &mut self,
         passphrase: Option<&SecretText>,
+        device: Option<&DeviceCredential>,
         token: Option<&SecretText>,
         now: Instant,
     ) -> Result<&mut Vault, Failure> {
@@ -1325,12 +1353,12 @@ impl Daemon {
                 .as_mut()
                 .expect("a session needs the vault unlocked"));
         }
-        let passphrase = passphrase.ok_or_else(|| {
-            fail(
+        if passphrase.is_none() && device.is_none() {
+            return Err(fail(
                 ControlErrorCode::PassphraseRequired,
                 "this command needs the vault passphrase",
-            )
-        })?;
+            ));
+        }
         if let Err(wait) = self.throttle.check(now) {
             return Err(fail(
                 ControlErrorCode::TooManyAttempts,
@@ -1340,12 +1368,21 @@ impl Daemon {
                 ),
             ));
         }
-        let result = if let Some(vault) = &self.vault {
-            vault.verify_passphrase(passphrase.expose())
-        } else {
-            Vault::unlock(&self.vault_path, passphrase.expose()).map(|vault| {
-                self.vault = Some(vault);
-            })
+        let result = match (passphrase, device) {
+            (Some(passphrase), _) => match &self.vault {
+                Some(vault) => vault.verify_passphrase(passphrase.expose()),
+                None => Vault::unlock(&self.vault_path, passphrase.expose())
+                    .map(|vault| self.vault = Some(vault)),
+            },
+            (None, Some(device)) => match device_key(&device.key) {
+                None => Err(VaultError::DeviceKeyRejected),
+                Some(key) => match &self.vault {
+                    Some(vault) => vault.verify_device(&device.id, &key),
+                    None => Vault::unlock_with_device(&self.vault_path, &device.id, &key)
+                        .map(|vault| self.vault = Some(vault)),
+                },
+            },
+            (None, None) => unreachable!("checked above"),
         };
         match result {
             Ok(()) => {
@@ -1359,6 +1396,13 @@ impl Daemon {
             Err(VaultError::WrongPassphrase) => {
                 self.throttle.record_failure(now);
                 Err(fail(ControlErrorCode::WrongPassphrase, "wrong passphrase"))
+            }
+            Err(VaultError::DeviceKeyRejected) => {
+                self.throttle.record_failure(now);
+                Err(fail(
+                    ControlErrorCode::WrongDeviceKey,
+                    VaultError::DeviceKeyRejected.to_string(),
+                ))
             }
             Err(VaultError::NotFound(_)) => Err(fail(
                 ControlErrorCode::NoVault,
@@ -1389,6 +1433,20 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
                 Err(e) => Err(internal(e)),
             }
         }
+        ControlCommand::EnrollDevice {
+            kind,
+            id,
+            data,
+            key,
+        } => enroll_device(vault, kind, id, &data, &key),
+        ControlCommand::RemoveDevice { kind } => match vault.remove_device(kind) {
+            Ok(Some(_)) => Ok(Vec::new()),
+            Ok(None) => Err(fail(
+                ControlErrorCode::Invalid,
+                format!("{} is not set up for this vault", kind.label()),
+            )),
+            Err(e) => Err(internal(e)),
+        },
         ControlCommand::Unlock
         | ControlCommand::Init { .. }
         | ControlCommand::Lock
@@ -1646,7 +1704,42 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::Overview => ("overview", None),
         ControlCommand::Decide { .. } => ("decide", None),
         ControlCommand::DismissRequest { .. } => ("dismiss_request", None),
+        ControlCommand::EnrollDevice { .. } => ("enroll_device", None),
+        ControlCommand::RemoveDevice { .. } => ("remove_device", None),
     }
+}
+
+/// A device key as sent: 32 bytes in hex.
+fn device_key(hex_key: &SecretText) -> Option<SymmetricKey> {
+    let bytes = Zeroizing::new(hex::decode(hex_key.expose()).ok()?);
+    SymmetricKey::from_slice(&bytes).ok()
+}
+
+fn enroll_device(
+    vault: &mut Vault,
+    kind: DeviceKind,
+    id: String,
+    data: &str,
+    key: &SecretText,
+) -> Result<Vec<String>, Failure> {
+    let invalid = |message: &str| fail(ControlErrorCode::Invalid, message);
+    let id_ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !id_ok {
+        return Err(invalid("a device id is 1-128 letters, digits, '-' or '_'"));
+    }
+    let data = hex::decode(data).map_err(|_| invalid("device data must be hex"))?;
+    if data.len() > 4096 {
+        return Err(invalid("device data is larger than kv keeps"));
+    }
+    let key = device_key(key).ok_or_else(|| invalid("a device key is 32 bytes as hex"))?;
+    vault
+        .enroll_device(DeviceSlot { kind, id, data }, &key)
+        .map(|()| Vec::new())
+        .map_err(internal)
 }
 
 const SESSION_ENDED: &str = "the kv tui session has ended because the vault locked; unlock again";

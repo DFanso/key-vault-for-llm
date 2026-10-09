@@ -39,13 +39,38 @@ pub async fn agent(
     exchange(&mut stream, request).await
 }
 
+/// Sends one control request. One that carries a Touch ID or Windows Hello
+/// key goes only to a daemon running this same kv: the key opens the vault
+/// for as long as the device stays enrolled, and anything could be
+/// listening at the socket (after `kv stop`, or under another `KV_HOME`).
 pub async fn control(
     paths: &Paths,
     request: &ControlRequest,
     autostart: bool,
 ) -> io::Result<ControlResponse> {
     let mut stream = connect(&paths.control_endpoint(), autostart).await?;
+    if request.device.is_some() {
+        check_daemon(&stream)?;
+    }
     exchange(&mut stream, request).await
+}
+
+fn check_daemon(stream: &ClientStream) -> io::Result<()> {
+    let refused = |why: String| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{why}, so kv did not send it the unlock key; run `kv stop` and try again"),
+        )
+    };
+    match ipc::runs_this_program(stream) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(refused(
+            "the process at the kv socket is not this kv program".into(),
+        )),
+        Err(e) => Err(refused(format!(
+            "could not check the process at the kv socket ({e})"
+        ))),
+    }
 }
 
 /// For `lock` and `stop`: `Ok(None)` when no daemon is running, which is

@@ -8,6 +8,8 @@ pub enum VaultError {
     NotFound(PathBuf),
     #[error("wrong passphrase")]
     WrongPassphrase,
+    #[error("this unlock method is not set up for the vault, or no longer matches it")]
+    DeviceKeyRejected,
     #[error("the vault file is corrupted or has been tampered with")]
     Corrupted,
     #[error("unsupported vault format version {0}")]

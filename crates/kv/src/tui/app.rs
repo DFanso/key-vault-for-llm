@@ -6,6 +6,7 @@ use kv_core::proto::{Overview, PolicyPatch, Verdict};
 
 use crate::audit::Entry;
 use kv_core::secret::{Secret, SecretText, SecretValue};
+use kv_core::vault::DeviceKind;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroizing;
 
@@ -29,6 +30,8 @@ pub enum Tab {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     OpenSession(SecretText),
+    /// Opens a session with Touch ID or Windows Hello.
+    DeviceUnlock,
     Decide {
         id: u64,
         verdict: Verdict,
@@ -90,6 +93,8 @@ pub struct App {
     /// The handle waiting for a yes before it is removed.
     removing: Option<String>,
     message: Option<String>,
+    /// The device the vault can be unlocked with, offered on Ctrl-T.
+    device: Option<DeviceKind>,
 }
 
 impl Default for App {
@@ -111,7 +116,24 @@ impl App {
             editor: None,
             removing: None,
             message: None,
+            device: None,
         }
+    }
+
+    /// Offers `device` on the unlock screen.
+    pub fn set_device(&mut self, device: Option<DeviceKind>) {
+        self.device = device;
+    }
+
+    pub fn device(&self) -> Option<DeviceKind> {
+        self.device
+    }
+
+    /// Asks the device to unlock, if there is one and the vault is locked.
+    pub fn ask_device(&mut self) -> Option<Effect> {
+        let device = self.device.filter(|_| self.screen == Screen::Unlock)?;
+        self.message = Some(format!("asking {}…", device.label()));
+        Some(Effect::DeviceUnlock)
     }
 
     pub fn screen(&self) -> Screen {
@@ -165,6 +187,9 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Effect> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Effect::Quit);
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            return self.ask_device();
         }
         // Ctrl and Alt letters are neither text nor commands: Ctrl+S must
         // not allow anything, and must not type an s into a secret.

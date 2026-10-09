@@ -283,6 +283,7 @@ fn agent_socket_rejects_control_requests() {
         let mut stream = ipc::connect(&kv.paths().agent_endpoint()).await.unwrap();
         let request = ControlRequest {
             passphrase: Some(SecretText::new(PASS)),
+            device: None,
             token: None,
             command: ControlCommand::Unlock,
         };
@@ -540,4 +541,29 @@ fn a_base_url_handle_lists_as_paths_only_without_its_address() {
         "{json}"
     );
     assert!(!json.contains("dokploy.internal"), "{json}");
+}
+
+#[test]
+fn biometric_unlock_stays_off_when_kv_biometric_says_so() {
+    let kv = Kv::initialized();
+    let mut command = kv.command(&["biometric", "enable"]);
+    command.env("KV_BIOMETRIC", "off");
+    let output = run_kv(command, &format!("{PASS}\n"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("KV_BIOMETRIC") || stderr.contains("no biometric unlock"),
+        "{stderr}"
+    );
+    assert!(!kv.ok(&["status"], "").contains("unlock is on"));
+}
+
+#[test]
+fn turning_off_biometric_unlock_that_is_not_on_says_so() {
+    let kv = Kv::initialized();
+    let stderr = kv.fails(&["biometric", "disable"], &format!("{PASS}\n"));
+    assert!(
+        stderr.contains("is not on") || stderr.contains("no biometric unlock"),
+        "{stderr}"
+    );
 }

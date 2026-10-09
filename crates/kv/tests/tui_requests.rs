@@ -107,6 +107,7 @@ fn overview(requests: Vec<HandleRequest>, handles: Vec<HandleInfo>) -> Overview 
             handle_count: Some(handles.len()),
             locks_in_secs: None,
             pending_approvals: 0,
+            devices: Vec::new(),
         },
         handles,
         approvals: Vec::new(),

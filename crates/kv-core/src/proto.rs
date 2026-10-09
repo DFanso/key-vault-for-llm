@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::{Mode, Policy};
 use crate::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
+use crate::vault::DeviceKind;
 
 /// Largest frame either side accepts, in bytes. Room for the output caps
 /// below even when every byte is JSON-escaped as `\u00XX`.
@@ -224,6 +225,9 @@ pub struct Status {
     /// Agent requests waiting for a decision in `kv tui`.
     #[serde(default)]
     pub pending_approvals: usize,
+    /// Devices that can unlock the vault besides the passphrase.
+    #[serde(default)]
+    pub devices: Vec<DeviceKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,11 +260,23 @@ impl AgentErrorCode {
     }
 }
 
+/// The key a device produced for its slot in the vault, as hex.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeviceCredential {
+    pub id: String,
+    pub key: SecretText,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ControlRequest {
     /// Required by every command except `lock` and `stop`. For `init` it is
     /// the new passphrase.
     pub passphrase: Option<SecretText>,
+    /// A key from Touch ID or Windows Hello, accepted instead of the
+    /// passphrase by every command except `init`, `change_passphrase` and
+    /// `enroll_device`.
+    #[serde(default)]
+    pub device: Option<DeviceCredential>,
     /// A token from `open_session`, accepted instead of the passphrase by
     /// every command except `init`, `open_session` and `change_passphrase`.
     /// `overview` accepts only a token.
@@ -269,7 +285,7 @@ pub struct ControlRequest {
     pub command: ControlCommand,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlCommand {
     /// Creates the vault. `insecure_fast_kdf` uses cheap Argon2 settings and
@@ -322,6 +338,18 @@ pub enum ControlCommand {
     DismissRequest {
         id: u64,
     },
+    /// Lets a device unlock the vault, replacing any of the same kind. Needs
+    /// the passphrase. `data` and `key` are hex: what the device keeps in
+    /// the vault header, and the key it produced.
+    EnrollDevice {
+        kind: DeviceKind,
+        id: String,
+        data: String,
+        key: SecretText,
+    },
+    RemoveDevice {
+        kind: DeviceKind,
+    },
 }
 
 /// The user's answer to a request waiting for approval.
@@ -363,6 +391,9 @@ pub enum ControlErrorCode {
     VaultExists,
     PassphraseRequired,
     WrongPassphrase,
+    /// The device key does not open the vault: the device was set up again
+    /// elsewhere, removed, or the passphrase changed since.
+    WrongDeviceKey,
     TooManyAttempts,
     UnknownHandle,
     HandleExists,

@@ -1,6 +1,8 @@
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::net::windows::named_pipe::{
@@ -17,7 +19,11 @@ use windows_sys::Win32::Security::{
     GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 
 use crate::paths::Endpoint;
 
@@ -198,6 +204,35 @@ unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
         LocalFree(text.cast());
         Ok(owned)
     }
+}
+
+/// The program the process at the server end of `stream` runs.
+pub fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
+    let pipe = stream.as_raw_handle() as HANDLE;
+    let mut pid = 0u32;
+    // SAFETY: `pipe` is the client end of an open named pipe.
+    if unsafe { GetNamedPipeServerProcessId(pipe, &mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a plain query; the handle is closed below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0u16; 32 * 1024];
+    let mut len = buffer.len() as u32;
+    // SAFETY: `len` is the buffer's length in UTF-16 units; the call sets it
+    // to the number written.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len)
+    };
+    let error = io::Error::last_os_error();
+    // SAFETY: `process` was opened above and is not used again.
+    unsafe { CloseHandle(process) };
+    if ok == 0 {
+        return Err(error);
+    }
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..len as usize])))
 }
 
 #[cfg(test)]

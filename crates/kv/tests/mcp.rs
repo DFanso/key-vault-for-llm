@@ -303,6 +303,7 @@ async fn an_ask_handle_waits_for_approval_and_shows_the_client() {
     let control = |token: Option<SecretText>, passphrase: Option<&str>, command| {
         let request = ControlRequest {
             passphrase: passphrase.map(SecretText::new),
+            device: None,
             token,
             command,
         };
@@ -377,6 +378,7 @@ async fn an_agent_asks_for_a_handle_it_does_not_have() {
     let send = |token: Option<SecretText>, passphrase: Option<&str>, command| {
         let request = ControlRequest {
             passphrase: passphrase.map(SecretText::new),
+            device: None,
             token,
             command,
         };
