@@ -454,3 +454,41 @@ async fn an_agent_queries_a_database_through_mcp() {
     assert!(!text.contains(password), "{text}");
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_agent_gets_a_database_lease_through_mcp() {
+    let home = Home::new();
+    home.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    home.kv(
+        &["add", "cache", "--kind", "redis", "--mode", "auto"],
+        &format!("{PASS}\nredis://:cache-password-0123@127.0.0.1:1/0\n"),
+    );
+    let project = TempDir::new().unwrap();
+    let client = home.mcp(project.path()).await;
+    let (failed, text) = call(
+        &client,
+        "db_connect",
+        serde_json::json!({"handle": "cache", "ttl_secs": 60}),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["expires_in_secs"], 60);
+    let url = url::Url::parse(reply["url"].as_str().unwrap()).unwrap();
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert!(!text.contains("cache-password"), "{text}");
+
+    // The daemon holds the lease, so it answers after this call returns.
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+        .await
+        .unwrap();
+    tokio::io::AsyncWriteExt::write_all(&mut socket, b"*1\r\n$4\r\nPING\r\n")
+        .await
+        .unwrap();
+    let mut answer = [0u8; 6];
+    tokio::io::AsyncReadExt::read_exact(&mut socket, &mut answer)
+        .await
+        .unwrap();
+    assert_eq!(&answer, b"-NOAUT");
+    client.cancel().await.unwrap();
+}

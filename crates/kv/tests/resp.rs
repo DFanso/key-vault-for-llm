@@ -37,6 +37,67 @@ fn a_token_waits_for_all_its_bytes() {
 }
 
 #[test]
+fn frames_end_where_the_reply_ends() {
+    let mut frame = Frame::default();
+    let parsed = tokens(b"*2\r\n*2\r\n:1\r\n:2\r\n$1\r\nx\r\n");
+    let ends: Vec<bool> = parsed.iter().map(|t| frame.take(t)).collect();
+    assert_eq!(ends, [false, false, false, false, true]);
+    assert!(!frame.push);
+
+    let mut frame = Frame::default();
+    let parsed = tokens(b">2\r\n+invalidate\r\n*0\r\n");
+    let ends: Vec<bool> = parsed.iter().map(|t| frame.take(t)).collect();
+    assert_eq!(ends, [false, false, true]);
+    assert!(frame.push);
+}
+
+#[test]
+fn scrubbing_keeps_lengths_right_and_turns_matching_numbers_into_strings() {
+    let scrubber = Scrubber::new([("cache", "s3cret-value-123"), ("pin", "987654321")]);
+    let bulk = scrub_token(
+        Token::Bulk {
+            kind: b'$',
+            data: b"key=s3cret-value-123".to_vec(),
+        },
+        &scrubber,
+    );
+    let mut out = Vec::new();
+    encode(&bulk, &mut out);
+    assert_eq!(out, b"$14\r\nkey=[kv:cache]\r\n");
+    let number = scrub_token(
+        Token::Line {
+            kind: b':',
+            text: b"987654321".to_vec(),
+        },
+        &scrubber,
+    );
+    assert_eq!(
+        number,
+        Token::Bulk {
+            kind: b'$',
+            data: b"[kv:pin]".to_vec()
+        }
+    );
+}
+
+#[test]
+fn commands_must_be_arrays_of_strings() {
+    let (args, used) = parse_command(b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n*1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(args, [b"GET".to_vec(), b"k".to_vec()]);
+    assert_eq!(used, 20);
+    assert_eq!(parse_command(b"*2\r\n$3\r\nGET\r\n").unwrap(), None);
+    assert!(parse_command(b"GET k\r\n").is_err());
+    assert!(parse_command(b"*1\r\n:1\r\n").is_err());
+    assert!(parse_command(b"*0\r\n").is_err());
+    assert_eq!(
+        encode_command(&[b"SET".to_vec(), b"a b".to_vec()]),
+        b"*2\r\n$3\r\nSET\r\n$3\r\na b\r\n"
+    );
+}
+
+#[test]
 fn redis_urls_must_name_a_server_and_a_numbered_database() {
     assert_eq!(
         RedisTarget::parse("rediss://app:p%40ss@cache.example:6380/3")

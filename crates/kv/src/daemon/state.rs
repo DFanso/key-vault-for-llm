@@ -14,9 +14,9 @@ use kv_core::policy::{
     Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry,
 };
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, Approval, ControlCommand, ControlErrorCode,
-    ControlRequest, ControlResponse, DbCall, ExecCall, HandleRequest, HttpCall, Overview,
-    PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
+    AgentErrorCode, AgentRequest, AgentResponse, Approval, ConnectCall, ControlCommand,
+    ControlErrorCode, ControlRequest, ControlResponse, DbCall, ExecCall, HandleRequest, HttpCall,
+    Overview, PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
@@ -27,7 +27,8 @@ use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::audit::{Audit, Use};
-use crate::broker::{DbJob, ExecJob, HttpJob, RoleChecks};
+use crate::broker::lease::{DEFAULT_TTL, MAX_LEASES, MAX_TTL};
+use crate::broker::{ConnectJob, DbJob, ExecJob, HttpJob, Leases, RoleChecks};
 use crate::throttle::Throttle;
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -144,6 +145,9 @@ pub struct Daemon {
     /// Read-only Postgres handles whose role has been checked since the
     /// vault was unlocked. Forgotten when the handle changes.
     role_checks: RoleChecks,
+    /// Open `db_connect` leases. All end when the vault locks; a handle's
+    /// end when it changes.
+    leases: Leases,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -201,6 +205,7 @@ pub enum Prepared {
     Http(Box<HttpJob>),
     Exec(Box<ExecJob>),
     Db(Box<DbJob>),
+    Connect(Box<ConnectJob>),
     Wait(Box<Waiting>),
 }
 
@@ -239,6 +244,7 @@ impl Daemon {
             next_request: 0,
             request_notice: None,
             role_checks: RoleChecks::default(),
+            leases: Leases::default(),
             ended: BTreeMap::new(),
             grants: Vec::new(),
         }
@@ -286,6 +292,7 @@ impl Daemon {
             AgentRequest::HttpRequest(call) => self.prepare_http(call, session, now),
             AgentRequest::Exec(call) => self.prepare_exec(call, session, now),
             AgentRequest::DbQuery(call) => self.prepare_db(call, session, now),
+            AgentRequest::DbConnect(call) => self.prepare_connect(call, session, now),
             AgentRequest::RequestHandle(request) => {
                 let name = printable(&request.name, 63);
                 let response = self.request_handle(session, request);
@@ -728,6 +735,88 @@ impl Daemon {
         self.queue(ask, job, session, now)
     }
 
+    fn prepare_connect(
+        &mut self,
+        call: ConnectCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
+        let ttl = call.ttl_secs.map_or(DEFAULT_TTL, Duration::from_secs);
+        let summary = format!("lease for {}s", ttl.as_secs());
+        let refuse = |daemon: &Self, decision, response| {
+            daemon.refuse("db_connect", &call.handle, &summary, decision, response)
+        };
+        let Some(vault) = &self.vault else {
+            return refuse(self, "locked", self.locked_error());
+        };
+        let Some(secret) = vault.get(&call.handle).cloned() else {
+            return refuse(self, "invalid", unknown_handle(vault, &call.handle));
+        };
+        if ttl.is_zero() || ttl > MAX_TTL {
+            let message = "ttl_secs must be between 1 and 3600";
+            return refuse(
+                self,
+                "invalid",
+                agent_error(AgentErrorCode::BadRequest, message),
+            );
+        }
+        let decision = evaluate(&secret, &Operation::DbConnect);
+        if let Decision::Deny(reason) = decision {
+            return refuse(
+                self,
+                "policy",
+                agent_error(AgentErrorCode::PolicyDenied, reason),
+            );
+        }
+        let ask = decision == Decision::Ask && !self.granted(session, &call.handle, now);
+        if ask && self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
+        }
+        let Some(ticket) = self.leases.open(&call.handle) else {
+            let message = format!(
+                "{MAX_LEASES} leases are open already; let one expire, or ask the user to lock \
+                 the vault"
+            );
+            return refuse(
+                self,
+                "denied",
+                agent_error(AgentErrorCode::PolicyDenied, message),
+            );
+        };
+        self.touch(now);
+        let scrubber = self.scrubber();
+        self.leases.set_scrubber(scrubber);
+        let handle = call.handle.clone();
+        let job = Prepared::Connect(Box::new(ConnectJob {
+            secret,
+            ttl,
+            ticket,
+            scrubber: self.leases.subscribe(),
+            audit: self.audit.clone(),
+            started: now,
+            decision: if decision == Decision::Ask {
+                "approved"
+            } else {
+                "auto"
+            },
+        }));
+        if !ask {
+            return job;
+        }
+        let ask = Ask {
+            tool: "db_connect",
+            ask: vec![handle.clone()],
+            handles: handle,
+            summary,
+            detail: format!(
+                "a connection URL that works for {}",
+                humantime::format_duration(ttl)
+            ),
+            cwd: None,
+        };
+        self.queue(ask, job, session, now)
+    }
+
     fn granted(&self, session: Option<&SessionInfo>, handle: &str, now: Instant) -> bool {
         session.is_some_and(|session| {
             self.grants
@@ -778,11 +867,13 @@ impl Daemon {
     }
 
     /// Drops what was decided about a handle that was added, changed or
-    /// removed: its grants, its role check, and the requests waiting on it,
-    /// which hold its old value and policy and so may not run.
+    /// removed: its grants, its role check, its leases, and the requests
+    /// waiting on it, which hold its old value and policy and so may not
+    /// run.
     fn handle_changed(&mut self, name: &str, now: Instant) {
         self.grants.retain(|g| g.handle != name);
         self.role_checks.forget(name);
+        self.leases.end_handle(name);
         let (stale, kept) = std::mem::take(&mut self.approvals)
             .into_iter()
             .partition(|p: &Pending| p.handles.split(',').any(|h| h == name));
@@ -1030,6 +1121,11 @@ impl Daemon {
                         if let Some(name) = &handle {
                             self.handle_changed(name, now);
                         }
+                        // Open leases scrub with the secrets as they are now.
+                        if self.leases.count() > 0 {
+                            let scrubber = self.scrubber();
+                            self.leases.set_scrubber(scrubber);
+                        }
                         done(warnings)
                     })
             }
@@ -1063,13 +1159,15 @@ impl Daemon {
     }
 
     /// Forgets the vault key, the scrubber, every session and every grant,
-    /// and answers every waiting request with `vault_locked`.
+    /// ends every lease, and answers every waiting request with
+    /// `vault_locked`.
     fn lock_vault(&mut self) {
         self.vault = None;
         self.scrubber = None;
         self.sessions.clear();
         self.grants.clear();
         self.role_checks.clear();
+        self.leases.end_all();
         let now = Instant::now();
         for pending in std::mem::take(&mut self.approvals) {
             self.record_unanswered(&pending, "locked", "vault_locked", now);

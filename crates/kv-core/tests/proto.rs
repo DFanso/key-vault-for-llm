@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    DbCall, ExecCall, ExecReply, HttpReply, MAX_FRAME_LEN, MAX_OUTPUT_LEN, Overview, PolicyPatch,
-    RedisReply, ResultSet, RowsReply, SessionInfo, Status, Verdict,
+    AgentErrorCode, AgentRequest, AgentResponse, ConnectCall, ControlCommand, ControlRequest,
+    ControlResponse, DbCall, ExecCall, ExecReply, HttpReply, LeaseReply, MAX_FRAME_LEN,
+    MAX_OUTPUT_LEN, Overview, PolicyPatch, RedisReply, ResultSet, RowsReply, SessionInfo, Status,
+    Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -356,6 +357,19 @@ fn a_db_query_is_a_flat_tagged_object_with_an_optional_timeout() {
 }
 
 #[test]
+fn a_db_connect_takes_a_handle_and_an_optional_ttl() {
+    let request: AgentRequest =
+        serde_json::from_str(r#"{"type":"db_connect","handle":"prod-db"}"#).unwrap();
+    assert_eq!(
+        request,
+        AgentRequest::DbConnect(ConnectCall {
+            handle: "prod-db".into(),
+            ttl_secs: None,
+        })
+    );
+}
+
+#[test]
 fn database_replies_round_trip() {
     for response in [
         AgentResponse::Rows(RowsReply {
@@ -370,6 +384,11 @@ fn database_replies_round_trip() {
         AgentResponse::Redis(RedisReply {
             value: serde_json::json!(["a", 1, null]),
             truncated: true,
+        }),
+        AgentResponse::Lease(LeaseReply {
+            url: "postgres://kv:token@127.0.0.1:41823/app".into(),
+            expires_in_secs: 900,
+            warnings: Vec::new(),
         }),
     ] {
         let json = serde_json::to_string(&response).unwrap();

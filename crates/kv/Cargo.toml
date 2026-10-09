@@ -43,6 +43,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 rcgen = "0.14"
+redis = { version = "1.7", default-features = false, features = ["tokio-comp"] }
 rmcp = { version = "3.5", default-features = false, features = ["client", "transport-child-process"] }
 tempfile = "3.27"
 tokio-rustls = "0.26"

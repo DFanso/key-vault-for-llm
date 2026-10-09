@@ -80,6 +80,21 @@ impl<R: AsyncRead + Unpin> Buffered<R> {
         }
     }
 
+    /// Like `new`, with bytes already read from the stream.
+    pub fn with_data(inner: R, data: Vec<u8>) -> Self {
+        Self {
+            inner,
+            buf: data,
+            start: 0,
+        }
+    }
+
+    /// The stream, and what was read from it but not consumed.
+    pub fn into_parts(self) -> (R, Vec<u8>) {
+        let rest = self.buf[self.start..].to_vec();
+        (self.inner, rest)
+    }
+
     /// The bytes read but not yet consumed.
     pub fn data(&self) -> &[u8] {
         &self.buf[self.start..]

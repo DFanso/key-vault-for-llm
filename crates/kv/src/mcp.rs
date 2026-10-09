@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use kv_core::crypto::fill_random;
 use kv_core::proto::{
-    AgentRequest, AgentResponse, DbCall, ExecCall, HandleRequest, HttpCall, SessionInfo,
+    AgentRequest, AgentResponse, ConnectCall, DbCall, ExecCall, HandleRequest, HttpCall,
+    SessionInfo,
 };
 use kv_core::secret::{AuthPlacement, SecretKind};
 use rmcp::handler::server::wrapper::Parameters;
@@ -66,6 +67,15 @@ pub struct DbQueryArgs {
     /// Seconds before the query is stopped: 30 by default, at most 300.
     #[serde(default)]
     timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DbConnectArgs {
+    /// A postgres or redis handle from list_handles.
+    handle: String,
+    /// Seconds the URL keeps working: 900 by default, at most 3600.
+    #[serde(default)]
+    ttl_secs: Option<u64>,
 }
 
 /// Never carries a secret value: unknown fields such as `token` are refused.
@@ -197,6 +207,26 @@ impl KvServer {
     }
 
     #[tool(
+        description = "Get a connection URL for a postgres or redis handle, for a tool that needs its own connection (psql, redis-cli, a migration tool, a test suite). The URL points at kv on 127.0.0.1 and holds a lease token instead of the password; it works only on this machine and stops working when it expires, the vault locks or the handle changes, which also closes its connections. Results through it are scrubbed, and read-only handles stay read-only. Prefer db_query for single queries. If the handle's mode is ask, this waits up to 60 s for the user to approve it in kv tui."
+    )]
+    async fn db_connect(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(args): Parameters<DbConnectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session = self.session(&peer);
+        Ok(self
+            .ask(
+                Some(&session),
+                AgentRequest::DbConnect(ConnectCall {
+                    handle: args.handle,
+                    ttl_secs: args.ttl_secs,
+                }),
+            )
+            .await)
+    }
+
+    #[tool(
         description = "Ask the user to add a handle you need but do not have. Never include a secret value: the user types it in kv tui, where your request appears with the form filled in, and decides the policy. Returns at once; call list_handles later to see whether it was added."
     )]
     async fn request_handle(
@@ -253,7 +283,7 @@ impl KvServer {
     name = "kv",
     instructions = "kv lets you use the user's API keys, tokens and other secrets \
 without seeing them. Call list_handles to see what is available and how each handle may be \
-used, then call http_request, exec or db_query with a handle name. Secret values never appear in \
+used, then call http_request, exec, db_query or db_connect with a handle name. Secret values never appear in \
 results; where one would, you see [kv:<handle>]. Handles in ask mode wait for the user to \
 approve each use in kv tui; approval_denied means they said no, so do not retry it. If a call \
 fails with vault_locked, ask the user to run `kv unlock`. If you need a secret that has no \

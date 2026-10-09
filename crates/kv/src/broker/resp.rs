@@ -209,6 +209,72 @@ pub fn encode(token: &Token, out: &mut Vec<u8>) {
     }
 }
 
+/// Replaces secrets in a token. A number that matches one becomes a string,
+/// since the replacement is not a number.
+pub fn scrub_token(token: Token, scrubber: &Scrubber) -> Token {
+    match token {
+        Token::Line {
+            kind: kind @ (b'+' | b'-'),
+            text,
+        } => Token::Line {
+            kind,
+            text: scrubber.scrub(&text),
+        },
+        Token::Line {
+            kind: kind @ (b':' | b',' | b'('),
+            text,
+        } => {
+            let scrubbed = scrubber.scrub(&text);
+            if scrubbed == text {
+                Token::Line { kind, text }
+            } else {
+                Token::Bulk {
+                    kind: b'$',
+                    data: scrubbed,
+                }
+            }
+        }
+        Token::Bulk { kind, data } => Token::Bulk {
+            kind,
+            data: scrubber.scrub(&data),
+        },
+        other => other,
+    }
+}
+
+/// Follows a reply's tokens to find where it ends.
+#[derive(Default)]
+pub struct Frame {
+    open: Vec<usize>,
+    started: bool,
+    /// The reply is a RESP3 push message, which answers no command.
+    pub push: bool,
+}
+
+impl Frame {
+    /// Takes the next token; `true` when it completes the reply.
+    pub fn take(&mut self, token: &Token) -> bool {
+        if !self.started {
+            self.started = true;
+            self.push = matches!(token, Token::Aggregate { kind: b'>', .. });
+        }
+        if let Token::Aggregate { len, .. } = token
+            && *len > 0
+        {
+            self.open.push(*len);
+            return false;
+        }
+        while let Some(left) = self.open.last_mut() {
+            *left -= 1;
+            if *left > 0 {
+                return false;
+            }
+            self.open.pop();
+        }
+        true
+    }
+}
+
 pub async fn next_token<R: AsyncRead + Unpin>(conn: &mut Buffered<R>) -> io::Result<Option<Token>> {
     loop {
         if let Some((token, used)) = parse_token(conn.data()).map_err(io::Error::other)? {
@@ -222,6 +288,59 @@ pub async fn next_token<R: AsyncRead + Unpin>(conn: &mut Buffered<R>) -> io::Res
             };
         }
     }
+}
+
+/// Reads one command as clients send it: an array of strings. `None` at
+/// the end of the stream.
+pub async fn next_command<R: AsyncRead + Unpin>(
+    conn: &mut Buffered<R>,
+) -> io::Result<Option<Command>> {
+    loop {
+        if let Some((args, used)) = parse_command(conn.data()).map_err(io::Error::other)? {
+            conn.consume(used);
+            return Ok(Some(args));
+        }
+        if conn.data().len() > 2 * MAX_WIRE_MESSAGE {
+            return Err(io::Error::other("a command is larger than kv accepts"));
+        }
+        if !conn.fill().await? {
+            return match conn.data().is_empty() {
+                true => Ok(None),
+                false => Err(io::ErrorKind::UnexpectedEof.into()),
+            };
+        }
+    }
+}
+
+/// A command's arguments, the command name first.
+pub type Command = Vec<Vec<u8>>;
+
+/// A command from the front of `data`, with the bytes it took.
+pub fn parse_command(data: &[u8]) -> Result<Option<(Command, usize)>, String> {
+    let Some((header, mut used)) = parse_token(data)? else {
+        return Ok(None);
+    };
+    let Token::Aggregate { kind: b'*', len } = header else {
+        return Err(
+            "kv takes commands as arrays of strings, as redis-cli and client libraries send them"
+                .into(),
+        );
+    };
+    if len == 0 {
+        return Err("the command is empty".into());
+    }
+    let mut args = Vec::new();
+    for _ in 0..len {
+        match parse_token(&data[used..])? {
+            None => return Ok(None),
+            Some((Token::Bulk { kind: b'$', data }, n)) => {
+                args.push(data);
+                used += n;
+            }
+            Some(_) => return Err("command arguments must be strings".into()),
+        }
+    }
+    Ok(Some((args, used)))
 }
 
 pub fn encode_command(args: &[Vec<u8>]) -> Vec<u8> {
