@@ -69,6 +69,7 @@ impl Fixture {
         self.daemon.handle_control(
             ControlRequest {
                 passphrase: passphrase.map(SecretText::new),
+                device: None,
                 token: None,
                 command,
             },

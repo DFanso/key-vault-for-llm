@@ -81,6 +81,7 @@ fn overview(approvals: Vec<Approval>) -> Overview {
             handle_count: Some(1),
             locks_in_secs: Some(8 * 3600),
             pending_approvals: approvals.len(),
+            devices: Vec::new(),
         },
         handles: vec![handle("openrouter", Mode::Ask)],
         approvals,

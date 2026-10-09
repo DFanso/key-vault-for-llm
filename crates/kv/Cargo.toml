@@ -10,6 +10,7 @@ description = "Local secrets broker that lets AI agents use secrets without seei
 clap = { version = "4.6", features = ["derive", "env"] }
 dirs = "7.0"
 futures-util = { version = "0.3", default-features = false }
+hex = "0.4"
 humantime = "2"
 kv-core = { path = "../kv-core" }
 notify-rust = "4.18"

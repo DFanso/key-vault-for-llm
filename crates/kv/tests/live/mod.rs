@@ -188,6 +188,7 @@ pub fn request(
 ) -> ControlRequest {
     ControlRequest {
         passphrase: passphrase.map(SecretText::new),
+        device: None,
         token: token.cloned(),
         command,
     }

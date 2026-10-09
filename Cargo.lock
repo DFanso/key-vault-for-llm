@@ -1820,6 +1820,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures-util",
+ "hex",
  "humantime",
  "kv-core",
  "notify-rust",

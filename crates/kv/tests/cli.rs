@@ -283,6 +283,7 @@ fn agent_socket_rejects_control_requests() {
         let mut stream = ipc::connect(&kv.paths().agent_endpoint()).await.unwrap();
         let request = ControlRequest {
             passphrase: Some(SecretText::new(PASS)),
+            device: None,
             token: None,
             command: ControlCommand::Unlock,
         };

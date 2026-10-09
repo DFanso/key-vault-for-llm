@@ -44,6 +44,7 @@ impl Driver {
             Effect::OpenSession(passphrase) => {
                 let request = ControlRequest {
                     passphrase: Some(passphrase),
+                    device: None,
                     token: None,
                     command: ControlCommand::OpenSession,
                 };
@@ -88,6 +89,7 @@ impl Driver {
                 self.token = None;
                 let request = ControlRequest {
                     passphrase: None,
+                    device: None,
                     token: None,
                     command: ControlCommand::Lock,
                 };
@@ -124,6 +126,7 @@ impl Driver {
         };
         let request = ControlRequest {
             passphrase: None,
+            device: None,
             token: Some(token),
             command,
         };

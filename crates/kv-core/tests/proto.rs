@@ -66,6 +66,7 @@ fn agent_responses_never_contain_secret_values() {
                 handle_count: Some(secrets.len()),
                 locks_in_secs: Some(60),
                 pending_approvals: 0,
+                devices: Vec::new(),
             },
         },
     ];
@@ -96,6 +97,7 @@ fn agent_requests_use_a_type_tag() {
 fn a_control_request_is_not_a_valid_agent_request() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        device: None,
         token: None,
         command: ControlCommand::Unlock,
     };
@@ -107,6 +109,7 @@ fn a_control_request_is_not_a_valid_agent_request() {
 fn control_request_debug_hides_the_passphrase() {
     let control = ControlRequest {
         passphrase: Some(SecretText::new("correct horse battery")),
+        device: None,
         token: None,
         command: ControlCommand::ChangePassphrase {
             new_passphrase: SecretText::new("a brand new passphrase"),
@@ -254,6 +257,7 @@ fn session_tokens_never_show_in_debug_output() {
     let token = "ab".repeat(32);
     let request = ControlRequest {
         passphrase: None,
+        device: None,
         token: Some(SecretText::new(token.clone())),
         command: ControlCommand::Overview,
     };
@@ -406,4 +410,16 @@ fn an_overview_from_before_role_warnings_still_parses() {
     )
     .unwrap();
     assert!(overview.role_warnings.is_empty());
+}
+
+#[test]
+fn a_control_request_without_a_device_credential_still_parses() {
+    let request: ControlRequest =
+        serde_json::from_str(r#"{"passphrase":"pw","command":{"type":"unlock"}}"#).unwrap();
+    assert!(request.device.is_none());
+    let status: Status = serde_json::from_str(
+        r#"{"vault_exists":true,"locked":true,"handle_count":null,"locks_in_secs":null}"#,
+    )
+    .unwrap();
+    assert!(status.devices.is_empty());
 }

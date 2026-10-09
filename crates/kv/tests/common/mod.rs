@@ -48,6 +48,7 @@ impl Fixture {
         let (response, _) = self.daemon.handle_control(
             ControlRequest {
                 passphrase: Some(SecretText::new(PASS)),
+                device: None,
                 token: None,
                 command,
             },
@@ -57,6 +58,13 @@ impl Fixture {
             matches!(response, ControlResponse::Done { .. }),
             "{response:?}"
         );
+    }
+
+    pub fn status(&mut self) -> kv_core::proto::Status {
+        match self.daemon.prepare(AgentRequest::Status, self.t0) {
+            Prepared::Reply(AgentResponse::Status { status }) => status,
+            _ => panic!("expected a status"),
+        }
     }
 
     pub fn add(&mut self, secret: Secret) {
@@ -155,6 +163,7 @@ impl Fixture {
     ) -> ControlResponse {
         let request = ControlRequest {
             passphrase: passphrase.map(SecretText::new),
+            device: None,
             token: token.cloned(),
             command,
         };

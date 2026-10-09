@@ -414,6 +414,7 @@ async fn control(
 ) -> Result<()> {
     let request = ControlRequest {
         passphrase,
+        device: None,
         token: None,
         command,
     };
@@ -435,6 +436,7 @@ async fn control(
 async fn stop_or_lock(paths: &Paths, command: ControlCommand) -> Result<()> {
     let request = ControlRequest {
         passphrase: None,
+        device: None,
         token: None,
         command,
     };
