@@ -34,6 +34,7 @@ zeroize = "1.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
+libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString"] }
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
@@ -51,13 +52,16 @@ windows = { version = "0.62", features = [
     "Security_Cryptography",
     "Storage_Streams",
 ] }
+windows-future = "0.3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Console",
     "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

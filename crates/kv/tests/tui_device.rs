@@ -5,6 +5,7 @@ mod fake;
 mod live;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use fake::Fake;
 use kv::device::{self, Device};
@@ -28,12 +29,16 @@ async fn enrolled(daemon: &Daemon) -> Arc<Fake> {
 async fn an_enrolled_device_opens_the_tui_session() {
     let daemon = Daemon::start().await;
     let fake = enrolled(&daemon).await;
-    let mut driver = Driver::with_device(daemon.paths.clone(), Some(fake as Arc<dyn Device>));
+    let mut driver =
+        Driver::with_device(daemon.paths.clone(), Some(fake.clone() as Arc<dyn Device>));
     assert_eq!(driver.device(), Some(DeviceKind::TouchId));
     assert!(matches!(
         driver.run(Effect::DeviceUnlock).await,
         Outcome::Opened
     ));
+    let reasons = fake.reasons.lock().unwrap().clone();
+    assert_eq!(reasons.len(), 1);
+    assert!(reasons[0].contains("kv tui"), "{reasons:?}");
     match driver.refresh().await {
         Some(Outcome::Overview(overview)) => {
             assert!(!overview.status.locked);
@@ -87,4 +92,31 @@ async fn a_refused_or_wrong_device_key_leaves_the_tui_locked() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+/// The prompt runs beside the TUI, which keeps taking keys (Esc quits)
+/// while the user decides.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_prompt_does_not_hold_up_the_tui() {
+    let daemon = Daemon::start().await;
+    let fake = enrolled(&daemon).await;
+    let (release, gate) = std::sync::mpsc::channel();
+    *fake.gate.lock().unwrap() = Some(gate);
+    let mut driver = Driver::with_device(daemon.paths.clone(), Some(fake as Arc<dyn Device>));
+
+    let mut prompt = driver.ask_device();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut prompt)
+            .await
+            .is_err(),
+        "the prompt is still open"
+    );
+    release.send(()).unwrap();
+    let answer = tokio::time::timeout(Duration::from_secs(5), prompt)
+        .await
+        .expect("the prompt answers once released");
+    assert!(matches!(
+        driver.finish_device(answer).await,
+        Outcome::Opened
+    ));
 }

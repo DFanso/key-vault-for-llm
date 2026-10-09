@@ -180,7 +180,7 @@ body, so for a strictly read-only key prefer one the service itself limits.
 
 Every command that changes the vault asks for the passphrase (or Touch ID
 or Windows Hello, below), or runs inside an unlocked `kv tui`, so an agent
-running commands as you cannot add, remove or loosen secrets. The vault locks
+running commands as you cannot add, remove or loosen secrets without you. The vault locks
 itself after 8 hours without use. To change that, set `KV_IDLE_LOCK=2h` (any
 duration) in your shell profile and run `kv stop` so the next command picks it
 up.
@@ -213,6 +213,17 @@ kv keeps the Touch ID key in your login keychain, where only the `kv` binary
 that saved it can read it without your login password. After you install a
 new kv, macOS asks for that password once; choose Always Allow. Set
 `KV_BIOMETRIC=off` to never use either method.
+
+An agent running commands as you can start a prompt too, by running one of
+these commands itself. The Touch ID prompt says what kv is trying to do,
+such as "remove the handle prod-db from the kv vault" or "open kv tui, where
+you approve agent requests": cancel any you did not start. kv sends the key
+only to a daemon running the same `kv` program. Windows Hello's dialog
+cannot say what it is for, and Windows does not keep other programs from
+using kv's Hello credential, so a Hello prompt you approve for another
+program can give it a lasting key to the vault. On Windows, cancel every
+Hello prompt you did not start, and keep using the passphrase where agents
+run unattended.
 
 ## What kv protects against
 

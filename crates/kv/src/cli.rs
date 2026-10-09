@@ -327,7 +327,9 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Add(args) => {
-            let credential = input.credential(&paths).await?;
+            let credential = input
+                .credential(&paths, &adding(&args.name, args.replace))
+                .await?;
             let value = read_value(&args, &mut input)?;
             let mut policy = Policy::default();
             args.policy.patch().apply(&mut policy);
@@ -486,8 +488,31 @@ enum Credential {
 
 /// Sends `command` with the credential `Input::credential` picks.
 async fn authorized(paths: &Paths, input: &mut Input, command: ControlCommand) -> Result<()> {
-    let credential = input.credential(paths).await?;
+    let credential = input.credential(paths, &device_reason(&command)).await?;
     send_as(paths, input, credential, command).await
+}
+
+/// What a Touch ID prompt for `command` says kv is trying to do.
+fn device_reason(command: &ControlCommand) -> String {
+    match command {
+        ControlCommand::Add { secret, replace } => adding(&secret.name, *replace),
+        ControlCommand::Remove { name } => format!("remove the handle {name} from the kv vault"),
+        ControlCommand::SetPolicy { name, .. } => {
+            format!("change the policy of the kv handle {name}")
+        }
+        ControlCommand::RemoveDevice { kind } => {
+            format!("turn off {} unlock for the kv vault", kind.label())
+        }
+        _ => "unlock the kv vault".into(),
+    }
+}
+
+fn adding(name: &str, replace: bool) -> String {
+    if replace {
+        format!("replace the handle {name} in the kv vault")
+    } else {
+        format!("add the handle {name} to the kv vault")
+    }
 }
 
 /// Sends `command` with `credential`. If the daemon turns down a device key
@@ -647,16 +672,18 @@ impl Input {
     /// Touch ID or Windows Hello when the vault has a slot for this
     /// platform's device and stdin is a terminal (so scripts keep reading
     /// the passphrase from stdin), or else the passphrase.
-    async fn credential(&mut self, paths: &Paths) -> io::Result<Credential> {
+    async fn credential(&mut self, paths: &Paths, reason: &str) -> io::Result<Credential> {
         if self.interactive
             && let Some(device) = device::platform()
         {
             let label = device.kind().label();
             let vault = paths.vault.clone();
-            let asked =
-                tokio::task::spawn_blocking(move || device::credential(&vault, device.as_ref()))
-                    .await
-                    .map_err(io::Error::other)?;
+            let reason = reason.to_owned();
+            let asked = tokio::task::spawn_blocking(move || {
+                device::credential(&vault, device.as_ref(), &reason)
+            })
+            .await
+            .map_err(io::Error::other)?;
             match asked {
                 Some(Ok(credential)) => return Ok(Credential::Device(credential)),
                 Some(Err(why)) => eprintln!("{label}: {why}"),
@@ -849,6 +876,40 @@ mod tests {
         assert_eq!(patch.allowed_methods, Some(vec!["GET".to_string()]));
         assert_eq!(patch.allowed_cmds, None);
         assert_eq!(patch.read_only, Some(true));
+    }
+
+    #[test]
+    fn the_device_prompt_names_the_change() {
+        let name = || "prod-db".to_owned();
+        assert_eq!(
+            device_reason(&ControlCommand::Unlock),
+            "unlock the kv vault"
+        );
+        assert_eq!(
+            device_reason(&ControlCommand::Remove { name: name() }),
+            "remove the handle prod-db from the kv vault"
+        );
+        assert_eq!(
+            device_reason(&ControlCommand::SetPolicy {
+                name: name(),
+                patch: PolicyPatch::default(),
+            }),
+            "change the policy of the kv handle prod-db"
+        );
+        assert_eq!(
+            device_reason(&ControlCommand::RemoveDevice {
+                kind: DeviceKind::TouchId
+            }),
+            "turn off Touch ID unlock for the kv vault"
+        );
+        assert_eq!(
+            adding("prod-db", false),
+            "add the handle prod-db to the kv vault"
+        );
+        assert_eq!(
+            adding("prod-db", true),
+            "replace the handle prod-db in the kv vault"
+        );
     }
 
     #[test]

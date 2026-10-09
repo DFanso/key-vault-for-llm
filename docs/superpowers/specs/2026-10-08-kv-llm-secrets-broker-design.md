@@ -179,6 +179,20 @@ example with `DYLD_INSERT_LIBRARIES`, which binaries without the hardened
 runtime honor) skips the fingerprint; that is the same-user process of the
 threat model, which can attack the daemon the same way.
 
+An agent can start a device prompt itself, by running `kv unlock` or `kv
+tui` under a pseudo-terminal. Two things keep that from handing it the
+vault: the client sends a device key only to a daemon running the same
+program (the control socket's peer process, `LOCAL_PEERPID` and
+`proc_pidpath` on macOS, `SO_PEERCRED` and `/proc/<pid>/exe` on Linux,
+`GetNamedPipeServerProcessId` on Windows, against `current_exe`), so a
+listener the agent put at the socket gets nothing; and each Touch ID prompt
+names the change ("remove the handle prod-db from the kv vault", "open kv
+tui, where you approve agent requests"), so the user can cancel one they did
+not start. Windows Hello cannot show such text, and nothing ties its
+credential to kv, so another program the user lets pass a Hello prompt can
+derive the same key; the README says to cancel Hello prompts you did not
+start and to prefer the passphrase where agents run unattended.
+
 ### Secret model
 
 ```
@@ -452,8 +466,10 @@ A notification announces each request.
   daemon turns the key down; `kv tui` asks at start and on Ctrl-T. The
   client asks the platform and sends the daemon the slot id and key in place
   of the passphrase (`DeviceCredential`), so the daemon never talks to the
-  platform; a wrong key counts toward the unlock backoff like a wrong
-  passphrase. Enrolling a device and changing the passphrase always take the
+  platform, and only to a daemon running the same program (section 3); a
+  wrong key counts toward the unlock backoff like a wrong passphrase. The
+  TUI shows the prompt on a thread of its own and keeps taking keys, so Esc
+  still quits; a prompt unanswered for 120 seconds is cancelled. Enrolling a device and changing the passphrase always take the
   passphrase. `KV_BIOMETRIC=off` turns device unlock off. The daemon unwraps the vault key
   and holds it in memory-locked (`mlock`/`VirtualLock`, best effort), zeroized
   memory. The TUI additionally receives a random 256-bit control session token

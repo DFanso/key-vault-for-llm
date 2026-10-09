@@ -34,8 +34,10 @@ pub trait Device: Send + Sync {
     /// Sets the device up under `id`, asking the user once, and returns what
     /// the vault should keep for it and the key.
     fn enroll(&self, id: &str) -> Result<(Vec<u8>, SymmetricKey), String>;
-    /// Asks the user and returns the key for `slot`.
-    fn unlock(&self, slot: &DeviceSlot) -> Result<SymmetricKey, String>;
+    /// Asks the user and returns the key for `slot`. `reason` finishes the
+    /// sentence "kv is trying to ..." on the prompt, where the platform
+    /// shows one, so a prompt the user did not start says what it is for.
+    fn unlock(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String>;
     /// Deletes what the platform keeps for `id`, if anything.
     fn forget(&self, id: &str);
 }
@@ -104,14 +106,19 @@ pub fn enroll_command(slot: DeviceSlot, key: &SymmetricKey) -> ControlCommand {
     }
 }
 
-/// Asks `device` for the key to the vault's slot of its kind. `None` if the
-/// vault has no such slot (or cannot be read: the daemon will say why).
-pub fn credential(vault: &Path, device: &dyn Device) -> Option<Result<DeviceCredential, String>> {
+/// Asks `device` for the key to the vault's slot of its kind, saying
+/// `reason` on the prompt. `None` if the vault has no such slot (or cannot
+/// be read: the daemon will say why).
+pub fn credential(
+    vault: &Path,
+    device: &dyn Device,
+    reason: &str,
+) -> Option<Result<DeviceCredential, String>> {
     let slot = device_slots(vault)
         .ok()?
         .into_iter()
         .find(|slot| slot.kind == device.kind())?;
-    Some(device.unlock(&slot).map(|key| DeviceCredential {
+    Some(device.unlock(&slot, reason).map(|key| DeviceCredential {
         id: slot.id,
         key: hex_secret(&key),
     }))

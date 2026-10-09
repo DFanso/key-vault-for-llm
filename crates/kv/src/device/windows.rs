@@ -2,6 +2,8 @@
 //! signature (PKCS #1 v1.5, so the same every time) over a random challenge
 //! kept in the vault is turned into the key with HKDF-SHA256.
 
+use std::time::{Duration, Instant};
+
 use hkdf::Hkdf;
 use kv_core::crypto::{KEY_LEN, SymmetricKey};
 use kv_core::vault::{DeviceKind, DeviceSlot};
@@ -10,13 +12,19 @@ use windows::Security::Credentials::{
     KeyCredential, KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
 };
 use windows::Security::Cryptography::CryptographicBuffer;
-use windows::core::{Array, HSTRING};
+use windows::core::{Array, HSTRING, RuntimeType};
+use windows_future::{AsyncStatus, IAsyncOperation};
+use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
 use zeroize::Zeroizing;
 
 use super::Device;
 
 const SALT: &[u8] = b"kv-windows-hello-v1";
 const CHALLENGE_LEN: usize = 32;
+/// How long kv waits for Windows Hello.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+/// The class of the window Windows Hello asks the user in.
+const DIALOG_CLASS: &str = "Credential Dialog Xaml Host";
 
 pub struct Hello;
 
@@ -41,8 +49,8 @@ impl Device for Hello {
             &HSTRING::from(id),
             KeyCredentialCreationOption::ReplaceExisting,
         )
-        .and_then(|op| op.join())
-        .map_err(|e| e.message())?;
+        .map_err(|e| e.message())
+        .and_then(wait)?;
         check(result.Status())?;
         let credential = result.Credential().map_err(|e| e.message())?;
         let mut challenge = vec![0u8; CHALLENGE_LEN];
@@ -51,10 +59,11 @@ impl Device for Hello {
         Ok((challenge, key))
     }
 
-    fn unlock(&self, slot: &DeviceSlot) -> Result<SymmetricKey, String> {
+    // Hello's dialog shows no text from the caller, so `reason` goes unused.
+    fn unlock(&self, slot: &DeviceSlot, _reason: &str) -> Result<SymmetricKey, String> {
         let result = KeyCredentialManager::OpenAsync(&HSTRING::from(slot.id.as_str()))
-            .and_then(|op| op.join())
-            .map_err(|e| e.message())?;
+            .map_err(|e| e.message())
+            .and_then(wait)?;
         check(result.Status())?;
         let credential = result.Credential().map_err(|e| e.message())?;
         derive(&credential, &slot.data)
@@ -69,8 +78,8 @@ fn derive(credential: &KeyCredential, challenge: &[u8]) -> Result<SymmetricKey, 
     let data = CryptographicBuffer::CreateFromByteArray(challenge).map_err(|e| e.message())?;
     let result = credential
         .RequestSignAsync(&data)
-        .and_then(|op| op.join())
-        .map_err(|e| e.message())?;
+        .map_err(|e| e.message())
+        .and_then(wait)?;
     check(result.Status())?;
     let signature = result.Result().map_err(|e| e.message())?;
     let mut bytes = Array::<u8>::new();
@@ -80,6 +89,32 @@ fn derive(credential: &KeyCredential, challenge: &[u8]) -> Result<SymmetricKey, 
         .expand(b"vault wrapping key", key.as_mut_slice())
         .map_err(|_| "could not derive the key".to_owned())?;
     SymmetricKey::from_slice(key.as_slice()).map_err(|e| e.to_string())
+}
+
+/// Waits for a Hello operation. Started from a console, Hello's dialog
+/// often opens behind the terminal, so kv brings it to the front once it
+/// appears. After `PROMPT_TIMEOUT` the operation is cancelled.
+fn wait<T: RuntimeType + 'static>(op: IAsyncOperation<T>) -> Result<T, String> {
+    let deadline = Instant::now() + PROMPT_TIMEOUT;
+    let class: Vec<u16> = DIALOG_CLASS.encode_utf16().chain([0]).collect();
+    let mut raised = false;
+    while op.Status().map_err(|e| e.message())? == AsyncStatus::Started {
+        if Instant::now() > deadline {
+            let _ = op.Cancel();
+            return Err("no answer from Windows Hello in time".into());
+        }
+        if !raised {
+            // SAFETY: `class` is NUL-terminated; a null title matches any.
+            let window = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+            if !window.is_null() {
+                // SAFETY: `window` is a window handle FindWindowW just gave.
+                unsafe { SetForegroundWindow(window) };
+                raised = true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    op.GetResults().map_err(|e| e.message())
 }
 
 fn check(status: windows::core::Result<KeyCredentialStatus>) -> Result<(), String> {

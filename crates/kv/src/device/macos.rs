@@ -43,7 +43,7 @@ impl Device for TouchId {
         Ok((fingerprints, key))
     }
 
-    fn unlock(&self, slot: &DeviceSlot) -> Result<SymmetricKey, String> {
+    fn unlock(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String> {
         let context = context()?;
         if fingerprints(&context)? != slot.data {
             return Err(
@@ -52,7 +52,7 @@ impl Device for TouchId {
                     .into(),
             );
         }
-        ask(&context, "unlock the kv vault")?;
+        ask(&context, reason)?;
         let raw = get_generic_password(SERVICE, &slot.id)
             .map(Zeroizing::new)
             .map_err(|e| {
@@ -98,6 +98,12 @@ fn ask(context: &LAContext, reason: &str) -> Result<(), String> {
     unsafe {
         context.evaluatePolicy_localizedReason_reply(POLICY, &NSString::from_str(reason), &reply);
     }
-    rx.recv_timeout(PROMPT_TIMEOUT)
-        .map_err(|_| "no answer from Touch ID in time".to_owned())?
+    match rx.recv_timeout(PROMPT_TIMEOUT) {
+        Ok(answer) => answer,
+        Err(_) => {
+            // Takes the sheet down; otherwise it stays up after kv moved on.
+            unsafe { context.invalidate() };
+            Err("no answer from Touch ID in time".into())
+        }
+    }
 }
