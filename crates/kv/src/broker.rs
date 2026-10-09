@@ -1,5 +1,6 @@
 //! Work an agent asked for, authorized by the daemon and run outside the
-//! daemon lock: HTTP requests, programs and database queries.
+//! daemon lock: HTTP requests, programs, database queries and database
+//! leases.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,9 +17,14 @@ use crate::audit::Audit;
 pub mod db;
 pub mod exec;
 pub mod http;
+pub mod lease;
+pub mod net;
+pub mod pgwire;
 mod process;
+pub mod resp;
 
 pub use db::RoleChecks;
+pub use lease::{LeaseTicket, Leases};
 
 /// An `http_request` that passed every check.
 pub struct HttpJob {
@@ -61,6 +67,28 @@ pub struct DbJob {
     /// Where a read-only Postgres handle's role check is kept; the job runs
     /// the check if this handle has none since the vault was unlocked.
     pub role_checks: RoleChecks,
+    /// `role_checks.stamp()` when the job was authorized; a check whose
+    /// handle changed since is not kept.
+    pub role_stamp: u64,
+}
+
+/// A `db_connect` that passed every check.
+pub struct ConnectJob {
+    pub secret: Secret,
+    pub ttl: Duration,
+    /// The lease's place among the open leases, taken when the request was
+    /// authorized, so a lock or a change to the handle ends it even before
+    /// it starts.
+    pub ticket: LeaseTicket,
+    /// The scrubber for every unlocked secret, kept current while the lease
+    /// is open.
+    pub scrubber: tokio::sync::watch::Receiver<Arc<Scrubber>>,
+    pub audit: Audit,
+    pub started: Instant,
+    /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
+    pub decision: &'static str,
+    pub role_checks: RoleChecks,
+    pub role_stamp: u64,
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
@@ -93,6 +121,15 @@ impl std::fmt::Debug for ExecJob {
         f.debug_struct("ExecJob")
             .field("handles", &self.handles)
             .field("program", &self.argv.first())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ConnectJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectJob")
+            .field("handle", &self.secret.name)
+            .field("ttl", &self.ttl)
             .finish_non_exhaustive()
     }
 }

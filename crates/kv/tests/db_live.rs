@@ -8,34 +8,6 @@ use common::*;
 use kv::broker::db;
 use kv_core::policy::Mode;
 use kv_core::proto::{AgentErrorCode, AgentResponse, DbCall, RedisReply, RowsReply};
-use tokio_postgres::NoTls;
-
-fn server(var: &str) -> Option<String> {
-    match std::env::var(var) {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            assert!(
-                std::env::var_os("KV_REQUIRE_DB_TESTS").is_none(),
-                "{var} is not set, and KV_REQUIRE_DB_TESTS says these tests must run"
-            );
-            eprintln!("skipped: {var} is not set");
-            None
-        }
-    }
-}
-
-/// A connection for setting up test data, and a schema of the test's own.
-async fn admin(url: &str, schema: &str) -> tokio_postgres::Client {
-    let (client, connection) = tokio_postgres::connect(url, NoTls).await.unwrap();
-    tokio::spawn(connection);
-    client
-        .batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
-        ))
-        .await
-        .unwrap();
-    client
-}
 
 async fn run(f: &mut Fixture, call: DbCall) -> AgentResponse {
     db::run(f.db(call).unwrap()).await

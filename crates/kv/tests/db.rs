@@ -146,3 +146,15 @@ fn connection_urls_must_be_postgres_or_redis_urls() {
 fn url(text: &str) -> SecretText {
     SecretText::new(text)
 }
+
+#[test]
+fn a_role_check_that_started_before_its_handle_changed_is_not_kept() {
+    let checks = kv::broker::RoleChecks::default();
+    let stamp = checks.stamp();
+    checks.forget("pg");
+    checks.record("pg", stamp, Some("can write".into()));
+    assert!(!checks.is_checked("pg"));
+    let stamp = checks.stamp();
+    checks.record("pg", stamp, Some("can write".into()));
+    assert!(checks.warnings().contains_key("pg"));
+}

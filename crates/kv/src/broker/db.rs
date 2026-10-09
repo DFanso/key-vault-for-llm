@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use futures_util::StreamExt;
 use kv_core::db::{postgres_requires_tls, split_command};
@@ -15,48 +14,74 @@ use kv_core::proto::{
 };
 use kv_core::scrub::Scrubber;
 use kv_core::secret::{Secret, SecretText, SecretValue};
-use rustls_platform_verifier::BuilderVerifierExt;
+use tokio::io::AsyncWriteExt;
 use tokio_postgres::SimpleQueryMessage;
 
 use super::DbJob;
+use super::net::CONNECT_TIMEOUT;
+use super::resp::{self, RedisTarget};
 use crate::audit::Use;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Whether a write-capable role is behind each read-only Postgres handle,
-/// learned on its first query since the vault was unlocked. Shared by the
+/// learned on its first use since the vault was unlocked. Shared by the
 /// daemon, which shows the warnings and forgets them when a handle changes
 /// or the vault locks, and the jobs that run the checks.
 #[derive(Clone, Default)]
-pub struct RoleChecks(Arc<Mutex<BTreeMap<String, Option<String>>>>);
+pub struct RoleChecks(Arc<Mutex<Checks>>);
+
+#[derive(Default)]
+struct Checks {
+    /// Moves on whenever a check is forgotten, so a check that started
+    /// before then is not kept.
+    stamp: u64,
+    warnings: BTreeMap<String, Option<String>>,
+}
 
 impl RoleChecks {
-    fn map(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Option<String>>> {
+    fn checks(&self) -> std::sync::MutexGuard<'_, Checks> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn is_checked(&self, handle: &str) -> bool {
-        self.map().contains_key(handle)
+    /// Taken when a job is authorized and handed back to `record`.
+    pub fn stamp(&self) -> u64 {
+        self.checks().stamp
     }
 
-    pub fn record(&self, handle: &str, warning: Option<String>) {
-        self.map().insert(handle.to_owned(), warning);
+    pub fn is_checked(&self, handle: &str) -> bool {
+        self.checks().warnings.contains_key(handle)
+    }
+
+    /// Keeps a check's result unless something was forgotten since `stamp`.
+    pub fn record(&self, handle: &str, stamp: u64, warning: Option<String>) {
+        let mut checks = self.checks();
+        if checks.stamp == stamp {
+            checks.warnings.insert(handle.to_owned(), warning);
+        }
     }
 
     pub fn forget(&self, handle: &str) {
-        self.map().remove(handle);
+        let mut checks = self.checks();
+        checks.stamp += 1;
+        checks.warnings.remove(handle);
     }
 
     pub fn clear(&self) {
-        self.map().clear();
+        let mut checks = self.checks();
+        checks.stamp += 1;
+        checks.warnings.clear();
     }
 
     /// The handles whose role can write, with the warning for each.
     pub fn warnings(&self) -> BTreeMap<String, String> {
-        self.map()
+        self.checks()
+            .warnings
             .iter()
             .filter_map(|(handle, warning)| Some((handle.clone(), warning.clone()?)))
             .collect()
+    }
+
+    fn warning(&self, handle: &str) -> Option<String> {
+        self.checks().warnings.get(handle).cloned().flatten()
     }
 }
 
@@ -103,15 +128,20 @@ async fn postgres(job: &DbJob, url: &str) -> Result<AgentResponse, AgentResponse
     let client = connect(url, &options, scrubber).await?;
 
     let mut warnings = Vec::new();
-    if job.secret.policy.read_only && !job.role_checks.is_checked(&job.secret.name) {
-        let warning = role_can_write(&client)
-            .await
-            .map_err(|e| upstream(scrubber, &e))?
-            .then(|| role_warning(&job.secret.name));
-        job.role_checks.record(&job.secret.name, warning);
-    }
-    if let Some(warning) = job.role_checks.warnings().remove(&job.secret.name) {
-        warnings.push(warning);
+    if job.secret.policy.read_only {
+        let name = &job.secret.name;
+        let warning = if job.role_checks.is_checked(name) {
+            job.role_checks.warning(name)
+        } else {
+            let warning = role_can_write(&client)
+                .await
+                .map_err(|e| upstream(scrubber, &e))?
+                .then(|| warning_for(name));
+            job.role_checks
+                .record(name, job.role_stamp, warning.clone());
+            warning
+        };
+        warnings.extend(warning);
     }
 
     let stream = client
@@ -195,7 +225,9 @@ async fn connect(
     if postgres_requires_tls(url) {
         config.ssl_mode(tokio_postgres::config::SslMode::Require);
     }
-    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config()?);
+    let tls = super::net::tls_config()
+        .map_err(|message| error(AgentErrorCode::UpstreamError, message))?;
+    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls);
     let (client, connection) = config
         .connect(tls)
         .await
@@ -231,12 +263,46 @@ pub async fn check_role(handle: &str, url: &str) -> Result<Option<String>, Strin
             .map_err(|e| message(upstream(&scrubber, &e)))
     };
     match tokio::time::timeout(CONNECT_TIMEOUT * 2, check).await {
-        Ok(can_write) => Ok(can_write?.then(|| role_warning(handle))),
+        Ok(can_write) => Ok(can_write?.then(|| warning_for(handle))),
         Err(_) => Err("the database did not answer in time".into()),
     }
 }
 
-fn role_warning(handle: &str) -> String {
+/// The warning for a read-only Postgres handle whose role can write, from
+/// the check since the vault was unlocked, or from a new check on a
+/// connection of its own. For `db_connect`, which has no connection of its
+/// own to check on.
+pub(crate) async fn role_warning(
+    handle: &str,
+    url: &str,
+    role_checks: &RoleChecks,
+    stamp: u64,
+    scrubber: &Scrubber,
+) -> Result<Option<String>, AgentResponse> {
+    if role_checks.is_checked(handle) {
+        return Ok(role_checks.warning(handle));
+    }
+    let check = async {
+        let client = connect(url, "", scrubber).await?;
+        role_can_write(&client)
+            .await
+            .map_err(|e| upstream(scrubber, &e))
+    };
+    let can_write = match tokio::time::timeout(CONNECT_TIMEOUT * 2, check).await {
+        Ok(can_write) => can_write?,
+        Err(_) => {
+            return Err(error(
+                AgentErrorCode::UpstreamError,
+                "the database did not answer in time",
+            ));
+        }
+    };
+    let warning = can_write.then(|| warning_for(handle));
+    role_checks.record(handle, stamp, warning.clone());
+    Ok(warning)
+}
+
+fn warning_for(handle: &str) -> String {
     format!(
         "{handle} is read-only, but its database role can write; kv keeps the session \
          read-only only on a best-effort basis. Use a role that can only read."
@@ -273,156 +339,29 @@ FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
         .any(|message| matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t"))))
 }
 
-/// Certificates are always checked against the platform's trust store,
-/// whatever `sslmode` says; `sslmode=disable` still turns TLS off. A remote
-/// server with no `sslmode` in the URL must use TLS.
-fn tls_config() -> Result<rustls::ClientConfig, AgentResponse> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .and_then(|builder| builder.with_platform_verifier())
-        .map(|builder| builder.with_no_client_auth())
-        .map_err(|e| {
-            error(
-                AgentErrorCode::UpstreamError,
-                format!("could not set up TLS: {e}"),
-            )
-        })
-}
-
+/// One command on a connection of its own. The reply is read only as far
+/// as the output cap, so a huge one is never held whole.
 async fn redis(job: &DbJob, url: &str) -> Result<AgentResponse, AgentResponse> {
     let scrubber = &job.scrubber;
     // Checked by the daemon already; this split cannot fail.
     let args = split_command(&job.call.query)
         .map_err(|message| error(AgentErrorCode::BadRequest, message))?;
-    let client = redis::Client::open(url).map_err(|_| {
-        error(
-            AgentErrorCode::BadRequest,
-            "the handle's connection URL is not a valid Redis URL",
-        )
-    })?;
-    let config = redis::AsyncConnectionConfig::new()
-        .set_connection_timeout(Some(CONNECT_TIMEOUT))
-        .set_response_timeout(Some(job.timeout));
-    let mut connection = client
-        .get_multiplexed_async_connection_with_config(&config)
+    let target =
+        RedisTarget::parse(url).map_err(|message| error(AgentErrorCode::BadRequest, message))?;
+    let mut conn = resp::connect(&target)
         .await
         .map_err(|e| upstream(scrubber, &e))?;
-    let mut command = redis::cmd(&String::from_utf8_lossy(&args[0]));
-    for arg in &args[1..] {
-        command.arg(arg.as_slice());
-    }
-    let value: redis::Value = command
-        .query_async(&mut connection)
+    conn.get_mut()
+        .write_all(&resp::encode_command(&args))
         .await
         .map_err(|e| upstream(scrubber, &e))?;
-    let mut budget = MAX_OUTPUT_LEN;
-    let mut truncated = false;
-    let value = to_json(scrubber, value, &mut budget, &mut truncated);
-    Ok(AgentResponse::Redis(RedisReply { value, truncated }))
-}
-
-/// A Redis value as JSON, scrubbed, spending `budget` bytes at most.
-/// Anything past the budget is cut or left out and `truncated` is set.
-fn to_json(
-    scrubber: &Scrubber,
-    value: redis::Value,
-    budget: &mut usize,
-    truncated: &mut bool,
-) -> serde_json::Value {
-    use redis::Value;
-    use serde_json::Value as Json;
-    match value {
-        Value::Nil => {
-            charge(budget, 4);
-            Json::Null
-        }
-        Value::Boolean(b) => {
-            charge(budget, 5);
-            Json::Bool(b)
-        }
-        Value::Okay => text(scrubber, b"OK", budget, truncated),
-        Value::Int(n) => number(scrubber, n.to_string(), Json::from(n), budget),
-        Value::Double(n) => number(scrubber, n.to_string(), Json::from(n), budget),
-        Value::BulkString(bytes) => text(scrubber, &bytes, budget, truncated),
-        Value::SimpleString(s) => text(scrubber, s.as_bytes(), budget, truncated),
-        Value::VerbatimString { text: s, .. } => text(scrubber, s.as_bytes(), budget, truncated),
-        Value::BigNumber(digits) => text(scrubber, &digits, budget, truncated),
-        Value::Array(items) | Value::Set(items) => list(scrubber, items, budget, truncated),
-        Value::Map(pairs) => list(
-            scrubber,
-            pairs
-                .into_iter()
-                .map(|(k, v)| Value::Array(vec![k, v]))
-                .collect(),
-            budget,
-            truncated,
-        ),
-        Value::Attribute { data, .. } => to_json(scrubber, *data, budget, truncated),
-        Value::Push { data, .. } => list(scrubber, data, budget, truncated),
-        Value::ServerError(e) => text(scrubber, e.to_string().as_bytes(), budget, truncated),
-        _ => Json::Null,
+    match resp::read_json(&mut conn, scrubber, MAX_OUTPUT_LEN)
+        .await
+        .map_err(|e| upstream(scrubber, &e))?
+    {
+        Ok((value, truncated)) => Ok(AgentResponse::Redis(RedisReply { value, truncated })),
+        Err(message) => Err(error(AgentErrorCode::UpstreamError, message)),
     }
-}
-
-fn charge(budget: &mut usize, bytes: usize) {
-    *budget = budget.saturating_sub(bytes);
-}
-
-/// Scrubbed first and cut after, so a cut never splits a secret in two
-/// halves the scrubber cannot see.
-fn text(
-    scrubber: &Scrubber,
-    bytes: &[u8],
-    budget: &mut usize,
-    truncated: &mut bool,
-) -> serde_json::Value {
-    let mut text = scrub_text(scrubber, bytes);
-    let room = budget.saturating_sub(3);
-    if text.len() > room {
-        let mut end = room;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-        *truncated = true;
-    }
-    charge(budget, text.len() + 3);
-    serde_json::Value::String(text)
-}
-
-/// A number could be a numeric secret, so it goes through the scrubber
-/// too, and comes back as a string if it was replaced.
-fn number(
-    scrubber: &Scrubber,
-    digits: String,
-    json: serde_json::Value,
-    budget: &mut usize,
-) -> serde_json::Value {
-    charge(budget, digits.len() + 1);
-    let scrubbed = scrub_text(scrubber, digits.as_bytes());
-    if scrubbed == digits {
-        json
-    } else {
-        serde_json::Value::String(scrubbed)
-    }
-}
-
-fn list(
-    scrubber: &Scrubber,
-    items: Vec<redis::Value>,
-    budget: &mut usize,
-    truncated: &mut bool,
-) -> serde_json::Value {
-    let mut out = Vec::new();
-    for item in items {
-        if *budget == 0 {
-            *truncated = true;
-            break;
-        }
-        out.push(to_json(scrubber, item, budget, truncated));
-    }
-    serde_json::Value::Array(out)
 }
 
 fn scrub_text(scrubber: &Scrubber, bytes: &[u8]) -> String {

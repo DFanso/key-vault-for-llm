@@ -35,6 +35,7 @@ pub enum AgentRequest {
     HttpRequest(HttpCall),
     Exec(ExecCall),
     DbQuery(DbCall),
+    DbConnect(ConnectCall),
     /// Asks the user to add a handle. Answered at once; the user finishes
     /// it in `kv tui`.
     RequestHandle(HandleRequest),
@@ -117,6 +118,16 @@ pub struct DbCall {
     pub timeout_secs: Option<u64>,
 }
 
+/// A loopback connection URL for a database handle, for tools that need a
+/// connection of their own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectCall {
+    pub handle: String,
+    /// How long the URL works: 900 seconds by default, at most 3600.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentResponse {
@@ -130,6 +141,7 @@ pub enum AgentResponse {
     Exec(ExecReply),
     Rows(RowsReply),
     Redis(RedisReply),
+    Lease(LeaseReply),
     /// The handle request is waiting for the user in `kv tui`.
     Requested {
         name: String,
@@ -187,6 +199,18 @@ pub struct ResultSet {
 pub struct RedisReply {
     pub value: serde_json::Value,
     pub truncated: bool,
+}
+
+/// A loopback URL with a lease token in place of the password. kv checks
+/// the token, connects with the real credentials and passes the traffic
+/// on, scrubbed. Connections close when the lease ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseReply {
+    pub url: String,
+    pub expires_in_secs: u64,
+    /// Such as a read-only handle whose role can write.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,11 +405,12 @@ pub struct Approval {
     pub id: u64,
     /// Self-reported by the MCP client.
     pub client: Option<String>,
-    /// `http_request` or `exec`.
+    /// `http_request`, `exec`, `db_query` or `db_connect`.
     pub tool: String,
     /// The handles that need approval.
     pub handles: Vec<String>,
-    /// Method and URL, or the argv as a JSON array.
+    /// Method and URL, the argv as a JSON array, the query, or how long a
+    /// lease would last.
     pub detail: String,
     /// Working directory, for `exec`.
     pub cwd: Option<String>,

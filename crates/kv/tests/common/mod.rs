@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use kv::audit::Audit;
-use kv::broker::{DbJob, ExecJob, HttpJob};
+use kv::broker::{ConnectJob, DbJob, ExecJob, HttpJob};
 use kv::daemon::{Daemon, Prepared, Settings, Waiting};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    DbCall, ExecCall, HttpCall, Overview, SessionInfo, Verdict,
+    AgentErrorCode, AgentRequest, AgentResponse, ConnectCall, ControlCommand, ControlRequest,
+    ControlResponse, DbCall, ExecCall, HttpCall, Overview, SessionInfo, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 use tempfile::TempDir;
@@ -75,8 +75,7 @@ impl Fixture {
             Prepared::Http(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Exec(_) => panic!("unexpected exec job"),
-            Prepared::Db(_) => panic!("unexpected db job"),
+            Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) => panic!("unexpected job"),
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -86,8 +85,7 @@ impl Fixture {
             Prepared::Exec(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Http(_) => panic!("unexpected http job"),
-            Prepared::Db(_) => panic!("unexpected db job"),
+            Prepared::Http(_) | Prepared::Db(_) | Prepared::Connect(_) => panic!("unexpected job"),
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -97,7 +95,19 @@ impl Fixture {
             Prepared::Db(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) => panic!("unexpected job"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Connect(_) => {
+                panic!("unexpected job")
+            }
+            Prepared::Wait(_) => panic!("unexpected wait for approval"),
+        }
+    }
+
+    pub fn connect(&mut self, call: ConnectCall) -> Result<ConnectJob, (AgentErrorCode, String)> {
+        match self.prepare(AgentRequest::DbConnect(call)) {
+            Prepared::Connect(job) => Ok(*job),
+            Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
+            Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) => panic!("unexpected job"),
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -113,7 +123,7 @@ impl Fixture {
         match self.daemon.prepare_in(session, request, now) {
             Prepared::Wait(waiting) => *waiting,
             Prepared::Reply(reply) => panic!("expected a wait, got {reply:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) => {
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) => {
                 panic!("expected a wait, got a job")
             }
         }
@@ -296,4 +306,42 @@ pub fn query(handle: &str, query: &str) -> DbCall {
         query: query.into(),
         timeout_secs: None,
     }
+}
+
+pub fn lease(handle: &str) -> ConnectCall {
+    ConnectCall {
+        handle: handle.into(),
+        ttl_secs: None,
+    }
+}
+
+/// A database server's URL from `var`, or `None` after a note when it is
+/// not set; with `KV_REQUIRE_DB_TESTS` set, as in CI, a missing URL fails.
+pub fn server(var: &str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(url) if !url.is_empty() => Some(url),
+        _ => {
+            assert!(
+                std::env::var_os("KV_REQUIRE_DB_TESTS").is_none(),
+                "{var} is not set, and KV_REQUIRE_DB_TESTS says these tests must run"
+            );
+            eprintln!("skipped: {var} is not set");
+            None
+        }
+    }
+}
+
+/// A connection for setting up test data, and a schema of the test's own.
+pub async fn admin(url: &str, schema: &str) -> tokio_postgres::Client {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    client
+        .batch_execute(&format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"
+        ))
+        .await
+        .unwrap();
+    client
 }

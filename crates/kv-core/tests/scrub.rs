@@ -19,6 +19,15 @@ fn scrub(s: &Scrubber, input: &str) -> String {
 }
 
 #[test]
+fn a_secret_in_another_case_is_still_scrubbed() {
+    let s = Scrubber::new([("prod-db", "kyc.postgres.database.azure.com")]);
+    assert_eq!(
+        scrub(&s, "could not reach KYC.Postgres.Database.Azure.com"),
+        "could not reach [kv:prod-db]"
+    );
+}
+
+#[test]
 fn replaces_raw_value_with_handle_label() {
     let s = Scrubber::new([("openrouter", KEY)]);
     assert_eq!(scrub(&s, &format!("key={KEY};")), "key=[kv:openrouter];");

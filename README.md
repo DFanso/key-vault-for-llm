@@ -5,10 +5,10 @@ secrets (`prod-db`, `openrouter`, `github`) and the broker does the
 authenticated work, so API keys, database URLs and other credentials never
 show up in a chat transcript or in the model's context.
 
-Status: agents can make HTTP requests, run programs and query Postgres and
-Redis with your secrets over MCP, and `kv tui` approves `--mode ask` requests
-as they arrive. A local database proxy for tools that need a connection comes
-next.
+Status: agents can make HTTP requests, run programs, and query or connect to
+Postgres and Redis with your secrets over MCP, and `kv tui` approves
+`--mode ask` requests as they arrive. Touch ID and Windows Hello unlock and
+prebuilt binaries come next.
 
 ## Setup
 
@@ -24,13 +24,15 @@ kv add prod-db --kind postgres --read-only true   # prompts for the postgres:// 
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
 
-The agent then sees six tools:
+The agent then sees seven tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
 - `exec`: runs a program (never a shell) with an `env` handle's variables set.
 - `db_query`: runs SQL on a `postgres` handle or a command on a `redis`
   handle (see below).
+- `db_connect`: a connection URL on this machine for tools that need their own
+  connection, such as `psql` or a migration tool (see below).
 - `request_handle`: asks you to add a handle it needs (see below).
 - `status`: whether the vault is unlocked.
 
@@ -56,13 +58,23 @@ more statements and returns one result per statement, every value as text; a
 Redis command line such as `HGETALL user:1` returns the reply as JSON. Results
 stop at 256 KiB, and a query stops after 30 seconds unless the agent asks for
 up to 300. The database's address is scrubbed from results like the password,
-unless it is `localhost`. TLS certificates are checked against the system's
-trust store. For Postgres, `sslmode=disable` in the URL turns TLS off, and a
-remote server with no `sslmode` in its URL must use TLS; for Redis, use
-`rediss://`, and note that a URL ending in `#insecure` skips the certificate
-check. A Redis reply, or a
-single Postgres row, is held in memory whole before it is cut, so avoid
-commands such as `KEYS *` on very large keyspaces.
+unless it is `localhost`. TLS certificates are always checked against the
+system's trust store. For Postgres, `sslmode=disable` in the URL turns TLS off,
+and a remote server with no `sslmode` in its URL must use TLS; for Redis, use
+`rediss://` (kv refuses `#insecure`). A single Postgres row is held in memory
+whole before it is cut; a Redis reply is read only as far as the cap.
+
+`db_connect` returns a URL such as
+`postgres://kv:<token>@127.0.0.1:41823/app?sslmode=disable` for tools that
+need a connection of their own. The URL points at kv, holds a random lease
+token instead of the password, and works for 15 minutes unless the agent asks
+for up to an hour. kv checks the token, connects to the database with the real
+credentials, and passes traffic both ways, scrubbing what comes back as
+`db_query` does. When the lease expires, the vault locks or the handle
+changes, its connections close. At most 16 leases are open at once, with 16
+connections each, and no single message may be larger than 16 MiB. Query
+cancellation (Ctrl-C in `psql`) is not passed on, and Redis subscriptions,
+`MONITOR` and `CLIENT REPLY` are refused.
 
 With `--read-only true`:
 
@@ -78,6 +90,11 @@ With `--read-only true`:
   write server files or run programs, can create in a schema, or can insert,
   update, delete or truncate in any table, view or foreign table, column
   grants included.
+- Through `db_connect`, a read-only Postgres session needs PostgreSQL 14 or
+  later. kv refuses the same mentions, `DO` and `CALL`, but lets a
+  transaction end as the last statement of a query, and passes one query on
+  at a time: if the server reports that the session is no longer read-only,
+  kv closes it before the next query runs.
 
 ## Approving requests
 
@@ -154,8 +171,6 @@ audit log (`audit.jsonl`), without values.
 
 ## Planned for v1
 
-- `db_connect`: a local database proxy (Postgres, Redis) for tools that need a
-  connection, which connects upstream with the real credentials
 - Touch ID and Windows Hello unlock, and prebuilt binaries
 
 ## What kv protects against
