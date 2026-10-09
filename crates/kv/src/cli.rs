@@ -8,14 +8,16 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
-    AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse, PolicyPatch,
-    Status,
+    AgentRequest, AgentResponse, ControlCommand, ControlErrorCode, ControlRequest, ControlResponse,
+    DeviceCredential, PolicyPatch, Status,
 };
 use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretText, SecretValue};
+use kv_core::vault::device_slots;
 use zeroize::Zeroizing;
 
 use crate::client;
 use crate::daemon::{self, Outcome, Settings};
+use crate::device;
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -62,6 +64,11 @@ enum Command {
     },
     /// Change the vault passphrase
     Passwd,
+    /// Unlock with Touch ID (macOS) or Windows Hello instead of the passphrase
+    Biometric {
+        #[command(subcommand)]
+        action: BiometricAction,
+    },
     /// Serve MCP on stdin and stdout, for agents such as Claude Code
     Mcp,
     /// Approve agent requests, see handles and lock the vault in a terminal UI
@@ -93,6 +100,14 @@ enum Command {
         )]
         notify: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum BiometricAction {
+    /// Turn it on: asks for the passphrase, then a fingerprint or Hello
+    Enable,
+    /// Turn it off
+    Disable,
 }
 
 #[derive(Args)]
@@ -275,8 +290,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Unlock => {
-            let passphrase = input.secret("Vault passphrase: ")?;
-            control(&paths, Some(passphrase), ControlCommand::Unlock).await?;
+            authorized(&paths, &mut input, ControlCommand::Unlock).await?;
             println!("unlocked");
             Ok(())
         }
@@ -313,7 +327,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Add(args) => {
-            let passphrase = input.secret("Vault passphrase: ")?;
+            let credential = input.credential(&paths).await?;
             let value = read_value(&args, &mut input)?;
             let mut policy = Policy::default();
             args.policy.patch().apply(&mut policy);
@@ -331,15 +345,11 @@ async fn run(cli: Cli) -> Result<()> {
                 created_at: 0,
                 updated_at: 0,
             };
-            control(
-                &paths,
-                Some(passphrase),
-                ControlCommand::Add {
-                    secret,
-                    replace: args.replace,
-                },
-            )
-            .await?;
+            let command = ControlCommand::Add {
+                secret,
+                replace: args.replace,
+            };
+            send_as(&paths, &mut input, credential, command).await?;
             println!("added {}", args.name);
             if let Some(url) = role_url {
                 match crate::broker::db::check_role(&args.name, url.expose()).await {
@@ -353,13 +363,8 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Rm { name } => {
-            let passphrase = input.secret("Vault passphrase: ")?;
-            control(
-                &paths,
-                Some(passphrase),
-                ControlCommand::Remove { name: name.clone() },
-            )
-            .await?;
+            let command = ControlCommand::Remove { name: name.clone() };
+            authorized(&paths, &mut input, command).await?;
             println!("removed {name}");
             Ok(())
         }
@@ -370,16 +375,11 @@ async fn run(cli: Cli) -> Result<()> {
                     "nothing to change; pass at least one policy flag".into(),
                 ));
             }
-            let passphrase = input.secret("Vault passphrase: ")?;
-            control(
-                &paths,
-                Some(passphrase),
-                ControlCommand::SetPolicy {
-                    name: name.clone(),
-                    patch,
-                },
-            )
-            .await?;
+            let command = ControlCommand::SetPolicy {
+                name: name.clone(),
+                patch,
+            };
+            authorized(&paths, &mut input, command).await?;
             println!("updated {name}");
             Ok(())
         }
@@ -394,15 +394,125 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;
+            let enrolled = device_slots(&paths.vault).unwrap_or_default();
             control(
                 &paths,
                 Some(passphrase),
                 ControlCommand::ChangePassphrase { new_passphrase },
             )
             .await?;
+            // The new vault key has no device slots: their keys open nothing.
+            if let Some(native) = device::native() {
+                for slot in enrolled.iter().filter(|slot| slot.kind == native.kind()) {
+                    native.forget(&slot.id);
+                }
+            }
             println!("passphrase changed");
             Ok(())
         }
+        Command::Biometric {
+            action: BiometricAction::Enable,
+        } => enable_device(&paths, &mut input).await,
+        Command::Biometric {
+            action: BiometricAction::Disable,
+        } => disable_device(&paths, &mut input).await,
+    }
+}
+
+async fn enable_device(paths: &Paths, input: &mut Input) -> Result<()> {
+    let Some(device) = device::platform() else {
+        return Err(CliError(no_device()));
+    };
+    device.available().map_err(CliError)?;
+    let passphrase = input.secret("Vault passphrase: ")?;
+    let previous = device_slots(&paths.vault)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|slot| slot.kind == device.kind());
+    let (enrolled, device) = tokio::task::spawn_blocking(move || {
+        let enrolled = device::enroll(device.as_ref());
+        (enrolled, device)
+    })
+    .await
+    .map_err(|e| CliError(e.to_string()))?;
+    let (slot, key) = enrolled.map_err(CliError)?;
+    let id = slot.id.clone();
+    if let Err(e) = control(paths, Some(passphrase), device::enroll_command(slot, &key)).await {
+        device.forget(&id);
+        return Err(e);
+    }
+    if let Some(previous) = previous {
+        device.forget(&previous.id);
+    }
+    println!("{} unlock is on", device.kind().label());
+    Ok(())
+}
+
+async fn disable_device(paths: &Paths, input: &mut Input) -> Result<()> {
+    let Some(device) = device::native() else {
+        return Err(CliError(no_device()));
+    };
+    let kind = device.kind();
+    let Some(slot) = device_slots(&paths.vault)
+        .map_err(|e| CliError(e.to_string()))?
+        .into_iter()
+        .find(|slot| slot.kind == kind)
+    else {
+        return Err(CliError(format!("{} unlock is not on", kind.label())));
+    };
+    authorized(paths, input, ControlCommand::RemoveDevice { kind }).await?;
+    device.forget(&slot.id);
+    println!("{} unlock is off", kind.label());
+    Ok(())
+}
+
+fn no_device() -> String {
+    match device::native() {
+        Some(device) => format!(
+            "{} unlock is turned off by KV_BIOMETRIC; unset it to use it",
+            device.kind().label()
+        ),
+        None => "there is no biometric unlock kv can use on this platform (it uses Touch ID on \
+                 macOS and Windows Hello on Windows)"
+            .into(),
+    }
+}
+
+/// How a command proves it comes from the user.
+enum Credential {
+    Passphrase(SecretText),
+    Device(DeviceCredential),
+}
+
+/// Sends `command` with the credential `Input::credential` picks.
+async fn authorized(paths: &Paths, input: &mut Input, command: ControlCommand) -> Result<()> {
+    let credential = input.credential(paths).await?;
+    send_as(paths, input, credential, command).await
+}
+
+/// Sends `command` with `credential`. If the daemon turns down a device key
+/// (the vault changed since it was set up), asks for the passphrase and
+/// sends it again.
+async fn send_as(
+    paths: &Paths,
+    input: &mut Input,
+    credential: Credential,
+    command: ControlCommand,
+) -> Result<()> {
+    let device = match credential {
+        Credential::Passphrase(passphrase) => {
+            return control(paths, Some(passphrase), command).await;
+        }
+        Credential::Device(device) => device,
+    };
+    match send(paths, None, Some(device), command.clone()).await? {
+        Ok(()) => Ok(()),
+        Err((ControlErrorCode::WrongDeviceKey, message)) => {
+            eprintln!("{message}; run `kv biometric enable` to set it up again");
+            let passphrase = input.secret("Vault passphrase: ")?;
+            control(paths, Some(passphrase), command).await
+        }
+        Err((_, message)) => Err(CliError(message)),
     }
 }
 
@@ -412,9 +522,22 @@ async fn control(
     passphrase: Option<SecretText>,
     command: ControlCommand,
 ) -> Result<()> {
+    send(paths, passphrase, None, command)
+        .await?
+        .map_err(|(_, message)| CliError(message))
+}
+
+/// Sends a control command and prints its warnings; the outer `Err` is a
+/// failure to reach the daemon, the inner one the daemon's refusal.
+async fn send(
+    paths: &Paths,
+    passphrase: Option<SecretText>,
+    device: Option<DeviceCredential>,
+    command: ControlCommand,
+) -> Result<std::result::Result<(), (ControlErrorCode, String)>> {
     let request = ControlRequest {
         passphrase,
-        device: None,
+        device,
         token: None,
         command,
     };
@@ -423,9 +546,9 @@ async fn control(
             for warning in warnings {
                 eprintln!("warning: {warning}");
             }
-            Ok(())
+            Ok(Ok(()))
         }
-        ControlResponse::Error { message, .. } => Err(CliError(message)),
+        ControlResponse::Error { code, message } => Ok(Err((code, message))),
         other => Err(CliError(format!(
             "unexpected reply from the daemon: {other:?}"
         ))),
@@ -521,6 +644,29 @@ impl Input {
         }
     }
 
+    /// Touch ID or Windows Hello when the vault has a slot for this
+    /// platform's device and stdin is a terminal (so scripts keep reading
+    /// the passphrase from stdin), or else the passphrase.
+    async fn credential(&mut self, paths: &Paths) -> io::Result<Credential> {
+        if self.interactive
+            && let Some(device) = device::platform()
+        {
+            let label = device.kind().label();
+            let vault = paths.vault.clone();
+            let asked =
+                tokio::task::spawn_blocking(move || device::credential(&vault, device.as_ref()))
+                    .await
+                    .map_err(io::Error::other)?;
+            match asked {
+                Some(Ok(credential)) => return Ok(Credential::Device(credential)),
+                Some(Err(why)) => eprintln!("{label}: {why}"),
+                None => {}
+            }
+        }
+        self.secret("Vault passphrase: ")
+            .map(Credential::Passphrase)
+    }
+
     fn secret(&mut self, prompt: &str) -> io::Result<SecretText> {
         if self.interactive {
             return rpassword::prompt_password(prompt).map(SecretText::new);
@@ -557,18 +703,22 @@ fn describe_status(status: &Status) -> String {
     if !status.vault_exists {
         return "no vault yet: run `kv init`".into();
     }
-    if status.locked {
-        return "locked: run `kv unlock`".into();
-    }
-    let count = status.handle_count.unwrap_or(0);
-    let plural = if count == 1 { "" } else { "s" };
-    let mut line = match status.locks_in_secs {
-        Some(secs) => format!(
-            "unlocked: {count} handle{plural}, locks after {} unused",
-            humantime::format_duration(Duration::from_secs(secs))
-        ),
-        None => format!("unlocked: {count} handle{plural}"),
+    let mut line = if status.locked {
+        "locked: run `kv unlock`".to_owned()
+    } else {
+        let count = status.handle_count.unwrap_or(0);
+        let plural = if count == 1 { "" } else { "s" };
+        match status.locks_in_secs {
+            Some(secs) => format!(
+                "unlocked: {count} handle{plural}, locks after {} unused",
+                humantime::format_duration(Duration::from_secs(secs))
+            ),
+            None => format!("unlocked: {count} handle{plural}"),
+        }
     };
+    for kind in &status.devices {
+        line.push_str(&format!("\n{} unlock is on", kind.label()));
+    }
     match status.pending_approvals {
         0 => {}
         1 => line.push_str("\n1 request is waiting for approval: run `kv tui`"),
@@ -655,6 +805,7 @@ fn unexpected(response: &AgentResponse) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kv_core::vault::DeviceKind;
 
     #[test]
     fn notify_takes_on_or_off() {
@@ -698,6 +849,30 @@ mod tests {
         assert_eq!(patch.allowed_methods, Some(vec!["GET".to_string()]));
         assert_eq!(patch.allowed_cmds, None);
         assert_eq!(patch.read_only, Some(true));
+    }
+
+    #[test]
+    fn status_says_which_devices_can_unlock() {
+        let status = |locked, devices| Status {
+            vault_exists: true,
+            locked,
+            handle_count: (!locked).then_some(2),
+            locks_in_secs: None,
+            pending_approvals: 0,
+            devices,
+        };
+        assert_eq!(
+            describe_status(&status(true, vec![])),
+            "locked: run `kv unlock`"
+        );
+        assert_eq!(
+            describe_status(&status(true, vec![DeviceKind::TouchId])),
+            "locked: run `kv unlock`\nTouch ID unlock is on"
+        );
+        assert_eq!(
+            describe_status(&status(false, vec![DeviceKind::WindowsHello])),
+            "unlocked: 2 handles\nWindows Hello unlock is on"
+        );
     }
 
     #[test]

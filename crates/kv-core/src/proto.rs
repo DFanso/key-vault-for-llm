@@ -285,7 +285,7 @@ pub struct ControlRequest {
     pub command: ControlCommand,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlCommand {
     /// Creates the vault. `insecure_fast_kdf` uses cheap Argon2 settings and
