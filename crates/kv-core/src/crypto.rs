@@ -221,8 +221,9 @@ mod tests {
                 t: MAX_KDF_PASSES + 1,
                 p: 1,
             },
+            // Enough memory for the extra lane, so only the cap refuses it.
             KdfParams {
-                m_kib: 64,
+                m_kib: 8 * (MAX_KDF_LANES + 1),
                 t: 1,
                 p: MAX_KDF_LANES + 1,
             },
