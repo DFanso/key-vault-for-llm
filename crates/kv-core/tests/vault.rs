@@ -353,3 +353,80 @@ fn vault_directory_is_private_to_the_user() {
         & 0o777;
     assert_eq!(mode, 0o700);
 }
+
+use kv_core::crypto::SymmetricKey;
+use kv_core::vault::{DeviceKind, DeviceSlot, device_slots};
+
+fn touch_id(id: &str) -> DeviceSlot {
+    DeviceSlot {
+        kind: DeviceKind::TouchId,
+        id: id.into(),
+        data: b"fingerprint set".to_vec(),
+    }
+}
+
+#[test]
+fn a_device_slot_unlocks_the_vault_with_its_key_only() {
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    vault
+        .upsert(redis("cache", "redis://:pw-0123456789@cache:6379"))
+        .unwrap();
+    vault.save().unwrap();
+    let key = SymmetricKey::generate();
+    vault.enroll_device(touch_id("kv-1"), &key).unwrap();
+
+    assert_eq!(device_slots(&path).unwrap(), [touch_id("kv-1")]);
+    let unlocked = Vault::unlock_with_device(&path, "kv-1", &key).unwrap();
+    assert_eq!(unlocked.secrets().len(), 1);
+    unlocked.verify_device("kv-1", &key).unwrap();
+    assert!(matches!(
+        Vault::unlock_with_device(&path, "kv-1", &SymmetricKey::generate()),
+        Err(VaultError::DeviceKeyRejected)
+    ));
+    assert!(matches!(
+        Vault::unlock_with_device(&path, "kv-2", &key),
+        Err(VaultError::DeviceKeyRejected)
+    ));
+    // The passphrase still works.
+    Vault::unlock(&path, PASS).unwrap();
+}
+
+#[test]
+fn enrolling_again_replaces_the_slot_and_removing_it_ends_device_unlock() {
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    let (old, new) = (SymmetricKey::generate(), SymmetricKey::generate());
+    vault.enroll_device(touch_id("kv-old"), &old).unwrap();
+    vault.enroll_device(touch_id("kv-new"), &new).unwrap();
+    assert_eq!(vault.devices(), [touch_id("kv-new")]);
+    assert!(Vault::unlock_with_device(&path, "kv-old", &old).is_err());
+
+    assert_eq!(
+        vault.remove_device(DeviceKind::TouchId).unwrap(),
+        Some(touch_id("kv-new"))
+    );
+    assert_eq!(vault.remove_device(DeviceKind::TouchId).unwrap(), None);
+    assert!(device_slots(&path).unwrap().is_empty());
+    assert!(Vault::unlock_with_device(&path, "kv-new", &new).is_err());
+}
+
+#[test]
+fn changing_the_passphrase_drops_device_slots() {
+    let (_dir, path) = setup();
+    let mut vault = Vault::create(&path, PASS, FAST).unwrap();
+    let key = SymmetricKey::generate();
+    vault.enroll_device(touch_id("kv-1"), &key).unwrap();
+    vault
+        .change_passphrase("a brand new passphrase", FAST)
+        .unwrap();
+    assert!(vault.devices().is_empty());
+    assert!(device_slots(&path).unwrap().is_empty());
+    assert!(Vault::unlock_with_device(&path, "kv-1", &key).is_err());
+}
+
+#[test]
+fn device_slots_of_a_missing_vault_are_not_found() {
+    let (_dir, path) = setup();
+    assert!(matches!(device_slots(&path), Err(VaultError::NotFound(_))));
+}

@@ -17,6 +17,10 @@ pub const SALT_LEN: usize = 16;
 /// Upper bound on Argon2 memory read from a vault header (1 GiB), so a
 /// tampered header cannot make unlock allocate unbounded memory.
 const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
+/// Upper bounds on Argon2 passes and lanes read from a vault header, so a
+/// tampered header cannot make unlock run for hours.
+pub const MAX_KDF_PASSES: u32 = 16;
+pub const MAX_KDF_LANES: u32 = 8;
 
 /// A 256-bit symmetric key. Zeroed on drop and never printed. Lives in its
 /// own heap allocation, which is locked into RAM where the OS allows it so
@@ -99,7 +103,7 @@ pub fn derive_key(
     salt: &[u8],
     params: KdfParams,
 ) -> Result<SymmetricKey, VaultError> {
-    if params.m_kib > MAX_KDF_MEMORY_KIB {
+    if params.m_kib > MAX_KDF_MEMORY_KIB || params.t > MAX_KDF_PASSES || params.p > MAX_KDF_LANES {
         return Err(VaultError::Corrupted);
     }
     let argon_params = Params::new(params.m_kib, params.t, params.p, Some(KEY_LEN))
@@ -207,5 +211,32 @@ mod tests {
     fn debug_output_hides_key_bytes() {
         let key = SymmetricKey::from_slice(&[7u8; KEY_LEN]).unwrap();
         assert_eq!(format!("{key:?}"), "SymmetricKey([REDACTED])");
+    }
+
+    #[test]
+    fn derive_key_rejects_excessive_passes_or_lanes() {
+        for params in [
+            KdfParams {
+                m_kib: 8,
+                t: MAX_KDF_PASSES + 1,
+                p: 1,
+            },
+            KdfParams {
+                m_kib: 64,
+                t: 1,
+                p: MAX_KDF_LANES + 1,
+            },
+        ] {
+            assert!(matches!(
+                derive_key(b"passphrase", b"salt-salt-salt-1", params),
+                Err(VaultError::Corrupted)
+            ));
+        }
+        let most = KdfParams {
+            m_kib: 8 * MAX_KDF_LANES,
+            t: MAX_KDF_PASSES,
+            p: MAX_KDF_LANES,
+        };
+        assert!(derive_key(b"passphrase", b"salt-salt-salt-1", most).is_ok());
     }
 }
