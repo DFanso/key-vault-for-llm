@@ -16,9 +16,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
 use super::ConnectJob;
+use super::pgwire::PgTarget;
 use super::resp::RedisTarget;
 use crate::audit::{Audit, Use};
 
+mod postgres;
 mod redis;
 
 pub const DEFAULT_TTL: Duration = Duration::from_secs(900);
@@ -145,6 +147,7 @@ impl Lease {
 }
 
 enum Target {
+    Postgres(PgTarget),
     Redis(RedisTarget),
 }
 
@@ -152,7 +155,15 @@ enum Target {
 pub async fn start(job: ConnectJob) -> AgentResponse {
     let ticket = job.ticket;
     let ttl = job.ttl;
-    let opened = open(&job.secret, ttl, job.scrubber.clone(), &job.audit, ticket);
+    let opened = open(
+        &job.secret,
+        ttl,
+        job.scrubber.clone(),
+        &job.audit,
+        &job.role_checks,
+        job.role_stamp,
+        ticket,
+    );
     let response = match opened.await {
         Ok(reply) => AgentResponse::Lease(reply),
         Err(response) => response,
@@ -177,6 +188,8 @@ async fn open(
     ttl: Duration,
     scrubber_rx: watch::Receiver<Arc<Scrubber>>,
     audit: &Audit,
+    role_checks: &super::RoleChecks,
+    role_stamp: u64,
     ticket: LeaseTicket,
 ) -> Result<LeaseReply, AgentResponse> {
     if ticket.has_ended() {
@@ -185,13 +198,28 @@ async fn open(
             "the vault locked or the handle changed before the lease started; ask again",
         ));
     }
+    let scrubber = scrubber_rx.borrow().clone();
     let bad = |message: String| error(AgentErrorCode::BadRequest, message);
     let read_only = secret.policy.read_only;
+    let mut warnings = Vec::new();
     let target = match &secret.value {
-        SecretValue::Redis { url } => Target::Redis(RedisTarget::parse(url.expose()).map_err(bad)?),
-        SecretValue::Postgres { .. } => {
-            return Err(bad("db_connect does not take postgres handles yet".into()));
+        SecretValue::Postgres { url } => {
+            let target = PgTarget::parse(url.expose()).map_err(bad)?;
+            if read_only {
+                warnings.extend(
+                    super::db::role_warning(
+                        &secret.name,
+                        url.expose(),
+                        role_checks,
+                        role_stamp,
+                        &scrubber,
+                    )
+                    .await?,
+                );
+            }
+            Target::Postgres(target)
         }
+        SecretValue::Redis { url } => Target::Redis(RedisTarget::parse(url.expose()).map_err(bad)?),
         _ => return Err(bad("not a database handle".into())),
     };
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -215,6 +243,16 @@ async fn open(
     fill_random(&mut bytes);
     let token = hex(&bytes);
     let url = match &target {
+        Target::Postgres(target) => {
+            let mut url = url::Url::parse(&format!("postgres://127.0.0.1:{port}"))
+                .expect("a loopback URL parses");
+            url.set_username("kv").expect("postgres URLs take a user");
+            url.set_password(Some(&token))
+                .expect("postgres URLs take a password");
+            url.set_path(&target.dbname);
+            url.set_query(Some("sslmode=disable"));
+            url.to_string()
+        }
         Target::Redis(target) => format!("redis://kv:{token}@127.0.0.1:{port}/{}", target.db),
     };
     let lease = Arc::new(Lease {
@@ -230,7 +268,7 @@ async fn open(
     Ok(LeaseReply {
         url,
         expires_in_secs: ttl.as_secs(),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -274,6 +312,7 @@ async fn connection(stream: TcpStream, lease: Arc<Lease>, end: watch::Receiver<(
     let started = Instant::now();
     let _ = stream.set_nodelay(true);
     let outcome = match &lease.target {
+        Target::Postgres(target) => postgres::serve(stream, &lease, target, end).await,
         Target::Redis(target) => redis::serve(stream, &lease, target, end).await,
     };
     record(&lease, outcome, started);

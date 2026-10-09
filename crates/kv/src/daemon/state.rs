@@ -799,6 +799,8 @@ impl Daemon {
             } else {
                 "auto"
             },
+            role_checks: self.role_checks.clone(),
+            role_stamp: self.role_checks.stamp(),
         }));
         if !ask {
             return job;

@@ -124,6 +124,63 @@ async fn a_lease_approved_after_the_vault_locked_does_not_start() {
 }
 
 #[tokio::test]
+async fn a_postgres_lease_url_holds_a_token_and_the_database() {
+    let mut f = Fixture::new();
+    f.add(postgres("pg", PG_URL, false, Mode::Auto));
+    let reply = start(&mut f, lease("pg")).await;
+    assert_eq!(reply.expires_in_secs, 900);
+    let url = url::Url::parse(&reply.url).unwrap();
+    assert_eq!(
+        (url.scheme(), url.username(), url.host_str(), url.path()),
+        ("postgres", "kv", Some("127.0.0.1"), "/app")
+    );
+    assert_eq!(url.query(), Some("sslmode=disable"));
+    let token = url.password().unwrap();
+    assert!(token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(!reply.url.contains("pg-password"));
+
+    let mut wrong = url.clone();
+    wrong.set_password(Some("not-the-token")).unwrap();
+    let error = tokio_postgres::connect(wrong.as_str(), tokio_postgres::NoTls)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:?}").contains("password authentication failed"),
+        "{error:?}"
+    );
+    let mut other_db = url.clone();
+    other_db.set_path("/postgres");
+    let error = tokio_postgres::connect(other_db.as_str(), tokio_postgres::NoTls)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:?}").contains("this lease is for database"),
+        "{error:?}"
+    );
+
+    // The right token gets as far as the server, which cannot be reached;
+    // the error does not name it.
+    let error = tokio_postgres::connect(url.as_str(), tokio_postgres::NoTls)
+        .await
+        .err()
+        .unwrap();
+    let error = format!("{error:?}");
+    assert!(error.contains("kv:"), "{error}");
+    assert!(!error.contains("db.internal.example"), "{error}");
+
+    let audit = f.audit_lines();
+    let outcomes: Vec<_> = audit
+        .iter()
+        .filter(|line| line["action"] == "db_connect")
+        .map(|line| line["outcome"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(outcomes[0], "ok");
+    assert!(outcomes.contains(&"wrong_token".to_owned()), "{outcomes:?}");
+}
+
+#[tokio::test]
 async fn a_redis_lease_needs_the_token_before_any_command() {
     let mut f = Fixture::new();
     f.add(redis("cache", REDIS_URL, false, Mode::Auto));

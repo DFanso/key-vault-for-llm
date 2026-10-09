@@ -1824,6 +1824,7 @@ dependencies = [
  "kv-core",
  "notify-rust",
  "percent-encoding",
+ "postgres-protocol",
  "ratatui",
  "rcgen",
  "redis",

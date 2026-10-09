@@ -136,7 +136,7 @@ async fn postgres(job: &DbJob, url: &str) -> Result<AgentResponse, AgentResponse
             let warning = role_can_write(&client)
                 .await
                 .map_err(|e| upstream(scrubber, &e))?
-                .then(|| role_warning(name));
+                .then(|| warning_for(name));
             job.role_checks
                 .record(name, job.role_stamp, warning.clone());
             warning
@@ -263,12 +263,46 @@ pub async fn check_role(handle: &str, url: &str) -> Result<Option<String>, Strin
             .map_err(|e| message(upstream(&scrubber, &e)))
     };
     match tokio::time::timeout(CONNECT_TIMEOUT * 2, check).await {
-        Ok(can_write) => Ok(can_write?.then(|| role_warning(handle))),
+        Ok(can_write) => Ok(can_write?.then(|| warning_for(handle))),
         Err(_) => Err("the database did not answer in time".into()),
     }
 }
 
-fn role_warning(handle: &str) -> String {
+/// The warning for a read-only Postgres handle whose role can write, from
+/// the check since the vault was unlocked, or from a new check on a
+/// connection of its own. For `db_connect`, which has no connection of its
+/// own to check on.
+pub(crate) async fn role_warning(
+    handle: &str,
+    url: &str,
+    role_checks: &RoleChecks,
+    stamp: u64,
+    scrubber: &Scrubber,
+) -> Result<Option<String>, AgentResponse> {
+    if role_checks.is_checked(handle) {
+        return Ok(role_checks.warning(handle));
+    }
+    let check = async {
+        let client = connect(url, "", scrubber).await?;
+        role_can_write(&client)
+            .await
+            .map_err(|e| upstream(scrubber, &e))
+    };
+    let can_write = match tokio::time::timeout(CONNECT_TIMEOUT * 2, check).await {
+        Ok(can_write) => can_write?,
+        Err(_) => {
+            return Err(error(
+                AgentErrorCode::UpstreamError,
+                "the database did not answer in time",
+            ));
+        }
+    };
+    let warning = can_write.then(|| warning_for(handle));
+    role_checks.record(handle, stamp, warning.clone());
+    Ok(warning)
+}
+
+fn warning_for(handle: &str) -> String {
     format!(
         "{handle} is read-only, but its database role can write; kv keeps the session \
          read-only only on a best-effort basis. Use a role that can only read."

@@ -19,6 +19,7 @@ pub mod exec;
 pub mod http;
 pub mod lease;
 pub mod net;
+pub mod pgwire;
 mod process;
 pub mod resp;
 
@@ -86,6 +87,8 @@ pub struct ConnectJob {
     pub started: Instant,
     /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
     pub decision: &'static str,
+    pub role_checks: RoleChecks,
+    pub role_stamp: u64,
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
