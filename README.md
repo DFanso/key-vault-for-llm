@@ -12,6 +12,10 @@ secrets (`prod-db`, `openrouter`, `github`) and the broker does the
 authenticated work, so API keys, database URLs and other credentials never
 show up in a chat transcript or in the model's context.
 
+kv runs as an MCP server (`kv mcp`), so it works with Claude Code, Cursor,
+Codex, Windsurf, VS Code and any other client that speaks the Model Context
+Protocol over stdio.
+
 Status: agents can make HTTP requests, run programs, and query or connect to
 Postgres and Redis with your secrets over MCP, `kv tui` approves
 `--mode ask` requests as they arrive, and Touch ID or Windows Hello can stand

@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Vault, policy and output scrubbing for the kv secrets broker"
+keywords = ["secrets", "vault", "scrubbing", "llm", "mcp"]
+categories = ["cryptography", "authentication"]
 
 [dependencies]
 aho-corasick = "1.1"
