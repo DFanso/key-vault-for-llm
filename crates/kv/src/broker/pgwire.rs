@@ -436,9 +436,25 @@ pub struct PgTarget {
     pub options: Option<String>,
 }
 
+/// The host name, unless it is a Unix socket: a lease needs TCP. Only Unix
+/// has socket hosts.
+#[cfg(unix)]
+fn tcp_name(host: &tokio_postgres::config::Host) -> Option<&String> {
+    match host {
+        tokio_postgres::config::Host::Tcp(name) => Some(name),
+        tokio_postgres::config::Host::Unix(_) => None,
+    }
+}
+
+#[cfg(not(unix))]
+fn tcp_name(host: &tokio_postgres::config::Host) -> Option<&String> {
+    let tokio_postgres::config::Host::Tcp(name) = host;
+    Some(name)
+}
+
 impl PgTarget {
     pub fn parse(url: &str) -> Result<Self, String> {
-        use tokio_postgres::config::{Host, SslMode};
+        use tokio_postgres::config::SslMode;
         let config: tokio_postgres::Config = url
             .parse()
             .map_err(|_| "the handle's connection URL is not a valid Postgres URL".to_owned())?;
@@ -447,11 +463,8 @@ impl PgTarget {
         let mut hosts = Vec::new();
         for (i, host) in config.get_hosts().iter().enumerate() {
             let port = ports.get(i).or(ports.first()).copied().unwrap_or(5432);
-            let name = match host {
-                Host::Tcp(name) => name,
-                // Only Unix has socket hosts, and a lease needs TCP.
-                #[cfg(unix)]
-                Host::Unix(_) => continue,
+            let Some(name) = tcp_name(host) else {
+                continue;
             };
             let address = addrs.get(i).map_or_else(|| name.clone(), |a| a.to_string());
             hosts.push((address, name.clone(), port));
