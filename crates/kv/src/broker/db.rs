@@ -24,39 +24,65 @@ use crate::audit::Use;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether a write-capable role is behind each read-only Postgres handle,
-/// learned on its first query since the vault was unlocked. Shared by the
+/// learned on its first use since the vault was unlocked. Shared by the
 /// daemon, which shows the warnings and forgets them when a handle changes
 /// or the vault locks, and the jobs that run the checks.
 #[derive(Clone, Default)]
-pub struct RoleChecks(Arc<Mutex<BTreeMap<String, Option<String>>>>);
+pub struct RoleChecks(Arc<Mutex<Checks>>);
+
+#[derive(Default)]
+struct Checks {
+    /// Moves on whenever a check is forgotten, so a check that started
+    /// before then is not kept.
+    stamp: u64,
+    warnings: BTreeMap<String, Option<String>>,
+}
 
 impl RoleChecks {
-    fn map(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Option<String>>> {
+    fn checks(&self) -> std::sync::MutexGuard<'_, Checks> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn is_checked(&self, handle: &str) -> bool {
-        self.map().contains_key(handle)
+    /// Taken when a job is authorized and handed back to `record`.
+    pub fn stamp(&self) -> u64 {
+        self.checks().stamp
     }
 
-    pub fn record(&self, handle: &str, warning: Option<String>) {
-        self.map().insert(handle.to_owned(), warning);
+    pub fn is_checked(&self, handle: &str) -> bool {
+        self.checks().warnings.contains_key(handle)
+    }
+
+    /// Keeps a check's result unless something was forgotten since `stamp`.
+    pub fn record(&self, handle: &str, stamp: u64, warning: Option<String>) {
+        let mut checks = self.checks();
+        if checks.stamp == stamp {
+            checks.warnings.insert(handle.to_owned(), warning);
+        }
     }
 
     pub fn forget(&self, handle: &str) {
-        self.map().remove(handle);
+        let mut checks = self.checks();
+        checks.stamp += 1;
+        checks.warnings.remove(handle);
     }
 
     pub fn clear(&self) {
-        self.map().clear();
+        let mut checks = self.checks();
+        checks.stamp += 1;
+        checks.warnings.clear();
     }
 
     /// The handles whose role can write, with the warning for each.
     pub fn warnings(&self) -> BTreeMap<String, String> {
-        self.map()
+        self.checks()
+            .warnings
             .iter()
             .filter_map(|(handle, warning)| Some((handle.clone(), warning.clone()?)))
             .collect()
+    }
+
+    fn warning(&self, handle: &str) -> Option<String> {
+        self.checks().warnings.get(handle).cloned().flatten()
     }
 }
 
@@ -103,15 +129,20 @@ async fn postgres(job: &DbJob, url: &str) -> Result<AgentResponse, AgentResponse
     let client = connect(url, &options, scrubber).await?;
 
     let mut warnings = Vec::new();
-    if job.secret.policy.read_only && !job.role_checks.is_checked(&job.secret.name) {
-        let warning = role_can_write(&client)
-            .await
-            .map_err(|e| upstream(scrubber, &e))?
-            .then(|| role_warning(&job.secret.name));
-        job.role_checks.record(&job.secret.name, warning);
-    }
-    if let Some(warning) = job.role_checks.warnings().remove(&job.secret.name) {
-        warnings.push(warning);
+    if job.secret.policy.read_only {
+        let name = &job.secret.name;
+        let warning = if job.role_checks.is_checked(name) {
+            job.role_checks.warning(name)
+        } else {
+            let warning = role_can_write(&client)
+                .await
+                .map_err(|e| upstream(scrubber, &e))?
+                .then(|| role_warning(name));
+            job.role_checks
+                .record(name, job.role_stamp, warning.clone());
+            warning
+        };
+        warnings.extend(warning);
     }
 
     let stream = client

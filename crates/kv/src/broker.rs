@@ -61,6 +61,9 @@ pub struct DbJob {
     /// Where a read-only Postgres handle's role check is kept; the job runs
     /// the check if this handle has none since the vault was unlocked.
     pub role_checks: RoleChecks,
+    /// `role_checks.stamp()` when the job was authorized; a check whose
+    /// handle changed since is not kept.
+    pub role_stamp: u64,
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement
