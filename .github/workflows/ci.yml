@@ -29,7 +29,8 @@ jobs:
       - run: cargo test --workspace
 
   databases:
-    # db_query against real servers; service containers run on Linux only.
+    # db_query and db_connect against real servers; service containers run on
+    # Linux only.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -55,4 +56,4 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p kv --test db_live
+      - run: cargo test -p kv --test db_live --test lease_live

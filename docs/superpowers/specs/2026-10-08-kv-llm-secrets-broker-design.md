@@ -208,7 +208,7 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 | `list_handles` | — | handles with kind, description, constraints |
 | `http_request` | handle, method, url, headers?, body? | status, headers, body (scrubbed, body capped at 256 KB) |
 | `db_query` | handle, query (SQL or Redis command), timeout? | Postgres: one result per statement, values as text; Redis: the reply as JSON (scrubbed, capped at 256 KB) |
-| `db_connect` | handle, ttl? | local connection URL with a lease token |
+| `db_connect` | handle, ttl_secs? | loopback connection URL with a lease token, its lifetime, warnings |
 | `exec` | handles[], argv[], cwd?, timeout? | exit code, stdout, stderr (scrubbed) |
 | `request_handle` | name, kind, description?, reason?, header?/template?/query_param?, base_url?, allowed_hosts?, env_vars?, allowed_cmds? | confirmation that the request waits in `kv tui` |
 | `status` | — | locked/unlocked, pending approvals |
@@ -283,24 +283,60 @@ A notification announces each request.
     secret comes back as the scrubbed string).
   - The timeout defaults to 30 s and may be at most 300 s; Postgres also gets
     it as `statement_timeout`, so the server stops an abandoned query.
-    Results are cut at 256 KB and marked `truncated`. A Redis reply, or one
-    Postgres row, is held in memory whole before it is cut.
+    Results are cut at 256 KB and marked `truncated`. One Postgres row is
+    held in memory whole before it is cut; kv speaks RESP itself and reads a
+    Redis reply only as far as the cap.
   - Commands that hold or change the connection (`SUBSCRIBE` and friends,
     `MONITOR`, `AUTH`, `HELLO`, `QUIT`, `RESET`, `SYNC`) are refused for every
-    Redis handle.
+    Redis handle. `#insecure` in a `rediss://` URL is refused, since kv always
+    checks certificates.
   - TLS certificates are always verified against the platform trust store,
     whatever `sslmode` says (`sslmode=disable` still turns TLS off). A
     Postgres URL that names no `sslmode` and a host other than loopback or a
     Unix socket gets `sslmode=require`, since `prefer` can be downgraded to
     plain text by an attacker on the network.
   - Connection URLs must use `postgres://`/`postgresql://` or
-    `redis://`/`rediss://`. The host is scrubbed like the password unless it
-    is loopback, and errors are scrubbed, since they can quote the query.
+    `redis://`/`rediss://`. Every host is scrubbed like the password unless it
+    is loopback, and errors are scrubbed, since they can quote the query. A
+    Postgres URL may list several hosts (`h1:5432,h2`) and name more in
+    `host=` and `hostaddr=`, and a password in `password=`; kv reads all of
+    them, though the `url` crate cannot parse such URLs.
 - **`db_connect`**: starts a loopback proxy on a random port and returns e.g.
-  `postgres://kv:<lease-token>@127.0.0.1:41823/app`. The lease token is
-  random, single-lease and expires with the TTL. The proxy authenticates the
-  client with the token, connects upstream with the real credentials, then
-  passes traffic through.
+  `postgres://kv:<lease-token>@127.0.0.1:41823/app?sslmode=disable` (or
+  `redis://kv:<lease-token>@127.0.0.1:41823/0`). The lease token is 256
+  random bits, belongs to one lease and is compared in constant time. The
+  proxy authenticates the client with the token (Postgres: a cleartext
+  password over loopback, after answering `N` to TLS requests; Redis: `AUTH`
+  or `HELLO ... AUTH`), connects upstream with the real credentials (TLS as
+  for `db_query`; Postgres logs in with SCRAM-SHA-256, MD5 or a password),
+  then relays traffic both ways, scrubbing what comes back. It is not a plain
+  pass-through: every message from the server is scrubbed in place (Postgres
+  row values, column names, error and notice fields, notifications,
+  parameter values, command tags, COPY data; Redis strings, errors, and any
+  number that matches a secret, which becomes a string).
+  - The TTL defaults to 900 s and may be at most 3600 s. A lease ends at its
+    expiry, when the vault locks, or when its handle is added, changed or
+    removed (as grants do); its listener closes and its connections are cut
+    (Postgres clients get `57P01`). The lease's place is taken when the
+    request is authorized, so a lock while it waits for approval ends it too.
+  - At most 16 leases are open at once (counting those waiting for
+    approval), with at most 16 connections each. A client has 30 s to log in,
+    and the server 20 s. Any single message larger than 16 MiB ends the
+    connection, since each is held whole while it is scrubbed.
+  - Leases follow the current scrubber, so a secret added while one is open
+    is scrubbed from then on.
+  - Postgres: the client must ask for the lease's database; `user` is
+    ignored, replication connections and query cancellation are not passed
+    on, and `_pq_.` protocol options are declined. Other startup parameters
+    pass through.
+  - Redis: commands must arrive as RESP arrays of strings. Replies are
+    written in the order of the commands, with kv's own errors in their
+    place; RESP3 push messages pass through. `AUTH`, `HELLO` with options,
+    `RESET`, subscriptions, `MONITOR`, `CLIENT REPLY` and replication
+    commands are refused on every lease.
+  - Each connection is audited when it closes, with how it ended (`closed`,
+    `wrong_token`, `policy_denied`, `lease_ended`, ...); the lease itself is
+    audited like other requests.
 - **`exec`**: argv array only, never a shell string. `sh`, `bash`, `cmd`,
   `powershell` are not allowed unless listed in `allowed_cmds`. Env vars from
   all listed handles are injected; output streams through the scrubber; the
@@ -325,7 +361,7 @@ A notification announces each request.
 ### Read-only enforcement
 
 - **Redis**: enforced. RESP is parsed and only an allow-list of read commands
-  is forwarded.
+  is forwarded, in `db_query` and through `db_connect`.
 - **Postgres**: best effort. Sessions are opened with
   `default_transaction_read_only=on`, and statements that change it
   (`SET ... transaction_read_only`, `BEGIN READ WRITE`, `SET SESSION
@@ -347,7 +383,25 @@ A notification announces each request.
   result and the TUI when a `read_only` secret uses a role with write access.
   `kv add` runs the check itself, with the URL it just read, so a slow
   database never holds up the daemon; `kv tui` relies on the first-use
-  check.
+  check. `db_connect` runs it before returning the URL and returns the
+  warning with it.
+- **Postgres through `db_connect`**: a session lasts many transactions, so
+  the proxy also watches the server. It needs PostgreSQL 14 or later, which
+  reports `default_transaction_read_only` at login and whenever it changes;
+  a read-only lease on an older server is refused at login. The proxy:
+  - adds `-c default_transaction_read_only=on` to the session's options and
+    refuses startup parameters that mention a way to change it;
+  - checks each simple query and each statement the client prepares as
+    `db_query` does, except that a statement ending the transaction is
+    allowed as the last one of a batch (a simple query, or the extended
+    protocol up to `Sync`); `DO`, `CALL` and `PREPARE TRANSACTION` are
+    refused, and so are fast-path function calls;
+  - passes one batch on at a time, waiting for the server's
+    `ReadyForQuery` before the next, and closes the session (`25006`) if the
+    server reports `default_transaction_read_only` other than `on` or starts
+    a COPY from the client. So a switch built at run time is caught before
+    any later batch runs, and nothing can follow the transaction it was
+    made in within the same batch.
 
 ## 5. Scrubbing, unlock, approval, audit, errors
 
@@ -360,7 +414,9 @@ A notification announces each request.
   secret changes.
 - Streaming: hold back `longest pattern − 1` bytes between chunks so secrets
   split across chunks are caught.
-- Matches are replaced with `[kv:<handle>]`.
+- Matches are replaced with `[kv:<handle>]`. Matching ignores ASCII case:
+  host names are case-insensitive, and a secret in another case is still a
+  secret.
 - Values shorter than 8 characters are not scrubbed (false positives);
   `kv add` warns about them.
 
@@ -459,7 +515,8 @@ or unscrubbed paths.
   - Exec: test helper binary prints the injected secret raw, base64 and hex;
     output must be scrubbed.
   - Postgres and Redis on real servers (Linux CI only, as GitHub Actions
-    service containers), including read-only enforcement. The tests read
+    service containers), including read-only enforcement, and `db_connect`
+    leases driven by ordinary clients (`tokio-postgres`, `redis`). The tests read
     `KV_TEST_POSTGRES_URL` and `KV_TEST_REDIS_URL` and skip without them,
     unless `KV_REQUIRE_DB_TESTS` is set, as CI sets it; locally any server
     will do.
