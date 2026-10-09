@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="973" height="350" viewBox="0 0 973 350" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="100%" height="100%" rx="10" fill="#0d1117" stroke="#30363d"/>
+<circle cx="20" cy="17.0" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17.0" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17.0" r="6" fill="#28c840"/>
+<text x="486" y="22.0" fill="#8b949e" font-size="12" text-anchor="middle">kv tui</text>
+<text x="16.0" y="59" fill="#c9d1d9" textLength="445.2" lengthAdjust="spacingAndGlyphs">kv · unlocked · 6 handles · locks after 7h 59m unused</text>
+<text x="469.6" y="59" fill="#d29922" font-weight="700" textLength="210.0" lengthAdjust="spacingAndGlyphs">· 2 waiting · 1 requested</text>
+<text x="24.4" y="77" fill="#c9d1d9" textLength="126.0" lengthAdjust="spacingAndGlyphs">1 Approvals (2)</text>
+<rect x="167.2" y="64" width="210.0" height="18" fill="#c9d1d9"/>
+<text x="175.6" y="77" fill="#0d1117" textLength="193.2" lengthAdjust="spacingAndGlyphs">2 Handles (1 requested)</text>
+<text x="394.0" y="77" fill="#c9d1d9" textLength="58.8" lengthAdjust="spacingAndGlyphs">3 Audit</text>
+<text x="32.8" y="95" fill="#c9d1d9" textLength="58.8" lengthAdjust="spacingAndGlyphs">Handles</text>
+<text x="24.4" y="113" fill="#d29922" font-weight="700" textLength="67.2" lengthAdjust="spacingAndGlyphs">▶ stripe</text>
+<text x="217.6" y="113" fill="#d29922" font-weight="700" textLength="33.6" lengthAdjust="spacingAndGlyphs">http</text>
+<text x="301.6" y="113" fill="#d29922" font-weight="700" textLength="252.0" lengthAdjust="spacingAndGlyphs">requested Stripe test-mode key</text>
+<text x="58.0" y="131" fill="#6e7681" textLength="789.6" lengthAdjust="spacingAndGlyphs">asked by claude-code (self-reported): Needed to reproduce the refund bug in billing/refunds.ts</text>
+<text x="41.2" y="167" fill="#c9d1d9" textLength="84.0" lengthAdjust="spacingAndGlyphs">openrouter</text>
+<text x="217.6" y="167" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">http</text>
+<text x="301.6" y="167" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">auto</text>
+<text x="352.0" y="167" fill="#c9d1d9" textLength="235.2" lengthAdjust="spacingAndGlyphs">LLM API for the eval scripts</text>
+<text x="41.2" y="185" fill="#c9d1d9" textLength="50.4" lengthAdjust="spacingAndGlyphs">github</text>
+<text x="217.6" y="185" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">http</text>
+<text x="301.6" y="185" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">ask</text>
+<text x="352.0" y="185" fill="#c9d1d9" textLength="184.8" lengthAdjust="spacingAndGlyphs">Read-only GitHub token</text>
+<text x="41.2" y="203" fill="#c9d1d9" textLength="58.8" lengthAdjust="spacingAndGlyphs">prod-db</text>
+<text x="217.6" y="203" fill="#c9d1d9" textLength="67.2" lengthAdjust="spacingAndGlyphs">postgres</text>
+<text x="301.6" y="203" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">auto</text>
+<text x="352.0" y="203" fill="#c9d1d9" textLength="210.0" lengthAdjust="spacingAndGlyphs">Orders database (replica)</text>
+<text x="578.8" y="203" fill="#f85149" textLength="277.2" lengthAdjust="spacingAndGlyphs">read-only, but the role can write</text>
+<text x="41.2" y="221" fill="#c9d1d9" textLength="42.0" lengthAdjust="spacingAndGlyphs">cache</text>
+<text x="217.6" y="221" fill="#c9d1d9" textLength="42.0" lengthAdjust="spacingAndGlyphs">redis</text>
+<text x="301.6" y="221" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">auto</text>
+<text x="352.0" y="221" fill="#c9d1d9" textLength="109.2" lengthAdjust="spacingAndGlyphs">Session cache</text>
+<text x="41.2" y="239" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">aws</text>
+<text x="217.6" y="239" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">env</text>
+<text x="301.6" y="239" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">ask</text>
+<text x="352.0" y="239" fill="#c9d1d9" textLength="142.8" lengthAdjust="spacingAndGlyphs">Terraform deploys</text>
+<text x="41.2" y="257" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">npm</text>
+<text x="217.6" y="257" fill="#c9d1d9" textLength="25.2" lengthAdjust="spacingAndGlyphs">env</text>
+<text x="301.6" y="257" fill="#c9d1d9" textLength="33.6" lengthAdjust="spacingAndGlyphs">auto</text>
+<text x="352.0" y="257" fill="#c9d1d9" textLength="151.2" lengthAdjust="spacingAndGlyphs">Package publishing</text>
+<text x="16.0" y="329" fill="#6e7681" textLength="638.4" lengthAdjust="spacingAndGlyphs">n new · Enter fill in · x dismiss · ↑↓ select · 1/2/3 tabs · L lock · q quit</text>
+<line x1="20.5" y1="91.5" x2="24.4" y2="91.5" stroke="#c9d1d9" stroke-width="1"/>
+<line x1="100.0" y1="91.5" x2="953.5" y2="91.5" stroke="#c9d1d9" stroke-width="1"/>
+<line x1="20.5" y1="91.5" x2="20.5" y2="307.5" stroke="#c9d1d9" stroke-width="1"/>
+<line x1="953.5" y1="91.5" x2="953.5" y2="307.5" stroke="#c9d1d9" stroke-width="1"/>
+<line x1="20.5" y1="307.5" x2="953.5" y2="307.5" stroke="#c9d1d9" stroke-width="1"/>
+</svg>

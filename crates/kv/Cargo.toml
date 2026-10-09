@@ -3,6 +3,7 @@ name = "kv"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Local secrets broker that lets AI agents use secrets without seeing them"
 
 [dependencies]
