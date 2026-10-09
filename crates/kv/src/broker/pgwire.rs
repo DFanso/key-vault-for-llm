@@ -324,6 +324,10 @@ pub struct ReadOnlyGate {
     statements: HashMap<Vec<u8>, bool>,
     portals: HashMap<Vec<u8>, bool>,
     ended: bool,
+    /// Extended-protocol messages have passed since the last Sync. After an
+    /// error the server skips the rest of the batch, so kv cannot be sure
+    /// they took effect.
+    open: bool,
 }
 
 impl ReadOnlyGate {
@@ -339,7 +343,17 @@ impl ReadOnlyGate {
                     .into(),
             );
         }
+        let open = self.open;
+        if matches!(message.tag, b'P' | b'B' | b'E' | b'C' | b'D') {
+            self.open = true;
+        }
         match message.tag {
+            // The server would skip it after an error, and never answer.
+            b'Q' if open => Err(
+                "the handle is read-only, and kv refuses a simple query in the middle of an \
+                 extended-protocol batch; send Sync first"
+                    .into(),
+            ),
             b'Q' => {
                 let (sql, _) = cstr(body, 0).ok_or_else(malformed)?;
                 pg_session_violation(&String::from_utf8_lossy(sql))?;
@@ -349,32 +363,48 @@ impl ReadOnlyGate {
                 let (name, next) = cstr(body, 0).ok_or_else(malformed)?;
                 let (sql, _) = cstr(body, next).ok_or_else(malformed)?;
                 let ends = pg_session_violation(&String::from_utf8_lossy(sql))?;
-                self.statements.insert(name.to_vec(), ends);
+                // The server keeps a named statement until it is closed and
+                // refuses to reuse the name, and a Parse may be skipped after
+                // an error: once a name may end a transaction it stays that
+                // way. Only an unnamed Parse first in its batch surely
+                // replaces the last one.
+                let replaced = name.is_empty() && !open;
+                let known = self.statements.entry(name.to_vec()).or_default();
+                *known = ends || (*known && !replaced);
                 Ok(false)
             }
             b'B' => {
                 let (portal, next) = cstr(body, 0).ok_or_else(malformed)?;
                 let (statement, _) = cstr(body, next).ok_or_else(malformed)?;
-                let ends = self.statements.get(statement).copied().unwrap_or(false);
+                // A statement kv never saw prepared may be anything.
+                let ends = self.statements.get(statement).copied().unwrap_or(true);
                 self.portals.insert(portal.to_vec(), ends);
                 Ok(false)
             }
             b'E' => {
                 let (portal, _) = cstr(body, 0).ok_or_else(malformed)?;
-                self.ended = self.portals.get(portal).copied().unwrap_or(false);
+                self.ended = self.portals.get(portal).copied().unwrap_or(true);
                 Ok(false)
             }
             b'C' => {
                 let kind = body.first().ok_or_else(malformed)?;
                 let (name, _) = cstr(body, 1).ok_or_else(malformed)?;
+                // A Close may be skipped too: a statement that may end a
+                // transaction is never forgotten.
                 match kind {
-                    b'S' => self.statements.remove(name),
-                    _ => self.portals.remove(name),
-                };
+                    b'S' if self.statements.get(name) == Some(&false) => {
+                        self.statements.remove(name);
+                    }
+                    b'S' => {}
+                    _ => {
+                        self.portals.remove(name);
+                    }
+                }
                 Ok(false)
             }
             b'S' => {
                 self.ended = false;
+                self.open = false;
                 Ok(true)
             }
             b'F' => Err(
