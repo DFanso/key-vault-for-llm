@@ -184,7 +184,23 @@ impl Secret {
                     }
                 }
             }
-            SecretValue::Postgres { url } | SecretValue::Redis { url } => {
+            SecretValue::Postgres { url } => {
+                let url = url.expose();
+                out.push(Zeroizing::new(url.to_owned()));
+                for host in crate::db::postgres_hosts(url) {
+                    if !crate::db::is_local(&host) {
+                        out.push(Zeroizing::new(host));
+                    }
+                }
+                for password in crate::db::postgres_passwords(url) {
+                    let decoded = percent_decode_str(&password).decode_utf8_lossy();
+                    if decoded != password {
+                        out.push(Zeroizing::new(decoded.into_owned()));
+                    }
+                    out.push(Zeroizing::new(password));
+                }
+            }
+            SecretValue::Redis { url } => {
                 out.push(Zeroizing::new(url.expose().to_owned()));
                 let parsed = url::Url::parse(url.expose()).ok();
                 if let Some(host) = parsed.as_ref().and_then(url::Url::host)

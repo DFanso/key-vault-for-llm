@@ -64,6 +64,9 @@ impl Scrubber {
         let matcher = (!patterns.is_empty()).then(|| {
             AhoCorasick::builder()
                 .match_kind(MatchKind::LeftmostLongest)
+                // Host names are case-insensitive, and a secret in another
+                // case is still a secret.
+                .ascii_case_insensitive(true)
                 .build(&patterns)
                 .expect("scrub patterns build into an automaton")
         });

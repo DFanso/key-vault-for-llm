@@ -1,5 +1,6 @@
 use kv_core::db::{
-    RedisRefusal, check_redis, pg_read_only_violation, postgres_requires_tls, split_command,
+    RedisRefusal, check_redis, pg_read_only_violation, pg_session_violation, postgres_hosts,
+    postgres_passwords, postgres_requires_tls, split_command,
 };
 
 fn args(line: &str) -> Vec<Vec<u8>> {
@@ -176,7 +177,60 @@ fn tls_is_required_for_remote_postgres_unless_the_url_says_otherwise() {
         ("postgres://app:pw@[::1]/app", false),
         ("postgres://app:pw@/app?host=/var/run/postgresql", false),
         ("postgres://app:pw@localhost/app?host=db.example.com", true),
+        (
+            "postgres://app:pw@localhost:5432,db.example.com:5433/app",
+            true,
+        ),
+        ("postgres://app:pw@localhost:5432,127.0.0.1/app", false),
     ] {
         assert_eq!(postgres_requires_tls(url), required, "{url}");
     }
+}
+
+#[test]
+fn a_read_only_session_may_end_a_transaction_only_at_the_end_of_a_batch() {
+    for sql in [
+        "select * from users",
+        "begin",
+        "begin read only",
+        "insert into t values (1); commit",
+        "commit",
+        "rollback to savepoint a",
+    ] {
+        assert!(pg_session_violation(sql).is_ok(), "{sql}");
+    }
+    assert_eq!(pg_session_violation("select 1"), Ok(false));
+    assert_eq!(pg_session_violation("select 1; commit;"), Ok(true));
+    assert_eq!(pg_session_violation("END"), Ok(true));
+    for sql in [
+        // A switch built at run time, then a new transaction, in one batch.
+        "select query_to_xml('select set_' || 'config(1)', true, true, ''); commit; insert into t values (1)",
+        "commit; insert into t values (1)",
+        "rollback; select 1",
+        "set default_transaction_read_only = off",
+        "do $$ begin perform 1; end $$",
+        "call refresh()",
+        "prepare transaction 'x'",
+    ] {
+        assert!(pg_session_violation(sql).is_err(), "{sql}");
+    }
+}
+
+#[test]
+fn postgres_urls_with_several_hosts_name_them_all() {
+    assert_eq!(
+        postgres_hosts(
+            "postgres://app:pw@db1.example.com:5432,[::1]:5433,db2/app?host=db3,/tmp&hostaddr=10.0.0.9"
+        ),
+        ["db1.example.com", "::1", "db2", "db3", "/tmp", "10.0.0.9"]
+    );
+    assert_eq!(
+        postgres_hosts("postgres:///app?host=/var/run/postgresql"),
+        ["/var/run/postgresql"]
+    );
+    assert_eq!(
+        postgres_passwords("postgres://app:p%40ss@h1,h2/app?password=second"),
+        ["p%40ss", "second"]
+    );
+    assert!(postgres_passwords("postgres://app@h/app").is_empty());
 }

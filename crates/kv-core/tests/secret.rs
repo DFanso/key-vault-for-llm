@@ -211,4 +211,16 @@ fn a_database_host_is_scrubbed_unless_it_is_loopback() {
         let host = url::Url::parse(url).unwrap().host_str().unwrap().to_owned();
         assert!(!values(url).contains(&host), "{url}");
     }
+    let all = values(
+        "postgres://app:pw-0123456789@db1.example.com,db2.example.com/app?hostaddr=10.1.2.3&password=pw-second-0123",
+    );
+    for value in [
+        "db1.example.com",
+        "db2.example.com",
+        "10.1.2.3",
+        "pw-0123456789",
+        "pw-second-0123",
+    ] {
+        assert!(all.contains(&value.to_string()), "{value} in {all:?}");
+    }
 }
