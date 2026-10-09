@@ -13,17 +13,27 @@ authenticated work, so API keys, database URLs and other credentials never
 show up in a chat transcript or in the model's context.
 
 Status: agents can make HTTP requests, run programs, and query or connect to
-Postgres and Redis with your secrets over MCP, and `kv tui` approves
-`--mode ask` requests as they arrive. Touch ID and Windows Hello unlock and
-prebuilt binaries come next.
+Postgres and Redis with your secrets over MCP, `kv tui` approves
+`--mode ask` requests as they arrive, and Touch ID or Windows Hello can stand
+in for the passphrase.
 
 ![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
 ## Setup
 
-```sh
-cargo install --path crates/kv
+Install a prebuilt binary (macOS, Linux, Windows) into `~/.cargo/bin`:
 
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/DFanso/key-vault-for-llm/releases/latest/download/kv-installer.sh | sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/DFanso/key-vault-for-llm/releases/latest/download/kv-installer.ps1 | iex"
+```
+
+or build it with `cargo install --path crates/kv` (Rust 1.89 or later). Then:
+
+```sh
 kv init                       # create the vault and choose a passphrase
 kv add openrouter --kind http --host openrouter.ai --mode auto
 kv add aws --kind env --var AWS_ACCESS_KEY_ID --var AWS_SECRET_ACCESS_KEY \
@@ -168,9 +178,9 @@ arguments, where they would end up in shell history.
 `X-HTTP-Method-Override`, but kv cannot see a `_method` field inside a request
 body, so for a strictly read-only key prefer one the service itself limits.
 
-Every command that changes the vault asks for the passphrase, or runs inside
-an unlocked `kv tui`, so an agent running commands as you cannot add, remove
-or loosen secrets. The vault locks
+Every command that changes the vault asks for the passphrase (or Touch ID
+or Windows Hello, below), or runs inside an unlocked `kv tui`, so an agent
+running commands as you cannot add, remove or loosen secrets. The vault locks
 itself after 8 hours without use. To change that, set `KV_IDLE_LOCK=2h` (any
 duration) in your shell profile and run `kv stop` so the next command picks it
 up.
@@ -184,9 +194,25 @@ Set `KV_HOME` to keep the vault, audit log and sockets in one directory
 instead of the platform defaults. Every use of a handle is recorded in the
 audit log (`audit.jsonl`), without values.
 
-## Planned for v1
+## Touch ID and Windows Hello
 
-- Touch ID and Windows Hello unlock, and prebuilt binaries
+```sh
+kv biometric enable           # asks for the passphrase, then a fingerprint or Hello
+kv biometric disable
+```
+
+Once it is on, `kv unlock`, `kv add`, `kv rm`, `kv policy` and `kv tui` ask
+for a fingerprint or Hello instead of the passphrase (Ctrl-T asks again on
+the TUI's unlock screen). Cancel the prompt to type the passphrase instead;
+commands that read stdin from a pipe always read the passphrase. `kv status`
+says which is on. `kv passwd` turns it off, since the new vault key has no
+copy for the device; run `kv biometric enable` again. Adding or removing a
+fingerprint on the Mac also turns Touch ID off until you enable it again.
+
+kv keeps the Touch ID key in your login keychain, where only the `kv` binary
+that saved it can read it without your login password. After you install a
+new kv, macOS asks for that password once; choose Always Allow. Set
+`KV_BIOMETRIC=off` to never use either method.
 
 ## What kv protects against
 

@@ -72,8 +72,9 @@ Cargo workspace, Rust stable:
 Key dependencies: `tokio`, `rmcp` (MCP), `ratatui` + `crossterm` (TUI),
 `clap`, `serde`, `chacha20poly1305`, `argon2`, `zeroize`, `secrecy`,
 `aho-corasick`, `reqwest` (rustls), `tokio-postgres`, `redis`,
-`interprocess` (local sockets / named pipes), `keyring` and
-`security-framework` (biometric unlock), `notify-rust`, `dirs`.
+`interprocess` (local sockets / named pipes), `objc2-local-authentication`
+and `security-framework` (Touch ID), `windows` (Windows Hello),
+`notify-rust`, `dirs`.
 
 ### IPC
 
@@ -137,12 +138,28 @@ Path: `<config dir>/kv/vault.kv` (from `dirs::config_dir()`).
 - The vault key is stored wrapped once per unlock method:
   - **Passphrase** (always present, the only method on Linux): wrapping key
     from Argon2id.
-  - **Touch ID** (macOS): wrapping key stored as a Keychain item with
-    `kSecAccessControlBiometryCurrentSet`.
-  - **Windows Hello**: wrapping key derived via HKDF from a
-    `KeyCredentialManager` signature over a fixed per-vault challenge.
+  - **Touch ID** (macOS): a random wrapping key in a login keychain item
+    (service `kv vault`, account the slot id), read only after
+    `LAContext` confirms a fingerprint. The slot keeps the Mac's
+    `evaluatedPolicyDomainState`, and kv refuses the key once the enrolled
+    fingerprints change, as `kSecAccessControlBiometryCurrentSet` would.
+    That access control, and the data-protection keychain, need an
+    entitlement only a signed binary can carry (`errSecMissingEntitlement`,
+    -34018, for `cargo install` builds), hence the legacy keychain. The
+    item's ACL lets only the `kv` binary that saved it read it without the
+    login password, so a new build asks for it once.
+  - **Windows Hello**: wrapping key derived with HKDF-SHA256 (salt
+    `kv-windows-hello-v1`, info `vault wrapping key`) from a
+    `KeyCredentialManager` RSA signature over a random 32-byte challenge
+    kept in the slot. PKCS#1 v1.5 signatures are deterministic, so the same
+    credential and challenge give the same key.
 - Layout: header (magic, format version, KDF params, list of wrapped keys),
-  then nonce + AEAD ciphertext of the serialized secrets.
+  then nonce + AEAD ciphertext of the serialized secrets. A header with more
+  than 8 wrapped keys, more than 2 passphrase keys, or KDF parameters above
+  1 GiB of memory, 16 passes or 8 lanes is corrupt and refused before any
+  key derivation. A wrapped key of a method (or device kind) this version
+  does not know is kept on save and skipped on unlock, so a vault set up by
+  a newer kv still opens with the passphrase; one with no method is corrupt.
 - Writes are atomic (temp file, fsync, rename) and keep one `.bak` holding
   the previous version.
 - Changing the passphrase generates a new vault key, re-encrypts everything
@@ -155,7 +172,12 @@ Path: `<config dir>/kv/vault.kv` (from `dirs::config_dir()`).
 
 The OS keyring never holds anything that can decrypt the vault without user
 presence. On Windows and Linux any same-user process can read keyring items,
-which would let an agent bypass kv entirely.
+which would let an agent bypass kv entirely. On macOS the Touch ID key is
+readable without a prompt only by the `kv` binary that saved it, which reads
+it only after a fingerprint. Code that loads itself into that binary (for
+example with `DYLD_INSERT_LIBRARIES`, which binaries without the hardened
+runtime honor) skips the fingerprint; that is the same-user process of the
+threat model, which can attack the daemon the same way.
 
 ### Secret model
 
@@ -423,7 +445,16 @@ A notification announces each request.
 ### Unlock
 
 - `kv unlock` (or any control command) and, from Plan 4, `kv tui` prompt for
-  the passphrase, or a biometric from Plan 6. The daemon unwraps the vault key
+  the passphrase. From Plan 6, once `kv biometric enable` has added a slot
+  for this platform's device, `kv unlock`, `add`, `rm`, `policy` and
+  `biometric disable` ask Touch ID or Windows Hello first when stdin is a
+  terminal, and fall back to the passphrase if the user cancels or the
+  daemon turns the key down; `kv tui` asks at start and on Ctrl-T. The
+  client asks the platform and sends the daemon the slot id and key in place
+  of the passphrase (`DeviceCredential`), so the daemon never talks to the
+  platform; a wrong key counts toward the unlock backoff like a wrong
+  passphrase. Enrolling a device and changing the passphrase always take the
+  passphrase. `KV_BIOMETRIC=off` turns device unlock off. The daemon unwraps the vault key
   and holds it in memory-locked (`mlock`/`VirtualLock`, best effort), zeroized
   memory. The TUI additionally receives a random 256-bit control session token
   held only in TUI memory.
@@ -526,13 +557,19 @@ or unscrubbed paths.
 - **MCP end to end**: `rmcp` client drives `kv mcp`. Manual check with
   `claude mcp add kv -- kv mcp`.
 - **CI**: GitHub Actions matrix (macOS, Ubuntu, Windows): `cargo fmt --check`,
-  `cargo clippy -- -D warnings`, `cargo test`.
+  `cargo clippy -- -D warnings`, `cargo test`; `cargo check --locked` on the
+  MSRV (1.89). Every action is pinned to a commit.
 - **Manual per release**: Touch ID and Windows Hello unlock.
 
 ## 7. Distribution
 
-`cargo install` first; prebuilt binaries for macOS, Linux and Windows via
-`cargo-dist` as the final v1 milestone.
+`cargo install --path crates/kv`, or prebuilt binaries built by
+`cargo-dist` (0.33) on GitHub Releases when a version tag (`v0.1.0`) is
+pushed: macOS (arm64, x86_64), Linux (x86_64, arm64, glibc) and Windows
+(x86_64, MSVC), with shell and PowerShell installers that put `kv` in
+`~/.cargo/bin` and no updater. The binaries are not code-signed or
+notarized; installers fetch with `curl`/`irm`, which macOS does not
+quarantine.
 
 ## 8. Out of scope for v1
 
