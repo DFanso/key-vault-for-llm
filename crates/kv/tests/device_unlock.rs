@@ -2,9 +2,9 @@
 //! for this platform's device and turning what the device returns into a
 //! credential for the daemon. A fake device stands in for the platform.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+mod fake;
 
+use fake::Fake;
 use kv::device::{self, Device};
 use kv_core::crypto::{KdfParams, SymmetricKey};
 use kv_core::vault::{DeviceKind, DeviceSlot, Vault};
@@ -15,40 +15,6 @@ const FAST: KdfParams = KdfParams {
     t: 1,
     p: 1,
 };
-
-#[derive(Default)]
-struct Fake {
-    keys: Mutex<HashMap<String, [u8; 32]>>,
-    refuse: Option<&'static str>,
-}
-
-impl Device for Fake {
-    fn kind(&self) -> DeviceKind {
-        DeviceKind::TouchId
-    }
-
-    fn available(&self) -> Result<(), String> {
-        self.refuse.map_or(Ok(()), |why| Err(why.into()))
-    }
-
-    fn enroll(&self, id: &str) -> Result<(Vec<u8>, SymmetricKey), String> {
-        self.available()?;
-        let key = SymmetricKey::generate();
-        self.keys.lock().unwrap().insert(id.into(), *key.as_bytes());
-        Ok((b"fingerprints".to_vec(), key))
-    }
-
-    fn unlock(&self, slot: &DeviceSlot) -> Result<SymmetricKey, String> {
-        self.available()?;
-        let keys = self.keys.lock().unwrap();
-        let key = keys.get(&slot.id).ok_or("no key for this slot")?;
-        Ok(SymmetricKey::from_slice(key).unwrap())
-    }
-
-    fn forget(&self, id: &str) {
-        self.keys.lock().unwrap().remove(id);
-    }
-}
 
 #[test]
 fn an_enrolled_device_gives_a_credential_that_opens_the_vault() {

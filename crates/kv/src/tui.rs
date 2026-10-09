@@ -1,6 +1,7 @@
 //! `kv tui`: approve waiting agent requests, edit handles, lock the vault.
-//! Unlocking trades the passphrase for a session token held only in this
-//! process; every later request uses the token.
+//! Unlocking trades the passphrase, or a key from Touch ID or Windows Hello,
+//! for a session token held only in this process; every later request uses
+//! the token.
 
 pub mod app;
 mod edit;
@@ -8,16 +9,21 @@ pub mod form;
 pub mod view;
 
 use std::io::{self, IsTerminal};
+use std::sync::Arc;
 use std::time::Duration;
 
-use kv_core::proto::{ControlCommand, ControlErrorCode, ControlRequest, ControlResponse};
+use kv_core::proto::{
+    ControlCommand, ControlErrorCode, ControlRequest, ControlResponse, DeviceCredential,
+};
 use kv_core::secret::SecretText;
+use kv_core::vault::{DeviceKind, device_slots};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
 
+use crate::device::{self, Device};
 use crate::paths::Paths;
 use crate::{audit, client};
 use app::{App, Effect, Outcome, Tab};
@@ -32,32 +38,38 @@ const AUDIT_LINES: usize = 200;
 pub struct Driver {
     paths: Paths,
     token: Option<SecretText>,
+    device: Option<Arc<dyn Device>>,
 }
 
 impl Driver {
+    /// A driver that unlocks with this platform's device when the vault has
+    /// it set up.
     pub fn new(paths: Paths) -> Self {
-        Self { paths, token: None }
+        Self::with_device(paths, device::platform().map(Arc::from))
+    }
+
+    pub fn with_device(paths: Paths, device: Option<Arc<dyn Device>>) -> Self {
+        Self {
+            paths,
+            token: None,
+            device,
+        }
+    }
+
+    /// The device to offer: this platform's, if the vault has a slot for it.
+    pub fn device(&self) -> Option<DeviceKind> {
+        let kind = self.device.as_ref()?.kind();
+        device_slots(&self.paths.vault)
+            .ok()?
+            .iter()
+            .any(|slot| slot.kind == kind)
+            .then_some(kind)
     }
 
     pub async fn run(&mut self, effect: Effect) -> Outcome {
         match effect {
-            Effect::OpenSession(passphrase) => {
-                let request = ControlRequest {
-                    passphrase: Some(passphrase),
-                    device: None,
-                    token: None,
-                    command: ControlCommand::OpenSession,
-                };
-                match client::control(&self.paths, &request, true).await {
-                    Ok(ControlResponse::Session { token }) => {
-                        self.token = Some(token);
-                        Outcome::Opened
-                    }
-                    Ok(ControlResponse::Error { message, .. }) => Outcome::Failed(message),
-                    Ok(other) => Outcome::Failed(format!("unexpected reply: {other:?}")),
-                    Err(e) => Outcome::Failed(format!("could not reach the kv daemon: {e}")),
-                }
-            }
+            Effect::OpenSession(passphrase) => self.open_session(Some(passphrase), None).await,
+            Effect::DeviceUnlock => self.device_unlock().await,
             Effect::Decide { id, verdict } => {
                 self.send(ControlCommand::Decide { id, verdict }).await
             }
@@ -100,6 +112,47 @@ impl Driver {
                 }
             }
             Effect::Quit => Outcome::Done(Vec::new()),
+        }
+    }
+
+    async fn device_unlock(&mut self) -> Outcome {
+        let Some(chosen) = self.device.clone() else {
+            return Outcome::Failed("there is no biometric unlock here".into());
+        };
+        let label = chosen.kind().label();
+        let vault = self.paths.vault.clone();
+        // The prompt blocks until the user answers.
+        let asked =
+            tokio::task::spawn_blocking(move || device::credential(&vault, chosen.as_ref())).await;
+        match asked {
+            Ok(Some(Ok(credential))) => self.open_session(None, Some(credential)).await,
+            Ok(Some(Err(why))) => Outcome::Failed(format!("{label}: {why}; type the passphrase")),
+            Ok(None) => Outcome::Failed(format!(
+                "{label} unlock is not on for this vault: run `kv biometric enable`"
+            )),
+            Err(e) => Outcome::Failed(format!("{label}: {e}")),
+        }
+    }
+
+    async fn open_session(
+        &mut self,
+        passphrase: Option<SecretText>,
+        device: Option<DeviceCredential>,
+    ) -> Outcome {
+        let request = ControlRequest {
+            passphrase,
+            device,
+            token: None,
+            command: ControlCommand::OpenSession,
+        };
+        match client::control(&self.paths, &request, true).await {
+            Ok(ControlResponse::Session { token }) => {
+                self.token = Some(token);
+                Outcome::Opened
+            }
+            Ok(ControlResponse::Error { message, .. }) => Outcome::Failed(message),
+            Ok(other) => Outcome::Failed(format!("unexpected reply: {other:?}")),
+            Err(e) => Outcome::Failed(format!("could not reach the kv daemon: {e}")),
         }
     }
 
@@ -191,6 +244,12 @@ async fn event_loop(terminal: &mut DefaultTerminal, paths: Paths) -> io::Result<
     });
     let mut app = App::new();
     let mut driver = Driver::new(paths);
+    app.set_device(driver.device());
+    // With Touch ID or Hello set up, ask right away; Ctrl-T asks again.
+    if let Some(effect) = app.ask_device() {
+        terminal.draw(|frame| view::draw(frame, &app))?;
+        app.apply(driver.run(effect).await);
+    }
     let mut tick = tokio::time::interval(REFRESH);
     loop {
         terminal.draw(|frame| view::draw(frame, &app))?;
