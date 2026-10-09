@@ -9,13 +9,14 @@ use std::time::{Duration, Instant, SystemTime};
 use kv_core::VaultError;
 use kv_core::crypto::KdfParams;
 use kv_core::crypto::fill_random;
+use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
 use kv_core::policy::{
     Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry,
 };
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ControlCommand, ControlErrorCode,
-    ControlRequest, ControlResponse, ExecCall, HandleRequest, HttpCall, Overview, PolicyPatch,
-    RequestedHandle, SessionInfo, Status, Verdict,
+    ControlRequest, ControlResponse, DbCall, ExecCall, HandleRequest, HttpCall, Overview,
+    PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
@@ -26,11 +27,13 @@ use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::audit::{Audit, Use};
-use crate::broker::{ExecJob, HttpJob};
+use crate::broker::{DbJob, ExecJob, HttpJob, RoleChecks};
 use crate::throttle::Throttle;
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_DB_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DB_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Headers kv sets itself, that would change how the request is framed, or
 /// that would let a response carry a secret past the scrubber: compressed,
@@ -129,12 +132,18 @@ pub struct Daemon {
     next_approval: u64,
     /// "Allow for the session" decisions. Cleared whenever the vault locks.
     grants: Vec<Grant>,
+    /// Answers for requests withdrawn while they waited, for the server to
+    /// pick up. Oldest are dropped past `MAX_PENDING`.
+    ended: BTreeMap<u64, AgentResponse>,
     /// Handles agents asked the user to add, oldest first. They hold no
     /// secrets, so they outlast a lock.
     handle_requests: Vec<RequestedHandle>,
     next_request: u64,
     /// The name of a handle request not yet announced; only new names are.
     request_notice: Option<String>,
+    /// Read-only Postgres handles whose role has been checked since the
+    /// vault was unlocked. Forgotten when the handle changes.
+    role_checks: RoleChecks,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -191,6 +200,7 @@ pub enum Prepared {
     Reply(AgentResponse),
     Http(Box<HttpJob>),
     Exec(Box<ExecJob>),
+    Db(Box<DbJob>),
     Wait(Box<Waiting>),
 }
 
@@ -228,6 +238,8 @@ impl Daemon {
             handle_requests: Vec::new(),
             next_request: 0,
             request_notice: None,
+            role_checks: RoleChecks::default(),
+            ended: BTreeMap::new(),
             grants: Vec::new(),
         }
     }
@@ -273,6 +285,7 @@ impl Daemon {
             }
             AgentRequest::HttpRequest(call) => self.prepare_http(call, session, now),
             AgentRequest::Exec(call) => self.prepare_exec(call, session, now),
+            AgentRequest::DbQuery(call) => self.prepare_db(call, session, now),
             AgentRequest::RequestHandle(request) => {
                 let name = printable(&request.name, 63);
                 let response = self.request_handle(session, request);
@@ -618,6 +631,102 @@ impl Daemon {
         self.queue(ask, job, session, now)
     }
 
+    fn prepare_db(
+        &mut self,
+        call: DbCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
+        let summary: String = call.query.chars().take(200).collect();
+        let refuse = |daemon: &Self, decision, response| {
+            daemon.refuse("db_query", &call.handle, &summary, decision, response)
+        };
+        let bad = |message: String| agent_error(AgentErrorCode::BadRequest, message);
+        let denied = |message: String| agent_error(AgentErrorCode::PolicyDenied, message);
+        let Some(vault) = &self.vault else {
+            return refuse(self, "locked", self.locked_error());
+        };
+        let Some(secret) = vault.get(&call.handle).cloned() else {
+            return refuse(self, "invalid", unknown_handle(vault, &call.handle));
+        };
+        let timeout = call
+            .timeout_secs
+            .map_or(DEFAULT_DB_TIMEOUT, Duration::from_secs);
+        if timeout.is_zero() || timeout > MAX_DB_TIMEOUT {
+            return refuse(
+                self,
+                "invalid",
+                bad("timeout_secs must be between 1 and 300".into()),
+            );
+        }
+        if call.query.trim().is_empty() {
+            return refuse(self, "invalid", bad("the query is empty".into()));
+        }
+        let decision = evaluate(&secret, &Operation::DbQuery);
+        if let Decision::Deny(reason) = decision {
+            return refuse(self, "policy", denied(reason.to_string()));
+        }
+        // The read-only guards run before any approval, so the user is
+        // never asked about a query that would be refused anyway.
+        let read_only = secret.policy.read_only;
+        match &secret.value {
+            SecretValue::Postgres { .. } if read_only => {
+                if let Some(reason) = pg_read_only_violation(&call.query) {
+                    return refuse(self, "policy", denied(reason.into()));
+                }
+            }
+            SecretValue::Redis { .. } => {
+                let args = match split_command(&call.query) {
+                    Ok(args) => args,
+                    Err(message) => return refuse(self, "invalid", bad(message)),
+                };
+                match check_redis(&args, read_only) {
+                    Ok(()) => {}
+                    Err(refusal @ RedisRefusal::Never(_)) => {
+                        return refuse(self, "invalid", bad(refusal.to_string()));
+                    }
+                    Err(refusal @ RedisRefusal::NotRead(_)) => {
+                        return refuse(self, "policy", denied(refusal.to_string()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        let ask = decision == Decision::Ask && !self.granted(session, &call.handle, now);
+        if ask && self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
+        }
+        self.touch(now);
+        let handle = call.handle.clone();
+        let detail = call.query.clone();
+        let job = Prepared::Db(Box::new(DbJob {
+            secret,
+            call,
+            timeout,
+            scrubber: self.scrubber(),
+            audit: self.audit.clone(),
+            started: now,
+            decision: if decision == Decision::Ask {
+                "approved"
+            } else {
+                "auto"
+            },
+            role_checks: self.role_checks.clone(),
+        }));
+        if !ask {
+            return job;
+        }
+        let ask = Ask {
+            tool: "db_query",
+            ask: vec![handle.clone()],
+            handles: handle,
+            summary,
+            detail,
+            cwd: None,
+        };
+        self.queue(ask, job, session, now)
+    }
+
     fn granted(&self, session: Option<&SessionInfo>, handle: &str, now: Instant) -> bool {
         session.is_some_and(|session| {
             self.grants
@@ -665,6 +774,37 @@ impl Daemon {
             wait: self.settings.approval_wait,
             notice,
         }))
+    }
+
+    /// Drops what was decided about a handle that was added, changed or
+    /// removed: its grants, its role check, and the requests waiting on it,
+    /// which hold its old value and policy and so may not run.
+    fn handle_changed(&mut self, name: &str, now: Instant) {
+        self.grants.retain(|g| g.handle != name);
+        self.role_checks.forget(name);
+        let (stale, kept) = std::mem::take(&mut self.approvals)
+            .into_iter()
+            .partition(|p: &Pending| p.handles.split(',').any(|h| h == name));
+        self.approvals = kept;
+        for pending in stale {
+            self.record_unanswered(&pending, "withdrawn", "handle_changed", now);
+            self.ended.insert(
+                pending.id,
+                agent_error(
+                    AgentErrorCode::PolicyDenied,
+                    format!("{name} changed while the request waited; send it again"),
+                ),
+            );
+            while self.ended.len() > MAX_PENDING {
+                self.ended.pop_first();
+            }
+        }
+    }
+
+    /// Why a request stopped waiting without a decision, if it was
+    /// withdrawn; `None` means the vault locked.
+    pub fn take_ended(&mut self, id: u64) -> Option<AgentResponse> {
+        self.ended.remove(&id)
     }
 
     /// Ends the wait for a request nobody answered, and returns its reply.
@@ -744,6 +884,13 @@ impl Daemon {
         }
         // The request may have given up already; then nothing is waiting.
         let _ = pending.reply.send(verdict);
+        // The handles' policy changed, so what else waits on them may not
+        // be approved under the old one.
+        if verdict == Verdict::DenyAlways {
+            for handle in &pending.ask {
+                self.handle_changed(handle, now);
+            }
+        }
         Ok(warnings)
     }
 
@@ -879,6 +1026,9 @@ impl Daemon {
                         if let Some(name) = added {
                             self.handle_requests.retain(|r| r.request.name != name);
                         }
+                        if let Some(name) = &handle {
+                            self.handle_changed(name, now);
+                        }
                         done(warnings)
                     })
             }
@@ -918,6 +1068,7 @@ impl Daemon {
         self.scrubber = None;
         self.sessions.clear();
         self.grants.clear();
+        self.role_checks.clear();
         let now = Instant::now();
         for pending in std::mem::take(&mut self.approvals) {
             self.record_unanswered(&pending, "locked", "vault_locked", now);
@@ -972,6 +1123,7 @@ impl Daemon {
                 handles: vault.secrets().iter().map(Secret::info).collect(),
                 approvals,
                 handle_requests: self.handle_requests.clone(),
+                role_warnings: self.role_checks.warnings(),
             },
         }
     }
@@ -1308,9 +1460,16 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
                 }
             }
         }
-        SecretValue::Postgres { url } | SecretValue::Redis { url } => {
-            if url.expose().is_empty() {
-                return invalid("the connection URL is empty");
+        SecretValue::Postgres { url } => {
+            let scheme = url::Url::parse(url.expose()).map(|u| u.scheme().to_owned());
+            if !matches!(scheme.as_deref(), Ok("postgres" | "postgresql")) {
+                return invalid("a postgres handle needs a postgres:// or postgresql:// URL");
+            }
+        }
+        SecretValue::Redis { url } => {
+            let scheme = url::Url::parse(url.expose()).map(|u| u.scheme().to_owned());
+            if !matches!(scheme.as_deref(), Ok("redis" | "rediss")) {
+                return invalid("a redis handle needs a redis:// or rediss:// URL");
             }
         }
         SecretValue::Env { vars } => {

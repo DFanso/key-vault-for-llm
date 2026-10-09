@@ -207,7 +207,7 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 |---|---|---|
 | `list_handles` | — | handles with kind, description, constraints |
 | `http_request` | handle, method, url, headers?, body? | status, headers, body (scrubbed, body capped at 256 KB) |
-| `db_query` | handle, query (SQL or Redis command) | rows as JSON (scrubbed, capped) |
+| `db_query` | handle, query (SQL or Redis command), timeout? | Postgres: one result per statement, values as text; Redis: the reply as JSON (scrubbed, capped at 256 KB) |
 | `db_connect` | handle, ttl? | local connection URL with a lease token |
 | `exec` | handles[], argv[], cwd?, timeout? | exit code, stdout, stderr (scrubbed) |
 | `request_handle` | name, kind, description?, reason?, header?/template?/query_param?, base_url?, allowed_hosts?, env_vars?, allowed_cmds? | confirmation that the request waits in `kv tui` |
@@ -275,6 +275,27 @@ A notification announces each request.
     scrubber, so responses and errors never reveal the address.
 - **`db_query`**: the daemon connects itself (`tokio-postgres` / `redis`) and
   returns rows. Preferred path for agents.
+  - One connection per query. Postgres uses the simple query protocol, so a
+    query may hold several statements and every value comes back as text
+    (`null` for NULL), one result per statement with its row count. Redis
+    takes one command line, split as `redis-cli` splits it, and returns the
+    reply as JSON (maps as `[key, value]` pairs; a number that matches a
+    secret comes back as the scrubbed string).
+  - The timeout defaults to 30 s and may be at most 300 s; Postgres also gets
+    it as `statement_timeout`, so the server stops an abandoned query.
+    Results are cut at 256 KB and marked `truncated`. A Redis reply, or one
+    Postgres row, is held in memory whole before it is cut.
+  - Commands that hold or change the connection (`SUBSCRIBE` and friends,
+    `MONITOR`, `AUTH`, `HELLO`, `QUIT`, `RESET`, `SYNC`) are refused for every
+    Redis handle.
+  - TLS certificates are always verified against the platform trust store,
+    whatever `sslmode` says (`sslmode=disable` still turns TLS off). A
+    Postgres URL that names no `sslmode` and a host other than loopback or a
+    Unix socket gets `sslmode=require`, since `prefer` can be downgraded to
+    plain text by an attacker on the network.
+  - Connection URLs must use `postgres://`/`postgresql://` or
+    `redis://`/`rediss://`. The host is scrubbed like the password unless it
+    is loopback, and errors are scrubbed, since they can quote the query.
 - **`db_connect`**: starts a loopback proxy on a random port and returns e.g.
   `postgres://kv:<lease-token>@127.0.0.1:41823/app`. The lease token is
   random, single-lease and expires with the TTL. The proxy authenticates the
@@ -309,10 +330,24 @@ A notification announces each request.
   `default_transaction_read_only=on`, and statements that change it
   (`SET ... transaction_read_only`, `BEGIN READ WRITE`, `SET SESSION
   CHARACTERISTICS`) are rejected in the simple query protocol and in `db_query`.
-  The real guarantee is a read-only role: kv checks the role's privileges when
-  the secret is added (via the unlocked daemon) and again on first use after
-  each unlock, and warns in the `kv add` output and the TUI when a `read_only`
-  secret uses a role with write access.
+  In `db_query` the check reads comments as spaces and keeps quoted text, and
+  refuses any query mentioning `read_only`, `read write`, `characteristics`,
+  `set_config`, `default_transaction` or `U&` escapes, and `DO` blocks, which
+  can build such a statement at run time. It also refuses statements that end
+  the transaction (`COMMIT`, `END`, `ROLLBACK`, `ABORT`, `PREPARE
+  TRANSACTION`) and `CALL`: a function such as `query_to_xml` can run a
+  `set_config` built from string pieces, which only takes effect in the next
+  transaction. The checks run before approval.
+  The real guarantee is a read-only role: kv checks the role's privileges
+  (superuser; membership in `pg_write_server_files` or
+  `pg_execute_server_program`; INSERT or UPDATE on any column, or DELETE or
+  TRUNCATE, of any table, view or foreign table; or CREATE on any schema;
+  outside the system schemas) when the secret is added and again on
+  first use after each unlock, and warns in the `kv add` output, the query
+  result and the TUI when a `read_only` secret uses a role with write access.
+  `kv add` runs the check itself, with the URL it just read, so a slow
+  database never holds up the daemon; `kv tui` relies on the first-use
+  check.
 
 ## 5. Scrubbing, unlock, approval, audit, errors
 
@@ -372,7 +407,11 @@ A notification announces each request.
 - Handles tab: add, edit (description, or a new value of the same kind;
   blank secret fields keep the old value, and an http value without a base
   URL keeps the handle's), change policy, remove after a yes. Secret fields
-  are drawn as dots.
+  are drawn as dots. A read-only handle whose role can write is marked.
+- Adding, changing or removing a handle ends its "allow for session" grants
+  and its role check, and withdraws requests waiting on it, since they hold
+  its old value and policy; the agent gets `policy_denied` saying the handle
+  changed, and the request is audited as `withdrawn` / `handle_changed`.
 - Audit tab: the newest 200 entries, read from the end of `audit.jsonl` by
   the TUI itself, with control characters replaced.
 
@@ -419,8 +458,11 @@ or unscrubbed paths.
     upstream, host allow-list, redirect auth stripping, echoed key scrubbed.
   - Exec: test helper binary prints the injected secret raw, base64 and hex;
     output must be scrubbed.
-  - Postgres and Redis via `testcontainers` (Linux CI only), including
-    read-only enforcement.
+  - Postgres and Redis on real servers (Linux CI only, as GitHub Actions
+    service containers), including read-only enforcement. The tests read
+    `KV_TEST_POSTGRES_URL` and `KV_TEST_REDIS_URL` and skip without them,
+    unless `KV_REQUIRE_DB_TESTS` is set, as CI sets it; locally any server
+    will do.
   - Security: agent socket rejects control messages; control messages without
     token rejected; unlock backoff; decoder fuzzing; approval timeout fails
     closed.

@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use kv::audit::Audit;
-use kv::broker::{ExecJob, HttpJob};
+use kv::broker::{DbJob, ExecJob, HttpJob};
 use kv::daemon::{Daemon, Prepared, Settings, Waiting};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse,
-    ExecCall, HttpCall, Overview, SessionInfo, Verdict,
+    DbCall, ExecCall, HttpCall, Overview, SessionInfo, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 use tempfile::TempDir;
@@ -76,6 +76,7 @@ impl Fixture {
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
             Prepared::Exec(_) => panic!("unexpected exec job"),
+            Prepared::Db(_) => panic!("unexpected db job"),
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -86,6 +87,17 @@ impl Fixture {
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
             Prepared::Http(_) => panic!("unexpected http job"),
+            Prepared::Db(_) => panic!("unexpected db job"),
+            Prepared::Wait(_) => panic!("unexpected wait for approval"),
+        }
+    }
+
+    pub fn db(&mut self, call: DbCall) -> Result<DbJob, (AgentErrorCode, String)> {
+        match self.prepare(AgentRequest::DbQuery(call)) {
+            Prepared::Db(job) => Ok(*job),
+            Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
+            Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
+            Prepared::Http(_) | Prepared::Exec(_) => panic!("unexpected job"),
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -101,7 +113,9 @@ impl Fixture {
         match self.daemon.prepare_in(session, request, now) {
             Prepared::Wait(waiting) => *waiting,
             Prepared::Reply(reply) => panic!("expected a wait, got {reply:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) => panic!("expected a wait, got a job"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) => {
+                panic!("expected a wait, got a job")
+            }
         }
     }
 
@@ -245,5 +259,41 @@ pub fn session(id: &str) -> SessionInfo {
     SessionInfo {
         id: id.into(),
         client: "test agent".into(),
+    }
+}
+
+pub fn postgres(name: &str, url: &str, read_only: bool, mode: Mode) -> Secret {
+    secret(
+        name,
+        SecretValue::Postgres {
+            url: SecretText::new(url),
+        },
+        Policy {
+            mode,
+            read_only,
+            ..Policy::default()
+        },
+    )
+}
+
+pub fn redis(name: &str, url: &str, read_only: bool, mode: Mode) -> Secret {
+    secret(
+        name,
+        SecretValue::Redis {
+            url: SecretText::new(url),
+        },
+        Policy {
+            mode,
+            read_only,
+            ..Policy::default()
+        },
+    )
+}
+
+pub fn query(handle: &str, query: &str) -> DbCall {
+    DbCall {
+        handle: handle.into(),
+        query: query.into(),
+        timeout_secs: None,
     }
 }

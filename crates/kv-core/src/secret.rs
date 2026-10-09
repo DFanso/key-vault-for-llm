@@ -164,8 +164,9 @@ impl Secret {
     }
 
     /// Every string that must never appear in output: the token or URL, for
-    /// connection URLs the password both as written and percent-decoded, and
-    /// for an http `base_url` the URL and its host.
+    /// connection URLs the password both as written and percent-decoded and
+    /// the host unless it is loopback, and for an http `base_url` the URL
+    /// and its host.
     pub fn sensitive_values(&self) -> Vec<Zeroizing<String>> {
         let mut out = Vec::new();
         match &self.value {
@@ -185,7 +186,13 @@ impl Secret {
             }
             SecretValue::Postgres { url } | SecretValue::Redis { url } => {
                 out.push(Zeroizing::new(url.expose().to_owned()));
-                if let Ok(parsed) = url::Url::parse(url.expose())
+                let parsed = url::Url::parse(url.expose()).ok();
+                if let Some(host) = parsed.as_ref().and_then(url::Url::host)
+                    && !is_loopback(&host)
+                {
+                    out.push(Zeroizing::new(host.to_string()));
+                }
+                if let Some(parsed) = &parsed
                     && let Some(password) = parsed.password()
                 {
                     out.push(Zeroizing::new(password.to_owned()));
@@ -200,6 +207,22 @@ impl Secret {
             }
         }
         out
+    }
+}
+
+/// `localhost` and loopback addresses say nothing about where a database
+/// lives, and scrubbing them would mangle ordinary output. In `postgres://`
+/// and `redis://` URLs an IPv4 address arrives as a domain name.
+fn is_loopback(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => {
+            name.eq_ignore_ascii_case("localhost")
+                || name
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
     }
 }
 

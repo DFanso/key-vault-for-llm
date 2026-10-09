@@ -405,3 +405,52 @@ async fn an_agent_asks_for_a_handle_it_does_not_have() {
     assert!(requests[0].client.is_some());
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_agent_queries_a_database_through_mcp() {
+    let password = "pg-mcp-password-0123";
+    let home = Home::new();
+    home.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    // Port 1: nothing listens, so the query fails upstream.
+    home.kv(
+        &[
+            "add",
+            "pg",
+            "--kind",
+            "postgres",
+            "--read-only",
+            "true",
+            "--mode",
+            "auto",
+        ],
+        &format!("{PASS}\npostgres://app:{password}@127.0.0.1:1/app\n"),
+    );
+    let project = TempDir::new().unwrap();
+    let client = home.mcp(project.path()).await;
+    let tools: Vec<String> = client
+        .list_all_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(tools.contains(&"db_query".to_owned()), "{tools:?}");
+
+    let (failed, text) = call(
+        &client,
+        "db_query",
+        serde_json::json!({"handle": "pg", "query": "BEGIN READ WRITE"}),
+    )
+    .await;
+    assert!(failed && text.starts_with("policy_denied"), "{text}");
+
+    let (failed, text) = call(
+        &client,
+        "db_query",
+        serde_json::json!({"handle": "pg", "query": "select 1", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(failed && text.starts_with("upstream_error"), "{text}");
+    assert!(!text.contains(password), "{text}");
+    client.cancel().await.unwrap();
+}

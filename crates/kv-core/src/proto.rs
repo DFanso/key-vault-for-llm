@@ -34,6 +34,7 @@ pub enum AgentRequest {
     Status,
     HttpRequest(HttpCall),
     Exec(ExecCall),
+    DbQuery(DbCall),
     /// Asks the user to add a handle. Answered at once; the user finishes
     /// it in `kv tui`.
     RequestHandle(HandleRequest),
@@ -104,6 +105,18 @@ pub struct ExecCall {
     pub timeout_secs: Option<u64>,
 }
 
+/// One query or Redis command, run by the daemon on its own connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbCall {
+    pub handle: String,
+    /// SQL for `postgres` handles, which may hold several statements; a
+    /// command line such as `HGETALL user:1` for `redis` handles.
+    pub query: String,
+    /// Defaults to 30 seconds; at most 300.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentResponse {
@@ -115,6 +128,8 @@ pub enum AgentResponse {
     },
     Http(HttpReply),
     Exec(ExecReply),
+    Rows(RowsReply),
+    Redis(RedisReply),
     /// The handle request is waiting for the user in `kv tui`.
     Requested {
         name: String,
@@ -143,6 +158,34 @@ pub struct ExecReply {
     pub timed_out: bool,
     pub stdout: String,
     pub stderr: String,
+    pub truncated: bool,
+}
+
+/// What a Postgres query returned, scrubbed: one result per statement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowsReply {
+    pub results: Vec<ResultSet>,
+    /// Rows were left out to stay under `MAX_OUTPUT_LEN`.
+    pub truncated: bool,
+    /// Such as a read-only handle whose role can write.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Values in Postgres's text format; `None` is NULL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultSet {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    /// From the command tag, for statements that report a count.
+    pub rows_affected: Option<u64>,
+}
+
+/// A Redis reply as JSON, scrubbed: strings, numbers, null, and arrays;
+/// maps become arrays of `[key, value]` pairs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisReply {
+    pub value: serde_json::Value,
     pub truncated: bool,
 }
 
@@ -315,6 +358,10 @@ pub struct Overview {
     pub approvals: Vec<Approval>,
     #[serde(default)]
     pub handle_requests: Vec<RequestedHandle>,
+    /// Read-only Postgres handles whose role turned out to have write
+    /// access, by handle name.
+    #[serde(default)]
+    pub role_warnings: BTreeMap<String, String>,
 }
 
 /// A handle request waiting for the user. Agent text has been made safe to
