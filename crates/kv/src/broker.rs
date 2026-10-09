@@ -16,7 +16,9 @@ use crate::audit::Audit;
 pub mod db;
 pub mod exec;
 pub mod http;
+pub mod net;
 mod process;
+pub mod resp;
 
 pub use db::RoleChecks;
 
