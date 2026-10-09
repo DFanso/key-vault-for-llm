@@ -447,10 +447,14 @@ impl PgTarget {
         let mut hosts = Vec::new();
         for (i, host) in config.get_hosts().iter().enumerate() {
             let port = ports.get(i).or(ports.first()).copied().unwrap_or(5432);
-            if let Host::Tcp(name) = host {
-                let address = addrs.get(i).map_or_else(|| name.clone(), |a| a.to_string());
-                hosts.push((address, name.clone(), port));
-            }
+            let name = match host {
+                Host::Tcp(name) => name,
+                // Only Unix has socket hosts, and a lease needs TCP.
+                #[cfg(unix)]
+                Host::Unix(_) => continue,
+            };
+            let address = addrs.get(i).map_or_else(|| name.clone(), |a| a.to_string());
+            hosts.push((address, name.clone(), port));
         }
         if config.get_hosts().is_empty() {
             for (i, addr) in addrs.iter().enumerate() {
