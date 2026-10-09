@@ -5,6 +5,7 @@ pub mod broker;
 pub mod cli;
 pub mod client;
 pub mod daemon;
+pub mod device;
 pub mod frame;
 pub mod ipc;
 pub mod mcp;
