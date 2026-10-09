@@ -91,6 +91,8 @@ fn commands_must_be_arrays_of_strings() {
     assert!(parse_command(b"GET k\r\n").is_err());
     assert!(parse_command(b"*1\r\n:1\r\n").is_err());
     assert!(parse_command(b"*0\r\n").is_err());
+    // More arguments than Redis takes, refused before any arrive.
+    assert!(parse_command(b"*1048577\r\n").is_err());
     assert_eq!(
         encode_command(&[b"SET".to_vec(), b"a b".to_vec()]),
         b"*2\r\n$3\r\nSET\r\n$3\r\na b\r\n"
@@ -148,4 +150,31 @@ async fn json_stops_reading_at_the_budget() {
         .unwrap()
         .unwrap_err();
     assert_eq!(error, "ERR wrong [kv:cache]");
+}
+
+#[tokio::test]
+async fn commands_come_off_the_buffer_up_to_a_limit() {
+    let two = b"*2\r\n$3\r\nGET\r\n$1\r\nk\r\n*1\r\n$4\r\nPING\r\n";
+    let mut conn = Buffered::new(&two[..]);
+    let first = next_command(&mut conn, 64).await.unwrap().unwrap();
+    assert_eq!(first, [b"GET".to_vec(), b"k".to_vec()]);
+    let second = next_command(&mut conn, 64).await.unwrap().unwrap();
+    assert_eq!(second, [b"PING".to_vec()]);
+    assert_eq!(next_command(&mut conn, 64).await.unwrap(), None);
+
+    let mut big = b"*2\r\n$3\r\nSET\r\n$100\r\n".to_vec();
+    big.extend([b'x'; 100]);
+    big.extend(b"\r\n");
+    let error = next_command(&mut Buffered::new(&big[..]), 64)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("larger than kv accepts"),
+        "{error}"
+    );
+    assert!(
+        next_command(&mut Buffered::new(&big[..]), 1024)
+            .await
+            .is_ok()
+    );
 }

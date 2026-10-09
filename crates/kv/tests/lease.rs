@@ -231,3 +231,20 @@ async fn a_lease_stops_answering_when_it_expires_or_the_vault_locks() {
     f.control(ControlCommand::Lock);
     assert!(closes(port(&long.url)).await);
 }
+
+#[tokio::test]
+async fn a_redis_lease_closes_on_a_big_command_before_login() {
+    let mut f = Fixture::new();
+    f.add(redis("cache", REDIS_URL, false, Mode::Auto));
+    let reply = start(&mut f, lease("cache")).await;
+    let mut client = TcpStream::connect(("127.0.0.1", port(&reply.url)))
+        .await
+        .unwrap();
+    let mut big = b"*2\r\n$4\r\nPING\r\n$20000\r\n".to_vec();
+    big.extend([b'x'; 20000]);
+    big.extend(b"\r\n");
+    client.write_all(&big).await.unwrap();
+    let mut answer = String::new();
+    client.read_to_string(&mut answer).await.unwrap();
+    assert_eq!(answer, "", "closed without an answer");
+}

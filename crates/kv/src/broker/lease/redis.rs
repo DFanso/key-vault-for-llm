@@ -9,12 +9,16 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, watch};
 
 use super::{HANDSHAKE_TIMEOUT, Lease, UPSTREAM_TIMEOUT, token_matches};
-use crate::broker::net::{Buffered, Upstream};
+use crate::broker::net::{Buffered, MAX_WIRE_MESSAGE, Upstream};
 use crate::broker::resp::{
     self, Frame, RedisTarget, Token, encode, encode_command, next_command, next_token, scrub_token,
 };
 
 type ClientRead = Buffered<OwnedReadHalf>;
+
+/// The largest command kv reads before the client logs in, as Redis limits
+/// clients that have not authenticated.
+const LOGIN_LIMIT: usize = 16 * 1024;
 type ClientWrite = BufWriter<OwnedWriteHalf>;
 
 /// What the next answer to the client is, in the order commands came.
@@ -93,7 +97,7 @@ async fn log_in(
 ) -> Result<Option<Vec<Vec<u8>>>, &'static str> {
     const WRONG: &[u8] = b"-WRONGPASS invalid username-password pair or user is disabled.\r\n";
     loop {
-        let args = match next_command(client).await {
+        let args = match next_command(client, LOGIN_LIMIT).await {
             Ok(Some(args)) => args,
             Ok(None) | Err(_) => return Err("closed"),
         };
@@ -182,7 +186,7 @@ async fn client_to_server(
     slots: mpsc::Sender<Slot>,
 ) -> &'static str {
     loop {
-        let args = match next_command(client).await {
+        let args = match next_command(client, 2 * MAX_WIRE_MESSAGE).await {
             Ok(Some(args)) => args,
             Ok(None) | Err(_) => return "closed",
         };

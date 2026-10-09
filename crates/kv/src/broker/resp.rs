@@ -290,21 +290,34 @@ pub async fn next_token<R: AsyncRead + Unpin>(conn: &mut Buffered<R>) -> io::Res
     }
 }
 
-/// Reads one command as clients send it: an array of strings. `None` at
-/// the end of the stream.
+/// The most arguments a command may have, as in Redis.
+pub const MAX_ARGS: usize = 1024 * 1024;
+
+/// Reads the next command, taking each argument off the buffer as it
+/// arrives so a command sent in many pieces is parsed once. `None` at the
+/// end of the stream; a command larger than `limit` bytes is an error.
 pub async fn next_command<R: AsyncRead + Unpin>(
     conn: &mut Buffered<R>,
+    limit: usize,
 ) -> io::Result<Option<Command>> {
+    let mut command = Partial::default();
+    let mut size = 0;
     loop {
-        if let Some((args, used)) = parse_command(conn.data()).map_err(io::Error::other)? {
+        while let Some((token, used)) = parse_token(conn.data()).map_err(io::Error::other)? {
             conn.consume(used);
-            return Ok(Some(args));
+            size += used;
+            if size > limit {
+                return Err(io::Error::other("a command is larger than kv accepts"));
+            }
+            if command.take(token).map_err(io::Error::other)? {
+                return Ok(Some(command.args));
+            }
         }
-        if conn.data().len() > 2 * MAX_WIRE_MESSAGE {
+        if size + conn.data().len() > limit {
             return Err(io::Error::other("a command is larger than kv accepts"));
         }
         if !conn.fill().await? {
-            return match conn.data().is_empty() {
+            return match command.len.is_none() && conn.data().is_empty() {
                 true => Ok(None),
                 false => Err(io::ErrorKind::UnexpectedEof.into()),
             };
@@ -312,35 +325,54 @@ pub async fn next_command<R: AsyncRead + Unpin>(
     }
 }
 
-/// A command's arguments, the command name first.
 pub type Command = Vec<Vec<u8>>;
 
-/// A command from the front of `data`, with the bytes it took.
+/// Reads one command from the front of `data`, with the bytes it took;
+/// `None` until all of it has arrived.
 pub fn parse_command(data: &[u8]) -> Result<Option<(Command, usize)>, String> {
-    let Some((header, mut used)) = parse_token(data)? else {
-        return Ok(None);
-    };
-    let Token::Aggregate { kind: b'*', len } = header else {
-        return Err(
-            "kv takes commands as arrays of strings, as redis-cli and client libraries send them"
-                .into(),
-        );
-    };
-    if len == 0 {
-        return Err("the command is empty".into());
-    }
-    let mut args = Vec::new();
-    for _ in 0..len {
-        match parse_token(&data[used..])? {
-            None => return Ok(None),
-            Some((Token::Bulk { kind: b'$', data }, n)) => {
-                args.push(data);
-                used += n;
-            }
-            Some(_) => return Err("command arguments must be strings".into()),
+    let mut command = Partial::default();
+    let mut used = 0;
+    while let Some((token, n)) = parse_token(&data[used..])? {
+        used += n;
+        if command.take(token)? {
+            return Ok(Some((command.args, used)));
         }
     }
-    Ok(Some((args, used)))
+    Ok(None)
+}
+
+/// A command read so far.
+#[derive(Default)]
+struct Partial {
+    len: Option<usize>,
+    args: Command,
+}
+
+impl Partial {
+    /// Adds the next token; `true` once the command is complete.
+    fn take(&mut self, token: Token) -> Result<bool, String> {
+        match (self.len, token) {
+            (None, Token::Aggregate { kind: b'*', len }) => {
+                if len == 0 {
+                    return Err("the command is empty".into());
+                }
+                if len > MAX_ARGS {
+                    return Err("a command has more arguments than kv accepts".into());
+                }
+                self.len = Some(len);
+                Ok(false)
+            }
+            (None, _) => Err(
+                "kv takes commands as arrays of strings, as redis-cli and client libraries send them"
+                    .into(),
+            ),
+            (Some(len), Token::Bulk { kind: b'$', data }) => {
+                self.args.push(data);
+                Ok(self.args.len() == len)
+            }
+            (Some(_), _) => Err("command arguments must be strings".into()),
+        }
+    }
 }
 
 pub fn encode_command(args: &[Vec<u8>]) -> Vec<u8> {
