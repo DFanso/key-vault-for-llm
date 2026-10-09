@@ -1,5 +1,12 @@
 # key-vault-for-llm
 
+[![CI](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20server-6e40c9)](https://modelcontextprotocol.io)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#what-kv-protects-against)
+[![Postgres and Redis](https://img.shields.io/badge/databases-Postgres%20%7C%20Redis-336791?logo=postgresql&logoColor=white)](#databases)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 A local secrets broker for AI coding agents. Agents get named handles to
 secrets (`prod-db`, `openrouter`, `github`) and the broker does the
 authenticated work, so API keys, database URLs and other credentials never
@@ -9,6 +16,8 @@ Status: agents can make HTTP requests, run programs, and query or connect to
 Postgres and Redis with your secrets over MCP, and `kv tui` approves
 `--mode ask` requests as they arrive. Touch ID and Windows Hello unlock and
 prebuilt binaries come next.
+
+![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
 ## Setup
 
@@ -109,7 +118,7 @@ kv tui
 Unlock with the passphrase once; the TUI then holds a session token that
 works until the vault locks. On the Approvals tab each waiting request shows
 the agent's name (as the agent reports it), the tool, the handles and what it
-asked for:
+asked for (the first screenshot above):
 
 - `a` allow once
 - `s` allow the same handles for this agent session until the handle's
@@ -122,6 +131,10 @@ their policy (`p`). Secret values are typed into hidden fields and never shown
 again; leave one blank when editing to keep it. The Audit tab shows the
 newest entries of the audit log. `L` locks the vault, `q` quits.
 
+![The Handles tab, with an agent's request for a new handle at the top](docs/images/tui-handles.svg)
+
+![The Audit tab: queries, a lease, a run program and a refused host](docs/images/tui-audit.svg)
+
 ### When the agent needs a key you have not added
 
 Agents cannot add secrets: no tool takes a value. Instead an agent calls
@@ -133,6 +146,8 @@ URL if the agent asked for one, check the hosts (at most 4, in plain ASCII) and
 save. Programs an `env` handle may run are shown as a hint rather than filled
 in, since one could be a shell; type the ones you allow. `x` dismisses the
 request. At most 16 wait at once; they survive a lock but not a daemon restart.
+
+![The New handle form, filled in from the agent's request](docs/images/tui-request.svg)
 
 ## Day to day
 
@@ -182,3 +197,14 @@ it (for example by reading process memory on platforms that allow it). A
 program you let a handle run does receive the secret.
 
 Single-user, for macOS, Linux and Windows, written in Rust.
+
+The screenshots are real `kv tui` captures from a demo vault, with made-up
+handles.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option. Unless you explicitly state
+otherwise, any contribution you intentionally submit for inclusion in this
+work, as defined in the Apache-2.0 license, is dual licensed as above, without
+any additional terms or conditions.
