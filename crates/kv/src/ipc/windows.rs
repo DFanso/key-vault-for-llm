@@ -206,24 +206,6 @@ unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn pipes_owned_by_another_account_are_refused() {
-        let endpoint = Endpoint {
-            name: format!(r"\\.\pipe\kv-test-owner-{}", std::process::id()),
-        };
-        let _listener = bind(&endpoint).unwrap();
-        let client = open(&endpoint).await.unwrap();
-        let me = current_user_sid().unwrap();
-        assert!(ensure_owned_by(&client, &me).is_ok());
-        let error = ensure_owned_by(&client, "S-1-5-18").unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-    }
-}
-
 /// The program the process at the server end of `stream` runs.
 pub fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
     let pipe = stream.as_raw_handle() as HANDLE;
@@ -251,4 +233,22 @@ pub fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
         return Err(error);
     }
     Ok(PathBuf::from(OsString::from_wide(&buffer[..len as usize])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pipes_owned_by_another_account_are_refused() {
+        let endpoint = Endpoint {
+            name: format!(r"\\.\pipe\kv-test-owner-{}", std::process::id()),
+        };
+        let _listener = bind(&endpoint).unwrap();
+        let client = open(&endpoint).await.unwrap();
+        let me = current_user_sid().unwrap();
+        assert!(ensure_owned_by(&client, &me).is_ok());
+        let error = ensure_owned_by(&client, "S-1-5-18").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
 }
