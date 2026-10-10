@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{oneshot, watch};
 
-use super::{HANDSHAKE_TIMEOUT, Lease, UPSTREAM_TIMEOUT, token_matches};
+use super::{EndReason, HANDSHAKE_TIMEOUT, Lease, UPSTREAM_TIMEOUT, token_matches};
 use crate::broker::net::{Buffered, Upstream};
 use crate::broker::pgwire::{
     self, Message, Opening, PgTarget, ReadOnlyGate, error, next_message, next_opening,
@@ -24,7 +24,7 @@ pub(super) async fn serve(
     stream: TcpStream,
     lease: &Lease,
     target: &PgTarget,
-    end: watch::Receiver<()>,
+    end: watch::Receiver<Option<EndReason>>,
 ) -> &'static str {
     let (read, write) = stream.into_split();
     let mut client = Buffered::new(read);
@@ -238,7 +238,7 @@ async fn server_to_client(
     lease: &Lease,
     batches_done: watch::Sender<u64>,
     mut stopped: oneshot::Receiver<String>,
-    end: watch::Receiver<()>,
+    end: watch::Receiver<Option<EndReason>>,
 ) -> &'static str {
     loop {
         let message = tokio::select! {

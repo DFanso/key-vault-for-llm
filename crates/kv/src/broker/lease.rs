@@ -34,45 +34,77 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the server has to accept the login.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The leases that are open. The daemon ends them when the vault locks or
-/// a handle changes, and keeps their scrubber current as secrets change.
+/// Why the daemon ended a lease or a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    Locked,
+    HandleChanged,
+}
+
+impl EndReason {
+    /// Told to the client.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Locked => "the vault locked",
+            Self::HandleChanged => "the handle changed",
+        }
+    }
+
+    /// For the audit log.
+    pub fn outcome(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::HandleChanged => "handle_changed",
+        }
+    }
+}
+
+/// Open entries the daemon ends when the vault locks or a handle changes,
+/// with the scrubber they follow as secrets change. `db_connect` leases and
+/// programs started through `run` each keep one book.
 #[derive(Clone)]
 pub struct Leases {
     book: Arc<Mutex<Book>>,
     scrubber: Arc<watch::Sender<Arc<Scrubber>>>,
+    limit: usize,
 }
 
 #[derive(Default)]
 struct Book {
     next: u64,
-    /// Dropping an entry's sender ends that lease.
-    live: Vec<(u64, String, watch::Sender<()>)>,
+    /// Ending an entry sends its reason, then drops its sender.
+    live: Vec<(u64, String, watch::Sender<Option<EndReason>>)>,
 }
 
 impl Default for Leases {
     fn default() -> Self {
-        Self {
-            book: Arc::default(),
-            scrubber: Arc::new(watch::Sender::new(Arc::new(Scrubber::new([])))),
-        }
+        Self::with_limit(MAX_LEASES)
     }
 }
 
 impl Leases {
+    /// A book that holds at most `limit` entries at once.
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            book: Arc::default(),
+            scrubber: Arc::new(watch::Sender::new(Arc::new(Scrubber::new([])))),
+            limit,
+        }
+    }
+
     fn book(&self) -> std::sync::MutexGuard<'_, Book> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A place for a new lease on `handle`; `None` when `MAX_LEASES` are
-    /// open.
+    /// A place for a new entry on `handle`; `None` when the book is full.
     pub fn open(&self, handle: &str) -> Option<LeaseTicket> {
         let mut book = self.book();
-        if book.live.len() >= MAX_LEASES {
+        if book.live.len() >= self.limit {
             return None;
         }
         book.next += 1;
         let id = book.next;
-        let (sender, end) = watch::channel(());
+        let (sender, end) = watch::channel(None);
         book.live.push((id, handle.to_owned(), sender));
         Some(LeaseTicket {
             id,
@@ -82,11 +114,21 @@ impl Leases {
     }
 
     pub fn end_handle(&self, handle: &str) {
-        self.book().live.retain(|(_, h, _)| h != handle);
+        self.end_where(EndReason::HandleChanged, |h| h == handle);
     }
 
     pub fn end_all(&self) {
-        self.book().live.clear();
+        self.end_where(EndReason::Locked, |_| true);
+    }
+
+    fn end_where(&self, reason: EndReason, matches: impl Fn(&str) -> bool) {
+        self.book().live.retain(|(_, handle, sender)| {
+            if !matches(handle) {
+                return true;
+            }
+            sender.send_replace(Some(reason));
+            false
+        });
     }
 
     pub fn count(&self) -> usize {
@@ -109,12 +151,20 @@ impl Leases {
 pub struct LeaseTicket {
     id: u64,
     leases: Leases,
-    end: watch::Receiver<()>,
+    end: watch::Receiver<Option<EndReason>>,
 }
 
 impl LeaseTicket {
     pub fn has_ended(&self) -> bool {
         self.end.has_changed().is_err()
+    }
+
+    /// Waits until the daemon ends this entry, and says why.
+    pub async fn ended(&self) -> EndReason {
+        let mut end = self.end.clone();
+        while end.changed().await.is_ok() {}
+        let reason = *end.borrow();
+        reason.unwrap_or(EndReason::Locked)
     }
 }
 
@@ -126,7 +176,7 @@ impl Drop for LeaseTicket {
 }
 
 /// Waits until the lease ends.
-async fn ended(mut end: watch::Receiver<()>) {
+async fn ended(mut end: watch::Receiver<Option<EndReason>>) {
     while end.changed().await.is_ok() {}
 }
 
@@ -308,7 +358,7 @@ async fn serve(
 /// Serves one client. The relays watch for the lease's end themselves, so
 /// a Postgres client is told why; a client still logging in when the lease
 /// ends finds the relay closed the moment it starts.
-async fn connection(stream: TcpStream, lease: Arc<Lease>, end: watch::Receiver<()>) {
+async fn connection(stream: TcpStream, lease: Arc<Lease>, end: watch::Receiver<Option<EndReason>>) {
     let started = Instant::now();
     let _ = stream.set_nodelay(true);
     let outcome = match &lease.target {
