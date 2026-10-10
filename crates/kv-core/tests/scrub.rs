@@ -145,6 +145,68 @@ fn stream_without_secrets_passes_through() {
     assert!(stream.finish().is_empty());
 }
 
+#[test]
+fn stream_emits_a_complete_line_at_once() {
+    let s = Scrubber::new([("openrouter", KEY)]);
+    let mut stream = s.stream();
+    let line = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n";
+    assert_eq!(stream.push(line), line);
+}
+
+#[test]
+fn stream_holds_back_only_a_possible_start_of_a_secret() {
+    let s = Scrubber::new([("openrouter", KEY)]);
+    let mut stream = s.stream();
+    assert_eq!(stream.push(b"token: sk-or"), b"token: ");
+    let mut out = b"token: ".to_vec();
+    out.extend(stream.push(b"-v1-0123456789abcdef done\n"));
+    out.extend(stream.finish());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "token: [kv:openrouter] done\n"
+    );
+}
+
+#[test]
+fn a_secret_split_at_every_position_is_still_caught() {
+    let s = Scrubber::new([("openrouter", KEY)]);
+    let input = format!("a {KEY} b {} c\n", hex::encode(KEY));
+    let bytes = input.as_bytes();
+    for cut in 0..=bytes.len() {
+        let mut stream = s.stream();
+        let mut out = stream.push(&bytes[..cut]);
+        out.extend(stream.push(&bytes[cut..]));
+        out.extend(stream.finish());
+        assert_eq!(out, s.scrub(bytes), "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_stream_can_move_to_a_newer_scrubber() {
+    const OTHER: &str = "pw-0123456789-abcdef";
+    let old = Scrubber::new([("openrouter", KEY)]);
+    let new = Scrubber::new([("openrouter", KEY), ("db", OTHER)]);
+    let mut stream = old.stream();
+    let mut out = stream.push(b"x sk-or");
+    let mut stream = new.resume(stream.into_pending());
+    out.extend(stream.push(format!("-v1-0123456789abcdef and {OTHER}\n").as_bytes()));
+    out.extend(stream.finish());
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "x [kv:openrouter] and [kv:db]\n"
+    );
+}
+
+#[test]
+fn resuming_on_a_scrubber_without_secrets_keeps_the_held_bytes() {
+    let old = Scrubber::new([("openrouter", KEY)]);
+    let empty = Scrubber::new(std::iter::empty::<(&str, &str)>());
+    let mut stream = old.stream();
+    assert_eq!(stream.push(b"sk-or"), b"");
+    let mut stream = empty.resume(stream.into_pending());
+    assert_eq!(stream.push(b"-v1"), b"sk-or-v1");
+}
+
 fn chunked<'a>(input: &'a [u8], cuts: &[usize]) -> Vec<&'a [u8]> {
     let mut points: Vec<usize> = cuts.iter().map(|c| c % (input.len() + 1)).collect();
     points.sort_unstable();
