@@ -205,3 +205,28 @@ fn the_audit_log_names_the_program_but_not_its_arguments() {
         assert!(!line.to_string().contains(SECRET), "{line}");
     }
 }
+
+#[test]
+fn adding_a_server_does_not_suggest_letting_exec_use_it() {
+    let mut f = Fixture::new();
+    let server = run_secret(
+        "srv",
+        &[("SSH_MCP_PASSWORD", SECRET)],
+        &["/usr/local/bin/bunx"],
+        Mode::Auto,
+    );
+    match f.send(
+        Some(PASS),
+        None,
+        ControlCommand::Add {
+            secret: server,
+            replace: false,
+        },
+    ) {
+        ControlResponse::Done { warnings } => assert!(
+            warnings.iter().all(|w| !w.contains("allowed commands")),
+            "{warnings:?}"
+        ),
+        other => panic!("expected done, got {other:?}"),
+    }
+}

@@ -1802,7 +1802,11 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
                 "{name} has no allowed hosts, so every request with it is denied; add one with `kv policy {name} --host <host>`"
             ));
         }
-        SecretValue::Env { .. } if secret.policy.allowed_cmds.is_empty() => {
+        // A server's secrets are meant for its run command alone; suggesting
+        // `--cmd` would let `exec` give them to other programs too.
+        SecretValue::Env { .. }
+            if secret.policy.allowed_cmds.is_empty() && secret.policy.run.is_none() =>
+        {
             warnings.push(format!(
                 "{name} has no allowed commands, so every exec with it is denied; add one with `kv policy {name} --cmd <program>`"
             ));
