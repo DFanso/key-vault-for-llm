@@ -132,12 +132,14 @@ where
         ),
         End::ClientClosed => (None, "client_closed".to_owned()),
     };
+    // Audited before the client hears of the end, as every request is
+    // audited before its reply.
+    record(&job, &program, &outcome, running.elapsed());
     if let Some(last) = last {
         let _ = queue.send(last).await;
     }
     drop(queue);
     let _ = delivery.await;
-    record(&job, &program, &outcome, running.elapsed());
 }
 
 fn launch(job: &RunJob, program: &str) -> Result<(Child, ProcessTree), AgentResponse> {

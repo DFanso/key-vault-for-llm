@@ -325,7 +325,7 @@ async fn locking_stops_servers_and_the_next_call_says_vault_locked() {
     let reveal = json!({"server": "srv", "tool": "reveal"});
     assert!(!call(&client, "call_server_tool", reveal.clone()).await.0);
     home.kv(&["lock"], "");
-    // The daemon records the end once it has told kv mcp.
+    // The daemon records the end as it ends the server.
     let deadline = Instant::now() + Duration::from_secs(20);
     while home.runs("srv", "locked") == 0 {
         assert!(Instant::now() < deadline, "the lock did not end the server");
