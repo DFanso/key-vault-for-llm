@@ -1,7 +1,7 @@
 # kv run and MCP servers through kv — design
 
 Date: 2026-10-09
-Status: design agreed in conversation, written spec pending review
+Status: implemented on feat/run
 
 ## 1. Goal
 
@@ -146,8 +146,9 @@ client, the tool `run`, the handle and the program's file name.
 - Through `kv mcp`, the launch names the agent session, so "allow for
   session" (`s`) is offered as for other tools: later launches of that
   handle from the same session within `grant_ttl` need no approval.
-- `kv run` names no session; the client shows as `kv run`, and only "allow
-  once" (`a`), deny (`d`) and deny-and-set-to-deny (`D`) apply.
+- `kv run` names no session, so the approval reads as from an agent with no
+  session, and only "allow once" (`a`), deny (`d`) and deny-and-set-to-deny
+  (`D`) apply.
 
 Approval is asked only at launch. A running server keeps running after a
 grant expires, until one of the ends in section 3.
@@ -170,8 +171,10 @@ optional `Hello`. The pipeline is the usual one:
    running through kv already; stop one, or ask the user to lock the vault".
 5. Launch, reply `AgentResponse::Started`, relay.
 
-All checks happen before approval, so the user is never asked about a launch
-that would be refused.
+All checks of the policy, the mode, the run command and the limit happen
+before approval, so the user is never asked about a launch the policy would
+refuse. Whether the program exists is checked at launch, after any approval,
+as `exec` does, so the daemon never touches the disk while holding its lock.
 
 ### Launch
 
@@ -241,7 +244,8 @@ A run ends at the first of:
 | The client disconnects | tree killed | — | `client_closed` |
 | The vault locks (`kv lock`, idle lock, `L` in the TUI) | tree killed | `Ended { reason: "the vault locked" }` | `locked` |
 | The handle is changed or removed | tree killed | `Ended { reason: "the handle changed" }` | `handle_changed` |
-| The daemon stops | tree killed | `Ended { reason: "kv stopped" }`, or the connection closes | `daemon_stopped` |
+| `kv stop` (it locks first) | tree killed | `Ended { reason: "the vault locked" }` | `locked` |
+| The daemon dies | tree killed with the daemon's process group or job | the connection closes; `kv run` says "kv stopped" | — |
 
 After the program exits, the daemon finishes reading what is left of its
 stdout and stderr (until both close or the tree is killed), so the last
