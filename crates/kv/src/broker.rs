@@ -23,6 +23,7 @@ pub mod net;
 pub mod pgwire;
 mod process;
 pub mod resp;
+pub mod run;
 
 pub use db::RoleChecks;
 pub use lease::{LeaseTicket, Leases};
