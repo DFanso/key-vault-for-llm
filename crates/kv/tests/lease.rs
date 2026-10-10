@@ -8,7 +8,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
+use kv::broker::Leases;
 use kv::broker::lease;
+use kv::broker::lease::EndReason;
 use kv_core::policy::Mode;
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ConnectCall, ControlCommand, LeaseReply,
@@ -247,4 +249,29 @@ async fn a_redis_lease_closes_on_a_big_command_before_login() {
     let mut answer = String::new();
     client.read_to_string(&mut answer).await.unwrap();
     assert_eq!(answer, "", "closed without an answer");
+}
+
+#[tokio::test]
+async fn a_book_holds_at_most_its_limit() {
+    let book = Leases::with_limit(2);
+    let first = book.open("a").unwrap();
+    let _second = book.open("b").unwrap();
+    assert!(book.open("c").is_none());
+    drop(first);
+    assert!(book.open("c").is_some());
+}
+
+#[tokio::test]
+async fn an_ended_entry_says_why() {
+    let book = Leases::with_limit(4);
+    let changed = book.open("a").unwrap();
+    let locked = book.open("b").unwrap();
+    book.end_handle("a");
+    assert!(changed.has_ended());
+    assert!(!locked.has_ended());
+    assert_eq!(changed.ended().await, EndReason::HandleChanged);
+    book.end_all();
+    assert_eq!(locked.ended().await, EndReason::Locked);
+    assert_eq!(EndReason::Locked.message(), "the vault locked");
+    assert_eq!(EndReason::HandleChanged.outcome(), "handle_changed");
 }

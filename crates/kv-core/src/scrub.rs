@@ -1,5 +1,7 @@
 //! Replaces secret values, and common encodings of them, in tool output.
 
+use std::collections::HashSet;
+
 use aho_corasick::{AhoCorasick, MatchKind};
 use base64::Engine;
 use base64::engine::GeneralPurpose;
@@ -43,6 +45,9 @@ pub struct Scrubber {
     /// `replacements[i]` replaces pattern `i`.
     replacements: Vec<Vec<u8>>,
     max_pattern_len: usize,
+    /// Every proper prefix of every pattern, in ASCII lowercase: the tails a
+    /// stream must hold back, because more input could complete a secret.
+    prefixes: HashSet<Vec<u8>>,
 }
 
 impl Scrubber {
@@ -61,6 +66,13 @@ impl Scrubber {
             }
         }
         let max_pattern_len = patterns.iter().map(Vec::len).max().unwrap_or(0);
+        let mut prefixes = HashSet::new();
+        for pattern in &patterns {
+            let lower = pattern.to_ascii_lowercase();
+            for end in 1..lower.len() {
+                prefixes.insert(lower[..end].to_vec());
+            }
+        }
         let matcher = (!patterns.is_empty()).then(|| {
             AhoCorasick::builder()
                 .match_kind(MatchKind::LeftmostLongest)
@@ -74,6 +86,7 @@ impl Scrubber {
             matcher,
             replacements,
             max_pattern_len,
+            prefixes,
         }
     }
 
@@ -94,12 +107,34 @@ impl Scrubber {
             pending: Vec::new(),
         }
     }
+
+    /// A stream that starts with `pending`, the bytes another stream held
+    /// back (`StreamScrubber::into_pending`), so a long-running stream can
+    /// move to a scrubber with newer secrets without losing them.
+    pub fn resume(&self, pending: Vec<u8>) -> StreamScrubber<'_> {
+        StreamScrubber {
+            scrubber: self,
+            pending,
+        }
+    }
+
+    /// Where the tail that could still grow into a secret starts: the
+    /// longest suffix of `pending` that is a proper prefix of a pattern, or
+    /// `pending.len()` when none is.
+    fn held_from(&self, pending: &[u8]) -> usize {
+        let longest = self.max_pattern_len.saturating_sub(1).min(pending.len());
+        let tail = pending[pending.len() - longest..].to_ascii_lowercase();
+        (1..=longest)
+            .rev()
+            .find(|&len| self.prefixes.contains(&tail[longest - len..]))
+            .map_or(pending.len(), |len| pending.len() - len)
+    }
 }
 
-/// Scrubs output that arrives in chunks. Holds back the last
-/// `longest pattern - 1` bytes so a secret split across chunks is still
-/// caught. The concatenated output equals `Scrubber::scrub` on the whole
-/// input.
+/// Scrubs output that arrives in chunks. Holds back only a tail that could
+/// still grow into a secret, so a secret split across chunks is caught and
+/// everything else goes out at once. The concatenated output equals
+/// `Scrubber::scrub` on the whole input.
 pub struct StreamScrubber<'s> {
     scrubber: &'s Scrubber,
     pending: Vec<u8>,
@@ -108,14 +143,15 @@ pub struct StreamScrubber<'s> {
 impl StreamScrubber<'_> {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
         let Some(ac) = &self.scrubber.matcher else {
-            return chunk.to_vec();
+            let mut out = std::mem::take(&mut self.pending);
+            out.extend_from_slice(chunk);
+            return out;
         };
         self.pending.extend_from_slice(chunk);
-        // Every match starting before `cut` lies entirely inside `pending`.
-        let cut = self
-            .pending
-            .len()
-            .saturating_sub(self.scrubber.max_pattern_len - 1);
+        // A match starting before `cut` lies entirely inside `pending` and
+        // cannot grow into a longer one: that would make the bytes from its
+        // start a proper prefix of a pattern, and so part of the held tail.
+        let cut = self.scrubber.held_from(&self.pending);
         let mut out = Vec::new();
         let mut last = 0;
         for m in ac.find_iter(&self.pending) {
@@ -134,6 +170,11 @@ impl StreamScrubber<'_> {
 
     pub fn finish(self) -> Vec<u8> {
         self.scrubber.scrub(&self.pending)
+    }
+
+    /// The bytes held back so far, neither scrubbed nor emitted.
+    pub fn into_pending(self) -> Vec<u8> {
+        self.pending
     }
 }
 

@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use kv_core::crypto::fill_random;
 use kv_core::proto::{
@@ -23,6 +24,8 @@ use serde::Deserialize;
 
 use crate::client;
 use crate::paths::Paths;
+
+mod servers;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct HttpRequestArgs {
@@ -116,6 +119,35 @@ pub struct RequestHandleArgs {
     allowed_cmds: Vec<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ServerArgs {
+    /// A server name from list_servers.
+    server: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ListServerToolsArgs {
+    /// A server name from list_servers.
+    server: String,
+    /// Case-insensitive text to look for in tool names and descriptions.
+    #[serde(default)]
+    filter: Option<String>,
+    /// Include each matching tool's full description and input schema.
+    #[serde(default)]
+    schemas: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CallServerToolArgs {
+    /// A server name from list_servers.
+    server: String,
+    /// A tool name from list_server_tools.
+    tool: String,
+    /// Arguments matching the tool's input schema.
+    #[serde(default)]
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 #[derive(Clone)]
 pub struct KvServer {
     paths: Paths,
@@ -124,6 +156,7 @@ pub struct KvServer {
     /// Random per `kv mcp` process, so "allow for the session" in `kv tui`
     /// covers this agent and no other.
     session_id: String,
+    servers: Arc<servers::Servers>,
 }
 
 #[tool_router]
@@ -277,6 +310,56 @@ impl KvServer {
             },
         )
     }
+
+    #[tool(
+        description = "List the MCP servers kv can start for you, such as SSH or Dokploy servers that need the user's secrets, with their descriptions and whether each is running in this session. Starts nothing."
+    )]
+    async fn list_servers(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(self.servers.list().await)
+    }
+
+    #[tool(
+        description = "Start a server from list_servers if it is not running, and list its tools: names and the first line of each description. Narrow big servers with filter, then pass schemas: true to get the input schemas of the matches. If the server's handle is in ask mode, starting it waits up to 60 s for the user to approve it in kv tui."
+    )]
+    async fn list_server_tools(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(args): Parameters<ListServerToolsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session = self.session(&peer);
+        Ok(self
+            .servers
+            .list_tools(&args.server, session, args.filter.as_deref(), args.schemas)
+            .await)
+    }
+
+    #[tool(
+        description = "Call a tool on a server from list_servers, starting the server if needed. Returns the tool's own result, with secrets replaced by [kv:<handle>]. Check the tool's input schema with list_server_tools first."
+    )]
+    async fn call_server_tool(
+        &self,
+        peer: Peer<RoleServer>,
+        Parameters(args): Parameters<CallServerToolArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let session = self.session(&peer);
+        Ok(self
+            .servers
+            .call(
+                &args.server,
+                session,
+                args.tool,
+                args.arguments.unwrap_or_default(),
+            )
+            .await)
+    }
+
+    #[tool(description = "Stop a server started in this session.")]
+    async fn stop_server(
+        &self,
+        Parameters(args): Parameters<ServerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self.servers.stop(&args.server).await)
+    }
 }
 
 #[tool_handler(
@@ -284,7 +367,9 @@ impl KvServer {
     instructions = "kv lets you use the user's API keys, tokens and other secrets \
 without seeing them. Call list_handles to see what is available and how each handle may be \
 used, then call http_request, exec, db_query or db_connect with a handle name. Secret values never appear in \
-results; where one would, you see [kv:<handle>]. Handles in ask mode wait for the user to \
+results; where one would, you see [kv:<handle>]. MCP servers that hold the user's secrets, such as SSH or \
+Dokploy servers, are reached with list_servers, then list_server_tools, then call_server_tool; start one only \
+when the user asks for that server. Handles in ask mode wait for the user to \
 approve each use in kv tui; approval_denied means they said no, so do not retry it. If a call \
 fails with vault_locked, ask the user to run `kv unlock`. If you need a secret that has no \
 handle, call request_handle and tell the user; never ask them to paste a secret into the chat."
@@ -340,6 +425,7 @@ pub async fn serve(paths: Paths) -> io::Result<()> {
     let mut id = [0u8; 16];
     fill_random(&mut id);
     let server = KvServer {
+        servers: Arc::new(servers::Servers::new(paths.clone())),
         paths,
         cwd: std::env::current_dir()?,
         session_id: id.iter().map(|b| format!("{b:02x}")).collect(),

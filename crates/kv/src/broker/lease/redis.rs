@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, watch};
 
-use super::{HANDSHAKE_TIMEOUT, Lease, UPSTREAM_TIMEOUT, token_matches};
+use super::{EndReason, HANDSHAKE_TIMEOUT, Lease, UPSTREAM_TIMEOUT, token_matches};
 use crate::broker::net::{Buffered, MAX_WIRE_MESSAGE, Upstream};
 use crate::broker::resp::{
     self, Frame, RedisTarget, Token, encode, encode_command, next_command, next_token, scrub_token,
@@ -35,7 +35,7 @@ pub(super) async fn serve(
     stream: TcpStream,
     lease: &Lease,
     target: &RedisTarget,
-    end: watch::Receiver<()>,
+    end: watch::Receiver<Option<EndReason>>,
 ) -> &'static str {
     let (read, write) = stream.into_split();
     let mut client = Buffered::new(read);
@@ -217,7 +217,7 @@ async fn server_to_client(
     client: &mut ClientWrite,
     lease: &Lease,
     mut queue: mpsc::Receiver<Slot>,
-    end: watch::Receiver<()>,
+    end: watch::Receiver<Option<EndReason>>,
 ) -> &'static str {
     loop {
         let first = tokio::select! {

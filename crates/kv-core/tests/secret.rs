@@ -224,3 +224,33 @@ fn a_database_host_is_scrubbed_unless_it_is_loopback() {
         assert!(all.contains(&value.to_string()), "{value} in {all:?}");
     }
 }
+
+#[test]
+fn handle_info_shows_only_the_program_a_handle_runs() {
+    let secret = Secret {
+        name: "ssh-kycdev".into(),
+        description: String::new(),
+        value: SecretValue::Env {
+            vars: BTreeMap::from([(
+                "SSH_MCP_PASSWORD".to_string(),
+                SecretText::new("hunter2-hunter2"),
+            )]),
+        },
+        policy: Policy {
+            run: Some(vec![
+                "/usr/local/bin/bunx".into(),
+                "-y".into(),
+                "ssh-mcp@1.2.3".into(),
+                "--host=10.0.0.5".into(),
+            ]),
+            ..Policy::default()
+        },
+        created_at: 0,
+        updated_at: 0,
+    };
+    let info = secret.info();
+    assert_eq!(info.runs.as_deref(), Some("bunx"));
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(!json.contains("10.0.0.5"), "{json}");
+    assert!(!json.contains("ssh-mcp"), "{json}");
+}

@@ -4,9 +4,14 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use kv_core::proto::{AgentRequest, AgentResponse, ControlRequest, ControlResponse, SessionInfo};
+use kv_core::proto::{
+    AgentRequest, AgentResponse, ControlRequest, ControlResponse, MAX_RUN_CHUNK, RunCall, RunInput,
+    RunOutput, SessionInfo,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, SimplexStream, WriteHalf};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::frame::{read_frame, write_frame};
 use crate::ipc::{self, ClientStream};
@@ -37,6 +42,110 @@ pub async fn agent(
         write_frame(&mut stream, &AgentRequest::Hello(session.clone())).await?;
     }
     exchange(&mut stream, request).await
+}
+
+/// How a program started with `run_stream` ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunEnd {
+    /// It ended by itself; `signal` is set on Unix when a signal ended it.
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    /// kv ended it, for this reason.
+    Ended(String),
+    /// The connection to the daemon broke first.
+    Lost,
+}
+
+/// A program the daemon started for this client. Write its input to
+/// `stdin` (shutting it down closes the program's stdin), read its
+/// scrubbed output from `stdout` and `stderr`, and learn from `ended` how
+/// it ended. Dropping `guard` closes the connection, which makes the daemon
+/// end the program.
+pub struct RunStream {
+    pub stdin: WriteHalf<SimplexStream>,
+    pub stdout: ReadHalf<SimplexStream>,
+    pub stderr: mpsc::Receiver<Vec<u8>>,
+    pub ended: oneshot::Receiver<RunEnd>,
+    pub guard: RunGuard,
+}
+
+/// Stops the relay tasks, and so closes the connection, when dropped.
+pub struct RunGuard(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// Asks the daemon to start `handle`'s run command, starting the daemon
+/// if needed. `Ok(Err(reply))` is the daemon's refusal.
+pub async fn run_stream(
+    paths: &Paths,
+    session: Option<&SessionInfo>,
+    handle: &str,
+) -> io::Result<Result<RunStream, AgentResponse>> {
+    let mut stream = connect(&paths.agent_endpoint(), true).await?;
+    if let Some(session) = session {
+        write_frame(&mut stream, &AgentRequest::Hello(session.clone())).await?;
+    }
+    let request = AgentRequest::Run(RunCall {
+        handle: handle.to_owned(),
+    });
+    match exchange(&mut stream, &request).await? {
+        AgentResponse::Started => {}
+        refusal => return Ok(Err(refusal)),
+    }
+    let (mut from_daemon, mut to_daemon) = tokio::io::split(stream);
+    let (mut input_reader, stdin) = tokio::io::simplex(MAX_RUN_CHUNK);
+    let (stdout, mut output_writer) = tokio::io::simplex(MAX_RUN_CHUNK);
+    let (stderr_sender, stderr) = mpsc::channel(16);
+    let (end_sender, ended) = oneshot::channel();
+    let input = tokio::spawn(async move {
+        let mut buffer = vec![0; MAX_RUN_CHUNK];
+        loop {
+            let message = match input_reader.read(&mut buffer).await {
+                Ok(0) | Err(_) => RunInput::CloseStdin,
+                Ok(n) => RunInput::Stdin {
+                    data: buffer[..n].to_vec(),
+                },
+            };
+            let closing = message == RunInput::CloseStdin;
+            if write_frame(&mut to_daemon, &message).await.is_err() || closing {
+                return;
+            }
+        }
+    });
+    let output = tokio::spawn(async move {
+        let end = loop {
+            match read_frame::<_, RunOutput>(&mut from_daemon).await {
+                Ok(Some(RunOutput::Stdout { data })) => {
+                    let _ = output_writer.write_all(&data).await;
+                }
+                Ok(Some(RunOutput::Stderr { data })) => {
+                    let _ = stderr_sender.send(data).await;
+                }
+                Ok(Some(RunOutput::Exited { code, signal })) => {
+                    break RunEnd::Exited { code, signal };
+                }
+                Ok(Some(RunOutput::Ended { reason })) => break RunEnd::Ended(reason),
+                Ok(None) | Err(_) => break RunEnd::Lost,
+            }
+        };
+        let _ = output_writer.shutdown().await;
+        let _ = end_sender.send(end);
+    });
+    Ok(Ok(RunStream {
+        stdin,
+        stdout,
+        stderr,
+        ended,
+        guard: RunGuard(vec![input, output]),
+    }))
 }
 
 /// Sends one control request. One that carries a Touch ID or Windows Hello

@@ -30,6 +30,7 @@ fn job_decision(prepared: Prepared) -> &'static str {
         Prepared::Exec(job) => job.decision,
         Prepared::Db(job) => job.decision,
         Prepared::Connect(job) => job.decision,
+        Prepared::Run(job) => job.decision,
         Prepared::Reply(reply) => panic!("expected a job, got {reply:?}"),
         Prepared::Wait(_) => panic!("expected a job, got a wait"),
     }

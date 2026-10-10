@@ -88,6 +88,7 @@ impl Fixture {
             | Prepared::Exec(_)
             | Prepared::Db(_)
             | Prepared::Connect(_)
+            | Prepared::Run(_)
             | Prepared::Wait(_) => panic!("expected a reply, got a job"),
         }
     }

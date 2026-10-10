@@ -124,6 +124,10 @@ pub struct HandleInfo {
     /// never the token itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthPlacement>,
+    /// `env`: the file name of the program the handle's `run` command
+    /// starts, never its arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<String>,
 }
 
 impl Secret {
@@ -160,6 +164,12 @@ impl Secret {
                 }
             ),
             auth,
+            runs: self
+                .policy
+                .run
+                .as_ref()
+                .and_then(|argv| argv.first())
+                .map(|program| crate::policy::program_name(program)),
         }
     }
 

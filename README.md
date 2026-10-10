@@ -47,7 +47,7 @@ kv add prod-db --kind postgres --read-only true   # prompts for the postgres:// 
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
 
-The agent then sees seven tools:
+The agent then sees these tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
@@ -58,6 +58,8 @@ The agent then sees seven tools:
   connection, such as `psql` or a migration tool (see below).
 - `request_handle`: asks you to add a handle it needs (see below).
 - `status`: whether the vault is unlocked.
+- `list_servers`, `list_server_tools`, `call_server_tool` and `stop_server`:
+  MCP servers that need your secrets (see below).
 
 Wherever a secret would appear in a response or in program output, the agent
 sees `[kv:<handle>]` instead, including base64, hex, URL-encoded and
@@ -73,6 +75,47 @@ from everything it gets back:
 ```sh
 kv add dokploy --kind http --base-url --header x-api-key --template '{}' --mode auto
 ```
+
+### MCP servers with secrets
+
+Some MCP servers need a secret of their own, such as an SSH password or a
+Dokploy API key. Instead of writing it into an MCP config file, make the
+server a kv handle: an `env` handle with a `run` command, the exact command
+that starts it.
+
+```sh
+kv add ssh-dev --kind env --var SSH_MCP_PASSWORD --mode auto \
+  --description "dev box over SSH" \
+  --run -- /path/to/bunx -y ssh-mcp@1.2.3 --host=10.0.0.5 --user=root
+kv add dokploy-prod --kind env --var DOKPLOY_URL --var DOKPLOY_API_KEY \
+  --run -- /path/to/bunx -y @dokploy/mcp@0.3.0
+```
+
+The agent finds them with `list_servers`, lists a server's tools with
+`list_server_tools` (narrow big servers with `filter`) and calls one with
+`call_server_tool`. kv starts a server the first time one of its tools is
+needed and keeps it for the agent's session; `stop_server` stops it.
+
+- The server runs in your home directory with the handle's variables set.
+  What it writes is scrubbed, so results show `[kv:<handle>]` where a secret
+  would be.
+- Nothing can change the command or its arguments without your passphrase,
+  and agents see only the program's name (`runs: bunx`), never the arguments.
+- A handle in `--mode ask` waits for you in `kv tui` when the server starts;
+  `s` allows it for the rest of that agent session, until the handle's
+  `grant_ttl`.
+- Locking the vault stops every server; the next call says the vault is
+  locked.
+- A server that needs no secret, such as one that logs in with a key file,
+  can be a handle with a `run` command and no `--var`.
+- The server itself holds the secret, so run only programs you trust, and pin
+  package versions (`ssh-mcp@1.2.3`), since an unpinned `bunx` command runs
+  whatever the registry serves that day.
+
+`kv run <handle>` starts the same command on its own stdin and stdout, for an
+MCP client that should talk to one server directly:
+`claude mcp add ssh-dev -- kv run ssh-dev`. Change a server's command with
+`kv policy <handle> --run -- <command>`.
 
 ### Databases
 

@@ -143,18 +143,25 @@ async fn serve_agent(
         {
             notify::handle_requested(format!("An agent asked you to add {name}; open kv tui."));
         }
-        let response = match prepared {
+        let prepared = match prepared {
             Prepared::Wait(waiting) => {
                 if notify {
                     notify::approval_needed(waiting.notice.clone());
                 }
-                match wait_then_run(&daemon, &http, &mut stream, *waiting).await {
-                    Some(response) => response,
+                match wait_for_decision(&daemon, &mut stream, *waiting).await {
+                    Some(prepared) => prepared,
                     None => return,
                 }
             }
-            prepared => run_job(prepared, &http).await,
+            prepared => prepared,
         };
+        // A run keeps the connection: from here on it carries the program's
+        // input and output.
+        if let Prepared::Run(job) = prepared {
+            broker::run::serve(stream, *job).await;
+            return;
+        }
+        let response = run_job(prepared, &http).await;
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }
@@ -173,18 +180,22 @@ async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
             code: AgentErrorCode::UpstreamError,
             message: "internal error: a request waited twice".into(),
         },
+        // `serve_agent` gives a run its connection before this point.
+        Prepared::Run(_) => AgentResponse::Error {
+            code: AgentErrorCode::UpstreamError,
+            message: "internal error: a run reached the reply path".into(),
+        },
     }
 }
 
-/// Waits for the user's decision without holding the daemon lock, then runs
-/// the job or explains why not. `None` when the agent hung up while it
-/// waited: the request is withdrawn and nothing runs.
-async fn wait_then_run(
+/// Waits for the user's decision without holding the daemon lock. Returns
+/// the job to run, or a reply saying why not; `None` when the agent hung
+/// up while it waited, and the request is withdrawn.
+async fn wait_for_decision(
     daemon: &Shared,
-    http: &reqwest::Client,
     stream: &mut ServerStream,
     waiting: Waiting,
-) -> Option<AgentResponse> {
+) -> Option<Prepared> {
     let Waiting {
         id,
         mut verdict,
@@ -205,7 +216,7 @@ async fn wait_then_run(
                 })
                 .await;
                 if let Ok(Some(response)) = expired {
-                    return Some(response);
+                    return Some(Prepared::Reply(response));
                 }
                 // Decided, or locked, just as the wait ran out.
                 verdict.try_recv().ok()
@@ -221,20 +232,20 @@ async fn wait_then_run(
         }
     };
     Some(match decided {
-        Some(Verdict::AllowOnce | Verdict::AllowSession) => run_job(then, http).await,
-        Some(Verdict::Deny | Verdict::DenyAlways) => AgentResponse::Error {
+        Some(Verdict::AllowOnce | Verdict::AllowSession) => then,
+        Some(Verdict::Deny | Verdict::DenyAlways) => Prepared::Reply(AgentResponse::Error {
             code: AgentErrorCode::ApprovalDenied,
             message: "the user denied the request".into(),
-        },
+        }),
         None => {
             let shared = daemon.clone();
             let ended = tokio::task::spawn_blocking(move || lock(&shared).take_ended(id)).await;
-            ended.ok().flatten().unwrap_or_else(|| AgentResponse::Error {
+            Prepared::Reply(ended.ok().flatten().unwrap_or_else(|| AgentResponse::Error {
                 code: AgentErrorCode::VaultLocked,
                 message:
                     "the vault was locked before the request was approved; ask the user to unlock it"
                         .into(),
-            })
+            }))
         }
     })
 }

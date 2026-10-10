@@ -13,9 +13,10 @@ use kv_core::proto::{
 };
 use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretText, SecretValue};
 use kv_core::vault::device_slots;
+use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
 
-use crate::client;
+use crate::client::{self, RunEnd, RunStream};
 use crate::daemon::{self, Outcome, Settings};
 use crate::device;
 use crate::paths::Paths;
@@ -73,6 +74,13 @@ enum Command {
     Mcp,
     /// Approve agent requests, see handles and lock the vault in a terminal UI
     Tui,
+    /// Start a handle's run command with its variables set, on this
+    /// process's stdin and stdout (for an MCP client that should talk to
+    /// one server directly)
+    Run {
+        /// An env handle with a run command
+        handle: String,
+    },
     /// Run the daemon in the foreground (other commands start it on demand)
     Daemon {
         /// Lock the vault after it has gone unused for this long. Daemons
@@ -172,6 +180,15 @@ struct PolicyArgs {
     /// How long "allow for session" approvals last
     #[arg(long, value_parser = humantime::parse_duration)]
     grant_ttl: Option<Duration>,
+    /// env: the exact command kv run and kv mcp start, given after `--`,
+    /// e.g. --run -- bunx -y ssh-mcp@1.2.3 --host=10.0.0.5
+    #[arg(long, requires = "run_argv")]
+    run: bool,
+    /// env: remove the handle's run command
+    #[arg(long, conflicts_with = "run")]
+    no_run: bool,
+    #[arg(last = true, value_name = "COMMAND", requires = "run")]
+    run_argv: Vec<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -209,6 +226,13 @@ impl PolicyArgs {
             allowed_methods: list(&self.methods),
             read_only: self.read_only,
             allowed_cmds: list(&self.cmds),
+            run: if self.no_run {
+                Some(Vec::new())
+            } else if self.run {
+                Some(self.run_argv.clone())
+            } else {
+                None
+            },
             grant_ttl: self.grant_ttl,
         }
     }
@@ -242,6 +266,12 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Command::Run { handle } = &cli.command {
+        let code = runtime.block_on(run_handle(handle));
+        // Exit at once: a read blocked on this terminal's stdin would keep the
+        // runtime from shutting down.
+        std::process::exit(code);
+    }
     match runtime.block_on(run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -393,6 +423,7 @@ async fn run(cli: Cli) -> Result<()> {
             crate::tui::run(paths).await?;
             Ok(())
         }
+        Command::Run { .. } => unreachable!("main runs kv run before this"),
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;
@@ -418,6 +449,80 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Biometric {
             action: BiometricAction::Disable,
         } => disable_device(&paths, &mut input).await,
+    }
+}
+
+/// `kv run`: relays this process's stdin, stdout and stderr to the
+/// handle's program, and returns the exit status to use: the program's,
+/// 128 + the signal that ended it, or 1 when kv refused or ended it.
+async fn run_handle(handle: &str) -> i32 {
+    let paths = match Paths::from_env() {
+        Ok(paths) => paths,
+        Err(e) => {
+            eprintln!("kv run: {e}");
+            return 1;
+        }
+    };
+    let started = match client::run_stream(&paths, None, handle).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(AgentResponse::Error { code, message })) => {
+            eprintln!("kv run: {}: {message}", code.as_str());
+            return 1;
+        }
+        Ok(Err(other)) => {
+            eprintln!("kv run: unexpected reply from the daemon: {other:?}");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("kv run: daemon_unavailable: {e}");
+            return 1;
+        }
+    };
+    let RunStream {
+        mut stdin,
+        mut stdout,
+        mut stderr,
+        ended,
+        guard,
+    } = started;
+    let input = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut stdin).await;
+        let _ = stdin.shutdown().await;
+    });
+    let output = tokio::spawn(async move {
+        let mut out = tokio::io::stdout();
+        let _ = tokio::io::copy(&mut stdout, &mut out).await;
+        let _ = out.flush().await;
+    });
+    let errors = tokio::spawn(async move {
+        let mut err = tokio::io::stderr();
+        while let Some(chunk) = stderr.recv().await {
+            let _ = err.write_all(&chunk).await;
+            let _ = err.flush().await;
+        }
+    });
+    let end = ended.await.unwrap_or(RunEnd::Lost);
+    let _ = output.await;
+    let _ = errors.await;
+    input.abort();
+    drop(guard);
+    match end {
+        RunEnd::Exited {
+            code: Some(code), ..
+        } => code,
+        RunEnd::Exited {
+            signal: Some(signal),
+            ..
+        } => 128 + signal,
+        RunEnd::Exited { .. } => 1,
+        RunEnd::Ended(reason) => {
+            eprintln!("kv run: {reason}");
+            1
+        }
+        RunEnd::Lost => {
+            eprintln!("kv run: kv stopped");
+            1
+        }
     }
 }
 
@@ -630,9 +735,9 @@ fn read_value(args: &AddArgs, input: &mut Input) -> Result<SecretValue> {
             url: trimmed(input.secret(&format!("Connection URL for {name}: "))?),
         },
         Kind::Env => {
-            if args.vars.is_empty() {
+            if args.vars.is_empty() && !args.policy.run {
                 return Err(CliError(
-                    "an env secret needs at least one --var NAME".into(),
+                    "an env secret needs at least one --var NAME, or a --run command".into(),
                 ));
             }
             let mut vars = std::collections::BTreeMap::new();
@@ -812,6 +917,9 @@ fn constraints(handle: &HandleInfo) -> String {
     if !handle.env_vars.is_empty() {
         parts.push(format!("vars={}", handle.env_vars.join(",")));
     }
+    if let Some(program) = &handle.runs {
+        parts.push(format!("runs={program}"));
+    }
     if handle.read_only {
         parts.push("read-only".into());
     }
@@ -860,6 +968,39 @@ mod tests {
     }
 
     #[test]
+    fn run_takes_everything_after_the_double_dash() {
+        let policy =
+            |args: &[&str]| match Cli::try_parse_from([&["kv", "policy", "srv"], args].concat()) {
+                Ok(Cli {
+                    command: Command::Policy { policy, .. },
+                }) => Ok(policy.patch().run),
+                Ok(_) => unreachable!(),
+                Err(e) => Err(e.to_string()),
+            };
+        assert_eq!(
+            policy(&[
+                "--run",
+                "--",
+                "bunx",
+                "-y",
+                "ssh-mcp@1.2.3",
+                "--host=10.0.0.5"
+            ]),
+            Ok(Some(vec![
+                "bunx".into(),
+                "-y".into(),
+                "ssh-mcp@1.2.3".into(),
+                "--host=10.0.0.5".into()
+            ]))
+        );
+        assert_eq!(policy(&["--no-run"]), Ok(Some(Vec::new())));
+        assert_eq!(policy(&["--mode", "auto"]).unwrap(), None);
+        assert!(policy(&["--run"]).is_err());
+        assert!(policy(&["--", "bunx"]).is_err());
+        assert!(policy(&["--run", "--no-run", "--", "bunx"]).is_err());
+    }
+
+    #[test]
     fn policy_flags_build_a_patch_and_empty_string_clears_a_list() {
         let args = PolicyArgs {
             mode: Some(ModeArg::Auto),
@@ -869,6 +1010,9 @@ mod tests {
             read_only: Some(true),
             cmds: Vec::new(),
             grant_ttl: None,
+            run: false,
+            no_run: false,
+            run_argv: Vec::new(),
         };
         let patch = args.patch();
         assert_eq!(patch.mode, Some(Mode::Auto));

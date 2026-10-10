@@ -343,6 +343,9 @@ fn handle_line(handle: &HandleInfo, selected: bool, can_write: bool) -> Line<'st
     let kind = format!("{:?}", handle.kind).to_lowercase();
     let marker = if selected { "▶ " } else { "  " };
     let mut text = format!("{marker}{:<20} {kind:<9} {mode:<5}", handle.name);
+    if let Some(program) = &handle.runs {
+        text.push_str(&format!(" runs {program}"));
+    }
     if !handle.description.is_empty() {
         text.push_str(&format!(" {}", handle.description));
     }

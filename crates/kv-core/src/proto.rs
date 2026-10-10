@@ -25,6 +25,10 @@ pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 /// `truncated`.
 pub const MAX_OUTPUT_LEN: usize = 256 * 1024;
 
+/// Largest `data` in one `RunInput` or `RunOutput` frame, in bytes. Larger
+/// output is split across frames.
+pub const MAX_RUN_CHUNK: usize = 64 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentRequest {
@@ -40,6 +44,65 @@ pub enum AgentRequest {
     /// Asks the user to add a handle. Answered at once; the user finishes
     /// it in `kv tui`.
     RequestHandle(HandleRequest),
+    Run(RunCall),
+}
+
+/// Starts the handle's `run` command.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCall {
+    pub handle: String,
+}
+
+/// From the client to a running program.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunInput {
+    Stdin {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    /// The client has nothing more to write; the program sees end of input.
+    CloseStdin,
+}
+
+/// From a running program to the client, scrubbed. Ends with exactly one
+/// `Exited` or `Ended`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunOutput {
+    Stdout {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    Stderr {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
+    /// The program ended by itself. `signal` is set on Unix when a signal
+    /// ended it.
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    /// kv ended the program, for `reason`.
+    Ended { reason: String },
+}
+
+/// Bytes as a base64 string, so program output that is not UTF-8 survives
+/// the JSON frame.
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
 }
 
 /// A handle an agent would like the user to add. It has no field for a
@@ -147,6 +210,9 @@ pub enum AgentResponse {
     Requested {
         name: String,
     },
+    /// The handle's program is running. From here on the connection
+    /// carries `RunInput` frames to the daemon and `RunOutput` frames back.
+    Started,
     Error {
         code: AgentErrorCode,
         message: String,
@@ -466,6 +532,9 @@ pub struct PolicyPatch {
     pub read_only: Option<bool>,
     #[serde(default)]
     pub allowed_cmds: Option<Vec<String>>,
+    /// `env`: a new `run` command; an empty list clears it.
+    #[serde(default)]
+    pub run: Option<Vec<String>>,
     #[serde(default, with = "humantime_serde")]
     pub grant_ttl: Option<Duration>,
 }
@@ -489,6 +558,9 @@ impl PolicyPatch {
         }
         if let Some(cmds) = &self.allowed_cmds {
             policy.allowed_cmds = cmds.clone();
+        }
+        if let Some(argv) = &self.run {
+            policy.run = (!argv.is_empty()).then(|| argv.clone());
         }
         if let Some(ttl) = self.grant_ttl {
             policy.grant_ttl = ttl;

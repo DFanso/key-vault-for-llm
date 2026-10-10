@@ -35,6 +35,11 @@ pub struct Policy {
     /// up on PATH or an absolute path. Empty denies all.
     #[serde(default)]
     pub allowed_cmds: Vec<String>,
+    /// `env`: the exact command `kv run` and `kv mcp` start with the
+    /// variables set, program first. `None` launches nothing; `exec` never
+    /// looks at it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Vec<String>>,
     #[serde(with = "humantime_serde", default = "default_grant_ttl")]
     pub grant_ttl: Duration,
 }
@@ -52,9 +57,51 @@ impl Default for Policy {
             allowed_methods: Vec::new(),
             read_only: false,
             allowed_cmds: Vec::new(),
+            run: None,
             grant_ttl: default_grant_ttl(),
         }
     }
+}
+
+/// Longest `run` command, in arguments.
+pub const MAX_RUN_ARGS: usize = 128;
+/// Longest argument of a `run` command, in bytes.
+pub const MAX_RUN_ARG_LEN: usize = 4096;
+
+/// Checks a `run` command before it is stored: a program, at most
+/// `MAX_RUN_ARGS` arguments of at most `MAX_RUN_ARG_LEN` bytes, and no NUL,
+/// which no program can receive.
+pub fn validate_run(argv: &[String]) -> Result<(), String> {
+    match argv.first() {
+        None => return Err("the run command is empty".into()),
+        Some(program) if program.is_empty() => {
+            return Err("the run command's program is empty".into());
+        }
+        Some(_) => {}
+    }
+    if argv.len() > MAX_RUN_ARGS {
+        return Err(format!(
+            "the run command has more than {MAX_RUN_ARGS} arguments"
+        ));
+    }
+    if argv.iter().any(|arg| arg.len() > MAX_RUN_ARG_LEN) {
+        return Err(format!(
+            "an argument of the run command is longer than {MAX_RUN_ARG_LEN} bytes"
+        ));
+    }
+    if argv.iter().any(|arg| arg.contains('\0')) {
+        return Err("the run command cannot contain NUL characters".into());
+    }
+    Ok(())
+}
+
+/// The file name of a `run` command's program, which is all kv shows of
+/// the command: the arguments may hold an address the user wants hidden.
+pub fn program_name(program: &str) -> String {
+    std::path::Path::new(program).file_name().map_or_else(
+        || program.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// What the agent wants to do with a handle.
@@ -70,6 +117,8 @@ pub enum Operation<'a> {
     Exec {
         program: &'a str,
     },
+    /// Start the handle's `run` command.
+    Run,
 }
 
 impl Operation<'_> {
@@ -79,6 +128,7 @@ impl Operation<'_> {
             Self::DbQuery => "db_query",
             Self::DbConnect => "db_connect",
             Self::Exec { .. } => "exec",
+            Self::Run => "run",
         }
     }
 }
@@ -112,6 +162,10 @@ pub enum DenyReason {
         method: String,
         allowed: Vec<String>,
     },
+    #[error(
+        "this handle has no run command; the user adds one with `kv policy <handle> --run -- <command>`"
+    )]
+    NoRunCommand,
     #[error("program {program:?} is not in allowed_cmds {allowed:?}")]
     CommandNotAllowed {
         program: String,
@@ -133,6 +187,7 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
                 SecretKind::Postgres | SecretKind::Redis
             )
             | (Operation::Exec { .. }, SecretKind::Env)
+            | (Operation::Run, SecretKind::Env)
     );
     if !kind_ok {
         return Decision::Deny(DenyReason::WrongKind {
@@ -145,6 +200,7 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
             base_url(secret).and_then(|base| check_http(policy, base.as_ref(), method, url))
         }
         Operation::Exec { program } => check_exec(policy, program),
+        Operation::Run => check_run(policy),
         Operation::DbQuery | Operation::DbConnect => Ok(()),
     };
     match check {
@@ -314,6 +370,13 @@ fn host_entry(scheme: &str, entry: &str) -> Option<(String, u16)> {
         normalize_host(url.host_str()?),
         url.port_or_known_default()?,
     ))
+}
+
+fn check_run(policy: &Policy) -> Result<(), DenyReason> {
+    match &policy.run {
+        Some(argv) if !argv.is_empty() => Ok(()),
+        _ => Err(DenyReason::NoRunCommand),
+    }
 }
 
 fn check_exec(policy: &Policy, program: &str) -> Result<(), DenyReason> {

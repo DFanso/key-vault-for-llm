@@ -222,6 +222,7 @@ allow_plain_http: false                # http
 allowed_methods: [GET, POST]           # http, optional
 read_only:       true                  # postgres, redis
 allowed_cmds:    [terraform, psql]     # env: bare name (PATH) or absolute path
+run:             [bunx, -y, ssh-mcp@1.2.3, ...] # env: the exact command kv run and kv mcp start
 grant_ttl:       15m                   # duration of a session grant
 ```
 
@@ -248,6 +249,10 @@ returns values, the hostname inside a DB URL, or a secret's `base_url`.
 | `exec` | handles[], argv[], cwd?, timeout? | exit code, stdout, stderr (scrubbed) |
 | `request_handle` | name, kind, description?, reason?, header?/template?/query_param?, base_url?, allowed_hosts?, env_vars?, allowed_cmds? | confirmation that the request waits in `kv tui` |
 | `status` | — | locked/unlocked, pending approvals |
+| `list_servers` | — | handles with a `run` command, their descriptions, whether each runs in this session |
+| `list_server_tools` | server, filter?, schemas? | the server's tools, first description lines or full schemas; starts the server |
+| `call_server_tool` | server, tool, arguments? | the tool's own result, scrubbed; starts the server |
+| `stop_server` | server | confirmation |
 
 `request_handle` lets an agent ask for a handle it lacks without ever
 carrying a value: unknown arguments such as `token` are refused, and the
@@ -448,8 +453,9 @@ A notification announces each request.
   JSON-escaped. Connection URLs also contribute their password alone.
 - One Aho-Corasick automaton over all patterns, rebuilt on unlock and on
   secret changes.
-- Streaming: hold back `longest pattern − 1` bytes between chunks so secrets
-  split across chunks are caught.
+- Streaming: hold back only the longest tail that is a proper prefix of a
+  pattern, so secrets split across chunks are caught and a program waiting
+  for input gets its whole reply out.
 - Matches are replaced with `[kv:<handle>]`. Matching ignores ASCII case:
   host names are case-insensitive, and a secret in another case is still a
   secret.
@@ -545,6 +551,7 @@ Stable codes with actionable messages:
 | `unknown_handle` | Lists available handles. |
 | `upstream_error` | Upstream message, scrubbed. |
 | `daemon_unavailable` | The daemon could not be started or reached. |
+| `server_stopped` | A server reached through `kv mcp` ended (lock, handle change, exit); the next call starts it again. |
 
 All failures are closed: no partial results, no fallback to unauthenticated
 or unscrubbed paths.
@@ -589,14 +596,10 @@ quarantine.
 
 ## 8. Out of scope for v1
 
+- Done after v1.0: `kv run` and servers reached through `kv mcp`, with the
+  command pinned in the handle; see `2026-10-09-kv-run-design.md`.
 - v1.1: SSH (key-holding agent, `ssh_exec`); Claude Code guard hooks that
-  block reads of `.env`, `~/.ssh/id_*`, `printenv`; `kv run --env <handle>...
-  -- <command>` to launch long-running tools the user trusts, such as MCP
-  servers (a Dokploy MCP, for example), with `env` secrets injected, so
-  their keys leave plaintext config files like `settings.local.json`. The
-  same policy and approval as `exec` apply at launch, stdout and stderr pass
-  through the streaming scrubber, and the launched process does hold the
-  secret.
+  block reads of `.env`, `~/.ssh/id_*`, `printenv`.
 - Later: lock on sleep / screen lock; pluggable backends (1Password,
   Bitwarden, Infisical); MySQL, Mongo and other DB proxies.
 - Not planned: team sharing or sync; sandboxing a same-user agent.
