@@ -11,8 +11,10 @@ use kv::paths::Paths;
 use kv_core::proto::{Approval, ControlCommand, ControlRequest, ControlResponse, Verdict};
 use kv_core::secret::SecretText;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ContentBlock, ProtocolVersion, ResultType,
+};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
@@ -145,15 +147,28 @@ impl Home {
     }
 
     async fn mcp(&self) -> RunningService<RoleClient, ()> {
+        ().serve(self.mcp_transport()).await.unwrap()
+    }
+
+    /// A client on the current revision, which has no `initialize` and
+    /// requires `resultType` on every result.
+    async fn mcp_current(&self) -> RunningService<RoleClient, ()> {
+        let lifecycle = ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        };
+        ().serve_with_lifecycle(self.mcp_transport(), lifecycle)
+            .await
+            .unwrap()
+    }
+
+    fn mcp_transport(&self) -> TokioChildProcess {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_kv"));
         command
             .arg("mcp")
             .env("KV_HOME", self.dir.path())
             .env("KV_NOTIFY", "off")
             .current_dir(self.dir.path());
-        ().serve(TokioChildProcess::new(command).unwrap())
-            .await
-            .unwrap()
+        TokioChildProcess::new(command).unwrap()
     }
 
     /// Audit entries for runs of `handle` that ended with `outcome`.
@@ -275,6 +290,24 @@ async fn call_server_tool_returns_the_result_scrubbed() {
     .await;
     assert!(!error, "{text}");
     assert_eq!(text, "hi");
+}
+
+// kv reaches its servers over `initialize`, so they answer on an older
+// revision and leave `resultType` out, as servers run through bunx do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relayed_result_carries_result_type_for_a_current_client() {
+    let home = Home::new();
+    home.add_server("srv", "auto");
+    let client = home.mcp_current().await;
+    let params = CallToolRequestParams::new("call_server_tool").with_arguments(
+        json!({"server": "srv", "tool": "echo", "arguments": {"text": "hi"}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let result = client.call_tool(params).await.unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(result.result_type, Some(ResultType::COMPLETE));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -105,7 +105,9 @@ Four tools join the existing seven:
 - `call_server_tool(server, tool, arguments?)`: starts the server if needed
   and calls the tool with `arguments` (an object, `{}` when omitted). The
   result is the server's own result, with secrets replaced by
-  `[kv:<handle>]`; an error result stays an error.
+  `[kv:<handle>]`; an error result stays an error. A server on a revision
+  before 2026-07-28 leaves out `resultType`, which means complete; kv sets
+  it, since clients on 2026-07-28 require it.
 - `stop_server(server)`: stops it if it is running in this process.
 
 The `kv mcp` instructions gain one sentence: servers are reached with

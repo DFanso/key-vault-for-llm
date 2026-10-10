@@ -11,7 +11,7 @@ use kv_core::proto::{AgentRequest, AgentResponse, SessionInfo};
 use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientCapabilities, ClientConfig, ContentBlock,
-    Implementation,
+    Implementation, ResultType,
 };
 use rmcp::service::{RoleClient, RunningService};
 use serde_json::{Map, Value, json};
@@ -148,7 +148,12 @@ impl Servers {
         };
         let params = CallToolRequestParams::new(tool).with_arguments(arguments);
         match server.client.call_tool(params).await {
-            Ok(result) => result,
+            Ok(mut result) => {
+                // Servers on revisions before 2026-07-28 leave it out, which
+                // means complete; clients on that revision require it.
+                result.result_type.get_or_insert(ResultType::COMPLETE);
+                result
+            }
             Err(e) => failure(self.lost(name, &server, e).await),
         }
     }
