@@ -386,3 +386,35 @@ fn ctrl_t_does_nothing_once_unlocked() {
     let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert_eq!(app.handle_key(ctrl_t), None);
 }
+
+#[test]
+fn the_handles_tab_shows_what_a_server_runs_but_not_its_arguments() {
+    let mut app = unlocked(Vec::new());
+    let mut server = handle("ssh-kycdev", Mode::Auto);
+    server.kind = SecretKind::Env;
+    server.allowed_hosts = Vec::new();
+    server.description = String::new();
+    server.runs = Some("bunx".into());
+    let mut o = overview(Vec::new());
+    o.handles.push(server);
+    app.apply(Outcome::Overview(o));
+    key(&mut app, '2');
+    let drawn = screen(&app);
+    assert!(drawn.contains("runs bunx"), "{drawn}");
+}
+
+#[test]
+fn a_run_approval_names_the_program() {
+    let mut run = approval(7, false);
+    run.client = None;
+    run.tool = "run".into();
+    run.handles = vec!["ssh-kyclive".into()];
+    run.detail = "starts bunx".into();
+    // A lone waiting request is selected as it arrives.
+    let app = unlocked(vec![run]);
+    let drawn = screen(&app);
+    assert!(drawn.contains("run · ssh-kyclive"), "{drawn}");
+    assert!(drawn.contains("starts bunx"), "{drawn}");
+    assert!(drawn.contains("a allow once"), "{drawn}");
+    assert!(!drawn.contains("allow for session"), "{drawn}");
+}
