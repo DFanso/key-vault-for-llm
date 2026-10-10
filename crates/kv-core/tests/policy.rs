@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use kv_core::policy::{Decision, DenyReason, Mode, Operation, Policy, evaluate, http_target};
+use kv_core::policy::{
+    Decision, DenyReason, MAX_RUN_ARG_LEN, MAX_RUN_ARGS, Mode, Operation, Policy, evaluate,
+    http_target, program_name, validate_run,
+};
 use kv_core::secret::{AuthPlacement, Secret, SecretKind, SecretText, SecretValue};
 
 fn secret(value: SecretValue, policy: Policy) -> Secret {
@@ -463,4 +466,85 @@ fn a_url_handle_takes_a_full_url_not_a_path() {
             .as_str(),
         "https://api.openrouter.ai/v1"
     );
+}
+
+fn runner(mode: Mode, run: Option<&[&str]>) -> Secret {
+    env(Policy {
+        mode,
+        run: run.map(|argv| argv.iter().map(|a| a.to_string()).collect()),
+        ..Policy::default()
+    })
+}
+
+#[test]
+fn run_needs_a_run_command() {
+    assert_eq!(
+        evaluate(&runner(Mode::Auto, None), &Operation::Run),
+        Decision::Deny(DenyReason::NoRunCommand)
+    );
+    assert_eq!(
+        evaluate(&runner(Mode::Auto, Some(&[])), &Operation::Run),
+        Decision::Deny(DenyReason::NoRunCommand)
+    );
+}
+
+#[test]
+fn run_follows_the_mode() {
+    let argv: &[&str] = &["/usr/local/bin/bunx", "-y", "ssh-mcp"];
+    assert_eq!(
+        evaluate(&runner(Mode::Auto, Some(argv)), &Operation::Run),
+        Decision::Allow
+    );
+    assert_eq!(
+        evaluate(&runner(Mode::Ask, Some(argv)), &Operation::Run),
+        Decision::Ask
+    );
+    assert_eq!(
+        evaluate(&runner(Mode::Deny, Some(argv)), &Operation::Run),
+        Decision::Deny(DenyReason::ModeDeny)
+    );
+}
+
+#[test]
+fn run_is_only_for_env_handles() {
+    let s = http(Policy {
+        mode: Mode::Auto,
+        run: Some(vec!["/bin/tool".into()]),
+        ..Policy::default()
+    });
+    assert!(matches!(
+        evaluate(&s, &Operation::Run),
+        Decision::Deny(DenyReason::WrongKind { .. })
+    ));
+}
+
+#[test]
+fn exec_ignores_the_run_command() {
+    let s = runner(Mode::Auto, Some(&["/bin/tool"]));
+    assert!(matches!(
+        evaluate(
+            &s,
+            &Operation::Exec {
+                program: "/bin/tool"
+            }
+        ),
+        Decision::Deny(DenyReason::CommandNotAllowed { .. })
+    ));
+}
+
+#[test]
+fn run_commands_are_checked_before_they_are_stored() {
+    let argv = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    assert!(validate_run(&argv(&["bunx", "-y", "ssh-mcp@1.2.3"])).is_ok());
+    assert!(validate_run(&[]).is_err());
+    assert!(validate_run(&argv(&["", "x"])).is_err());
+    assert!(validate_run(&argv(&["tool", "a\0b"])).is_err());
+    assert!(validate_run(&vec!["x".to_string(); MAX_RUN_ARGS + 1]).is_err());
+    assert!(validate_run(&["x".to_string(), "y".repeat(MAX_RUN_ARG_LEN + 1)]).is_err());
+}
+
+#[test]
+fn program_name_is_the_file_name_only() {
+    assert_eq!(program_name("/opt/homebrew/bin/bunx"), "bunx");
+    assert_eq!(program_name("bunx"), "bunx");
 }

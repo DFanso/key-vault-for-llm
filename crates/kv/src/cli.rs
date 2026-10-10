@@ -209,6 +209,7 @@ impl PolicyArgs {
             allowed_methods: list(&self.methods),
             read_only: self.read_only,
             allowed_cmds: list(&self.cmds),
+            run: None,
             grant_ttl: self.grant_ttl,
         }
     }

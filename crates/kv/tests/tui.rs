@@ -58,6 +58,7 @@ fn handle(name: &str, mode: Mode) -> HandleInfo {
         env_vars: Vec::new(),
         takes_path: false,
         auth: None,
+        runs: None,
     }
 }
 

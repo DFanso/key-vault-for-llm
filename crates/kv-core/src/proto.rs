@@ -466,6 +466,9 @@ pub struct PolicyPatch {
     pub read_only: Option<bool>,
     #[serde(default)]
     pub allowed_cmds: Option<Vec<String>>,
+    /// `env`: a new `run` command; an empty list clears it.
+    #[serde(default)]
+    pub run: Option<Vec<String>>,
     #[serde(default, with = "humantime_serde")]
     pub grant_ttl: Option<Duration>,
 }
@@ -489,6 +492,9 @@ impl PolicyPatch {
         }
         if let Some(cmds) = &self.allowed_cmds {
             policy.allowed_cmds = cmds.clone();
+        }
+        if let Some(argv) = &self.run {
+            policy.run = (!argv.is_empty()).then(|| argv.clone());
         }
         if let Some(ttl) = self.grant_ttl {
             policy.grant_ttl = ttl;

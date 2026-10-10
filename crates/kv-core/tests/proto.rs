@@ -423,3 +423,46 @@ fn a_control_request_without_a_device_credential_still_parses() {
     .unwrap();
     assert!(status.devices.is_empty());
 }
+
+#[test]
+fn policy_patch_sets_and_clears_the_run_command() {
+    let mut policy = Policy::default();
+    PolicyPatch {
+        run: Some(vec!["bunx".into(), "-y".into(), "ssh-mcp".into()]),
+        ..PolicyPatch::default()
+    }
+    .apply(&mut policy);
+    assert_eq!(
+        policy.run,
+        Some(vec!["bunx".into(), "-y".into(), "ssh-mcp".into()])
+    );
+    PolicyPatch {
+        run: Some(Vec::new()),
+        ..PolicyPatch::default()
+    }
+    .apply(&mut policy);
+    assert_eq!(policy.run, None);
+}
+
+#[test]
+fn policy_patch_without_run_keeps_the_run_command() {
+    let mut policy = Policy {
+        run: Some(vec!["bunx".into()]),
+        ..Policy::default()
+    };
+    // What `kv tui` sends when the user edits a handle's policy.
+    PolicyPatch {
+        mode: Some(Mode::Ask),
+        allowed_cmds: Some(Vec::new()),
+        ..PolicyPatch::default()
+    }
+    .apply(&mut policy);
+    assert_eq!(policy.run, Some(vec!["bunx".into()]));
+}
+
+#[test]
+fn a_policy_without_run_still_parses() {
+    let policy: Policy = serde_json::from_str(r#"{"mode":"auto"}"#).unwrap();
+    assert_eq!(policy.run, None);
+    assert!(!serde_json::to_string(&policy).unwrap().contains("run"));
+}
