@@ -10,12 +10,14 @@ use kv_core::VaultError;
 use kv_core::crypto::{KdfParams, SymmetricKey, fill_random};
 use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
 use kv_core::policy::{
-    Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry,
+    Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry, program_name,
+    validate_run,
 };
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ConnectCall, ControlCommand,
     ControlErrorCode, ControlRequest, ControlResponse, DbCall, DeviceCredential, ExecCall,
-    HandleRequest, HttpCall, Overview, PolicyPatch, RequestedHandle, SessionInfo, Status, Verdict,
+    HandleRequest, HttpCall, Overview, PolicyPatch, RequestedHandle, RunCall, SessionInfo, Status,
+    Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
@@ -27,7 +29,7 @@ use zeroize::Zeroizing;
 
 use crate::audit::{Audit, Use};
 use crate::broker::lease::{DEFAULT_TTL, MAX_LEASES, MAX_TTL};
-use crate::broker::{ConnectJob, DbJob, ExecJob, HttpJob, Leases, RoleChecks};
+use crate::broker::{ConnectJob, DbJob, ExecJob, HttpJob, Leases, RoleChecks, RunJob};
 use crate::throttle::Throttle;
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
@@ -68,6 +70,10 @@ const MAX_SESSIONS: usize = 16;
 /// Requests that may wait for approval at once. More are refused, so an
 /// agent cannot flood the approval list or the notifications.
 const MAX_PENDING: usize = 32;
+
+/// Programs started through `run` at once, counting those waiting for
+/// approval.
+const MAX_RUNS: usize = 32;
 
 /// Handle requests kept for the user at once.
 const MAX_HANDLE_REQUESTS: usize = 16;
@@ -147,6 +153,9 @@ pub struct Daemon {
     /// Open `db_connect` leases. All end when the vault locks; a handle's
     /// end when it changes.
     leases: Leases,
+    /// Programs started through `run`. All end when the vault locks; a
+    /// handle's end when it changes.
+    runs: Leases,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -205,6 +214,7 @@ pub enum Prepared {
     Exec(Box<ExecJob>),
     Db(Box<DbJob>),
     Connect(Box<ConnectJob>),
+    Run(Box<RunJob>),
     Wait(Box<Waiting>),
 }
 
@@ -244,6 +254,7 @@ impl Daemon {
             request_notice: None,
             role_checks: RoleChecks::default(),
             leases: Leases::default(),
+            runs: Leases::with_limit(MAX_RUNS),
             ended: BTreeMap::new(),
             grants: Vec::new(),
         }
@@ -292,6 +303,7 @@ impl Daemon {
             AgentRequest::Exec(call) => self.prepare_exec(call, session, now),
             AgentRequest::DbQuery(call) => self.prepare_db(call, session, now),
             AgentRequest::DbConnect(call) => self.prepare_connect(call, session, now),
+            AgentRequest::Run(call) => self.prepare_run(call, session, now),
             AgentRequest::RequestHandle(request) => {
                 let name = printable(&request.name, 63);
                 let response = self.request_handle(session, request);
@@ -818,6 +830,92 @@ impl Daemon {
         self.queue(ask, job, session, now)
     }
 
+    fn prepare_run(
+        &mut self,
+        call: RunCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
+        let handle = call.handle;
+        let refuse = |daemon: &Self, summary: &str, decision, response| {
+            daemon.refuse("run", &handle, summary, decision, response)
+        };
+        let Some(vault) = &self.vault else {
+            return refuse(self, "", "locked", self.locked_error());
+        };
+        let Some(secret) = vault.get(&handle).cloned() else {
+            return refuse(self, "", "invalid", unknown_handle(vault, &handle));
+        };
+        let program = secret
+            .policy
+            .run
+            .as_ref()
+            .and_then(|argv| argv.first())
+            .map(|p| program_name(p))
+            .unwrap_or_default();
+        let decision = evaluate(&secret, &Operation::Run);
+        if let Decision::Deny(reason) = decision {
+            return refuse(
+                self,
+                &program,
+                "policy",
+                agent_error(AgentErrorCode::PolicyDenied, reason),
+            );
+        }
+        let ask = decision == Decision::Ask && !self.granted(session, &handle, now);
+        if ask && self.approvals.len() >= MAX_PENDING {
+            return refuse(self, &program, "denied", too_many_waiting());
+        }
+        let Some(ticket) = self.runs.open(&handle) else {
+            let message = format!(
+                "{MAX_RUNS} programs are running through kv already; stop one, or ask the user \
+                 to lock the vault"
+            );
+            return refuse(
+                self,
+                &program,
+                "denied",
+                agent_error(AgentErrorCode::PolicyDenied, message),
+            );
+        };
+        self.touch(now);
+        let scrubber = self.scrubber();
+        self.runs.set_scrubber(scrubber);
+        let env = match &secret.value {
+            SecretValue::Env { vars } => vars
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let job = Prepared::Run(Box::new(RunJob {
+            handle: handle.clone(),
+            argv: secret.policy.run.clone().unwrap_or_default(),
+            env,
+            ticket,
+            scrubber: self.runs.subscribe(),
+            audit: self.audit.clone(),
+            started: now,
+            decision: if decision == Decision::Ask {
+                "approved"
+            } else {
+                "auto"
+            },
+        }));
+        if !ask {
+            return job;
+        }
+        let ask = Ask {
+            tool: "run",
+            ask: vec![handle.clone()],
+            handles: handle,
+            summary: program.clone(),
+            detail: format!("starts {program}"),
+            cwd: None,
+        };
+        self.queue(ask, job, session, now)
+    }
+
     fn granted(&self, session: Option<&SessionInfo>, handle: &str, now: Instant) -> bool {
         session.is_some_and(|session| {
             self.grants
@@ -875,6 +973,7 @@ impl Daemon {
         self.grants.retain(|g| g.handle != name);
         self.role_checks.forget(name);
         self.leases.end_handle(name);
+        self.runs.end_handle(name);
         let (stale, kept) = std::mem::take(&mut self.approvals)
             .into_iter()
             .partition(|p: &Pending| p.handles.split(',').any(|h| h == name));
@@ -1142,10 +1241,11 @@ impl Daemon {
                         if let Some(name) = &handle {
                             self.handle_changed(name, now);
                         }
-                        // Open leases scrub with the secrets as they are now.
-                        if self.leases.count() > 0 {
+                        // Open leases and runs scrub with the secrets as they are now.
+                        if self.leases.count() > 0 || self.runs.count() > 0 {
                             let scrubber = self.scrubber();
-                            self.leases.set_scrubber(scrubber);
+                            self.leases.set_scrubber(scrubber.clone());
+                            self.runs.set_scrubber(scrubber);
                         }
                         done(warnings)
                     })
@@ -1189,6 +1289,7 @@ impl Daemon {
         self.grants.clear();
         self.role_checks.clear();
         self.leases.end_all();
+        self.runs.end_all();
         let now = Instant::now();
         for pending in std::mem::take(&mut self.approvals) {
             self.record_unanswered(&pending, "locked", "vault_locked", now);
@@ -1460,6 +1561,7 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
 
 fn add(vault: &mut Vault, secret: Secret, replace: bool) -> Result<Vec<String>, Failure> {
     validate_value(&secret.value)?;
+    validate_secret(&secret)?;
     let previous = vault.get(&secret.name).cloned();
     if previous.is_some() && !replace {
         return Err(fail(
@@ -1490,6 +1592,7 @@ fn set_policy(vault: &mut Vault, name: &str, patch: &PolicyPatch) -> Result<Vec<
     let previous = vault.get(name).cloned().ok_or_else(|| unknown(name))?;
     let mut updated = previous.clone();
     patch.apply(&mut updated.policy);
+    validate_secret(&updated)?;
     let warnings = warnings_for(&updated);
     vault
         .upsert(updated)
@@ -1534,6 +1637,7 @@ fn update(
         validate_value(&value)?;
         updated.value = value;
     }
+    validate_secret(&updated)?;
     let warnings = warnings_for(&updated);
     vault
         .upsert(updated)
@@ -1632,13 +1736,32 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
             }
         }
         SecretValue::Env { vars } => {
-            if vars.is_empty() {
-                return invalid("an env secret needs at least one variable");
-            }
             if vars.keys().any(|k| k.is_empty() || k.contains(['=', '\0'])) {
                 return invalid("variable names must be non-empty and contain no '=' or NUL");
             }
         }
+    }
+    Ok(())
+}
+
+/// Checks what `validate_value` cannot see alone: a `run` command needs an
+/// env handle and a valid argv, and only a handle with one may have no
+/// variables.
+fn validate_secret(secret: &Secret) -> Result<(), Failure> {
+    let invalid = |message: String| Err(fail(ControlErrorCode::Invalid, message));
+    if let Some(argv) = &secret.policy.run {
+        if secret.kind() != SecretKind::Env {
+            return invalid("only env handles can have a run command".into());
+        }
+        if let Err(why) = validate_run(argv) {
+            return invalid(why);
+        }
+    }
+    if let SecretValue::Env { vars } = &secret.value
+        && vars.is_empty()
+        && secret.policy.run.is_none()
+    {
+        return invalid("an env handle needs at least one variable, or a run command".into());
     }
     Ok(())
 }

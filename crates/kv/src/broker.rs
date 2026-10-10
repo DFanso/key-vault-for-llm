@@ -10,6 +10,7 @@ use kv_core::proto::{DbCall, HttpCall};
 use kv_core::scrub::Scrubber;
 use kv_core::secret::{Secret, SecretText};
 
+use kv_core::policy::program_name;
 use kv_core::proto::MAX_OUTPUT_LEN;
 
 use crate::audit::Audit;
@@ -89,6 +90,34 @@ pub struct ConnectJob {
     pub decision: &'static str,
     pub role_checks: RoleChecks,
     pub role_stamp: u64,
+}
+
+/// A `run` that passed every check.
+pub struct RunJob {
+    pub handle: String,
+    /// The handle's `run` command, program first.
+    pub argv: Vec<String>,
+    pub env: Vec<(String, SecretText)>,
+    /// The run's place among the open runs, taken when it was authorized,
+    /// so a lock or a change to the handle ends it even before it starts.
+    pub ticket: LeaseTicket,
+    /// The scrubber for every unlocked secret, kept current while it runs.
+    pub scrubber: tokio::sync::watch::Receiver<Arc<Scrubber>>,
+    pub audit: Audit,
+    pub started: Instant,
+    /// `auto`, or `approved` after a decision in `kv tui`, for the audit log.
+    pub decision: &'static str,
+}
+
+/// The program's name only: its arguments may hold a hidden address, and
+/// the job holds values.
+impl std::fmt::Debug for RunJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunJob")
+            .field("handle", &self.handle)
+            .field("program", &self.argv.first().map(|p| program_name(p)))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Decodes scrubbed bytes, cutting them to `MAX_OUTPUT_LEN` (replacement

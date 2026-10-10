@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use kv::audit::Audit;
-use kv::broker::{ConnectJob, DbJob, ExecJob, HttpJob};
+use kv::broker::{ConnectJob, DbJob, ExecJob, HttpJob, RunJob};
 use kv::daemon::{Daemon, Prepared, Settings, Waiting};
 use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ConnectCall, ControlCommand, ControlRequest,
-    ControlResponse, DbCall, ExecCall, HttpCall, Overview, SessionInfo, Verdict,
+    ControlResponse, DbCall, ExecCall, HttpCall, Overview, RunCall, SessionInfo, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 use tempfile::TempDir;
@@ -83,7 +83,9 @@ impl Fixture {
             Prepared::Http(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) => panic!("unexpected job"),
+            Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) | Prepared::Run(_) => {
+                panic!("unexpected job")
+            }
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -93,7 +95,9 @@ impl Fixture {
             Prepared::Exec(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Http(_) | Prepared::Db(_) | Prepared::Connect(_) => panic!("unexpected job"),
+            Prepared::Http(_) | Prepared::Db(_) | Prepared::Connect(_) | Prepared::Run(_) => {
+                panic!("unexpected job")
+            }
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -103,7 +107,7 @@ impl Fixture {
             Prepared::Db(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Connect(_) => {
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Connect(_) | Prepared::Run(_) => {
                 panic!("unexpected job")
             }
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
@@ -115,7 +119,21 @@ impl Fixture {
             Prepared::Connect(job) => Ok(*job),
             Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
             Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) => panic!("unexpected job"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) | Prepared::Run(_) => {
+                panic!("unexpected job")
+            }
+            Prepared::Wait(_) => panic!("unexpected wait for approval"),
+        }
+    }
+
+    pub fn run_job(&mut self, call: RunCall) -> Result<RunJob, (AgentErrorCode, String)> {
+        match self.prepare(AgentRequest::Run(call)) {
+            Prepared::Run(job) => Ok(*job),
+            Prepared::Reply(AgentResponse::Error { code, message }) => Err((code, message)),
+            Prepared::Reply(other) => panic!("unexpected reply {other:?}"),
+            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) => {
+                panic!("unexpected job")
+            }
             Prepared::Wait(_) => panic!("unexpected wait for approval"),
         }
     }
@@ -131,7 +149,11 @@ impl Fixture {
         match self.daemon.prepare_in(session, request, now) {
             Prepared::Wait(waiting) => *waiting,
             Prepared::Reply(reply) => panic!("expected a wait, got {reply:?}"),
-            Prepared::Http(_) | Prepared::Exec(_) | Prepared::Db(_) | Prepared::Connect(_) => {
+            Prepared::Http(_)
+            | Prepared::Exec(_)
+            | Prepared::Db(_)
+            | Prepared::Connect(_)
+            | Prepared::Run(_) => {
                 panic!("expected a wait, got a job")
             }
         }
@@ -353,4 +375,17 @@ pub async fn admin(url: &str, schema: &str) -> tokio_postgres::Client {
         .await
         .unwrap();
     client
+}
+
+/// An env handle whose `run` command is `argv`.
+pub fn run_secret(name: &str, vars: &[(&str, &str)], argv: &[&str], mode: Mode) -> Secret {
+    let mut secret = env_secret(name, vars, &[], mode);
+    secret.policy.run = Some(argv.iter().map(|a| a.to_string()).collect());
+    secret
+}
+
+pub fn launch(handle: &str) -> RunCall {
+    RunCall {
+        handle: handle.into(),
+    }
 }

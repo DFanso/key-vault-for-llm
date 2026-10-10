@@ -5,8 +5,8 @@ use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ConnectCall, ControlCommand, ControlRequest,
     ControlResponse, DbCall, ExecCall, ExecReply, HttpReply, LeaseReply, MAX_FRAME_LEN,
-    MAX_OUTPUT_LEN, Overview, PolicyPatch, RedisReply, ResultSet, RowsReply, SessionInfo, Status,
-    Verdict,
+    MAX_OUTPUT_LEN, MAX_RUN_CHUNK, Overview, PolicyPatch, RedisReply, ResultSet, RowsReply,
+    RunCall, RunInput, RunOutput, SessionInfo, Status, Verdict,
 };
 use kv_core::secret::{AuthPlacement, Secret, SecretText, SecretValue};
 
@@ -465,4 +465,51 @@ fn a_policy_without_run_still_parses() {
     let policy: Policy = serde_json::from_str(r#"{"mode":"auto"}"#).unwrap();
     assert_eq!(policy.run, None);
     assert!(!serde_json::to_string(&policy).unwrap().contains("run"));
+}
+
+#[test]
+fn run_messages_are_tagged_and_carry_bytes_as_base64() {
+    let request = AgentRequest::Run(RunCall {
+        handle: "ssh-kycdev".into(),
+    });
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"type":"run","handle":"ssh-kycdev"}"#);
+    assert_eq!(
+        serde_json::from_str::<AgentRequest>(&json).unwrap(),
+        request
+    );
+    assert_eq!(
+        serde_json::to_string(&AgentResponse::Started).unwrap(),
+        r#"{"type":"started"}"#
+    );
+    let input = RunInput::Stdin {
+        data: b"{\"id\":1}\n\x00\xff".to_vec(),
+    };
+    let json = serde_json::to_string(&input).unwrap();
+    assert!(json.contains("\"type\":\"stdin\""), "{json}");
+    assert_eq!(serde_json::from_str::<RunInput>(&json).unwrap(), input);
+    for output in [
+        RunOutput::Stdout {
+            data: vec![1, 2, 3],
+        },
+        RunOutput::Stderr { data: Vec::new() },
+        RunOutput::Exited {
+            code: Some(3),
+            signal: None,
+        },
+        RunOutput::Ended {
+            reason: "the vault locked".into(),
+        },
+    ] {
+        let json = serde_json::to_string(&output).unwrap();
+        assert_eq!(serde_json::from_str::<RunOutput>(&json).unwrap(), output);
+    }
+}
+
+#[test]
+fn a_full_run_chunk_fits_in_a_frame() {
+    let output = RunOutput::Stdout {
+        data: vec![0xff; MAX_RUN_CHUNK * 2],
+    };
+    assert!(serde_json::to_vec(&output).unwrap().len() < MAX_FRAME_LEN);
 }

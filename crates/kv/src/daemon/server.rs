@@ -173,6 +173,11 @@ async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
             code: AgentErrorCode::UpstreamError,
             message: "internal error: a request waited twice".into(),
         },
+        // `serve_agent` gives a run its connection before this point.
+        Prepared::Run(_) => AgentResponse::Error {
+            code: AgentErrorCode::UpstreamError,
+            message: "internal error: a run reached the reply path".into(),
+        },
     }
 }
 
