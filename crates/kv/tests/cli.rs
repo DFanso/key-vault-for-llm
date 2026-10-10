@@ -567,3 +567,125 @@ fn turning_off_biometric_unlock_that_is_not_on_says_so() {
         "{stderr}"
     );
 }
+
+const RUN_SECRET: &str = "s3cr3t-cli-run-0123456789";
+
+/// Not a real test. Started by `kv run` with `KV_CLI_HELPER` set, it echoes
+/// each input line with its secret, and exits 3 at end of input.
+#[test]
+fn helper() {
+    if std::env::var("KV_CLI_HELPER").is_err() {
+        return;
+    }
+    let secret = std::env::var("SECRET_VALUE").unwrap_or_default();
+    let mut out = std::io::stdout();
+    for line in std::io::stdin().lines() {
+        writeln!(out, "got {} secret={secret}", line.unwrap()).unwrap();
+        out.flush().unwrap();
+    }
+    std::process::exit(3);
+}
+
+#[test]
+fn add_a_server_list_it_and_run_it() {
+    let kv = Kv::initialized();
+    let exe = std::env::current_exe().unwrap();
+    let exe = exe.to_str().unwrap();
+    kv.ok(
+        &[
+            "add",
+            "srv",
+            "--kind",
+            "env",
+            "--var",
+            "SECRET_VALUE",
+            "--var",
+            "KV_CLI_HELPER",
+            "--mode",
+            "auto",
+            "--run",
+            "--",
+            exe,
+            "helper",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &format!("{PASS}\n{RUN_SECRET}\necho-mode\n"),
+    );
+    let listed = kv.ok(&["list"], "");
+    let program = std::path::Path::new(exe)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(listed.contains(&format!("runs={program}")), "{listed}");
+    assert!(!listed.contains("--nocapture"), "{listed}");
+
+    let output = kv.run(&["run", "srv"], "hello\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("got hello secret=[kv:srv]"), "{stdout}");
+    assert!(!stdout.contains(RUN_SECRET), "{stdout}");
+    assert_eq!(output.status.code(), Some(3));
+}
+
+#[test]
+fn a_run_only_handle_needs_no_variables() {
+    let kv = Kv::initialized();
+    kv.ok(
+        &[
+            "add",
+            "bare",
+            "--kind",
+            "env",
+            "--mode",
+            "auto",
+            "--run",
+            "--",
+            "/bin/echo",
+            "hi",
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert!(kv.ok(&["list"], "").contains("runs=echo"));
+    let refused = kv.fails(
+        &["add", "novars", "--kind", "env", "--mode", "auto"],
+        &format!("{PASS}\n"),
+    );
+    assert!(refused.contains("--var"), "{refused}");
+    kv.ok(
+        &["policy", "bare", "--run", "--", "/bin/echo", "bye"],
+        &format!("{PASS}\n"),
+    );
+    let refused = kv.fails(&["policy", "bare", "--no-run"], &format!("{PASS}\n"));
+    assert!(refused.contains("at least one variable"), "{refused}");
+}
+
+#[test]
+fn only_env_handles_take_a_run_command() {
+    let kv = Kv::initialized();
+    let refused = kv.fails(
+        &[
+            "add",
+            "web",
+            "--kind",
+            "http",
+            "--host",
+            "example.com",
+            "--run",
+            "--",
+            "/bin/true",
+        ],
+        &format!("{PASS}\n{TOKEN}\n"),
+    );
+    assert!(refused.contains("only env handles"), "{refused}");
+}
+
+#[test]
+fn kv_run_reports_a_refusal_and_fails() {
+    let kv = Kv::initialized();
+    let output = kv.run(&["run", "missing"], "");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("kv run: unknown_handle"), "{stderr}");
+}
