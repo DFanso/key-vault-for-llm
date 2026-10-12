@@ -494,3 +494,109 @@ async fn an_agent_gets_a_database_lease_through_mcp() {
     assert_eq!(&answer, b"-NOAUT");
     client.cancel().await.unwrap();
 }
+
+/// A client on the 2026-07-28 protocol skips `initialize` and names itself
+/// in each request's `_meta`; the approval shows that name.
+#[tokio::test]
+async fn a_client_without_initialize_is_named_from_its_request() {
+    use kv::paths::Paths;
+    use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
+    use kv_core::secret::SecretText;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("fine"))
+        .mount(&server)
+        .await;
+    let host = server.uri().trim_start_matches("http://").to_owned();
+    let home = Home::new();
+    home.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    home.kv(
+        &[
+            "add",
+            "api",
+            "--kind",
+            "http",
+            "--host",
+            &host,
+            "--allow-plain-http",
+            "true",
+            "--mode",
+            "ask",
+        ],
+        &format!("{PASS}\n{TOKEN}\n"),
+    );
+    let project = TempDir::new().unwrap();
+    let mut mcp = tokio::process::Command::new(env!("CARGO_BIN_EXE_kv"))
+        .arg("mcp")
+        .env("KV_HOME", home.dir.path())
+        .env("KV_NOTIFY", "off")
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "http_request",
+            "arguments": {"handle": "api", "method": "GET", "url": format!("{}/x", server.uri())},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.0"}
+            }
+        }
+    });
+    let mut stdin = mcp.stdin.take().unwrap();
+    stdin
+        .write_all(format!("{call}\n").as_bytes())
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+    let mut replies = BufReader::new(mcp.stdout.take().unwrap()).lines();
+
+    let paths = Paths::under(home.dir.path());
+    let control = |token: Option<SecretText>, passphrase: Option<&str>, command| {
+        let request = ControlRequest {
+            passphrase: passphrase.map(SecretText::new),
+            device: None,
+            token,
+            command,
+        };
+        let paths = paths.clone();
+        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+    };
+    let token = match control(None, Some(PASS), ControlCommand::OpenSession).await {
+        ControlResponse::Session { token } => token,
+        other => panic!("{other:?}"),
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let approval = loop {
+        if let ControlResponse::Overview { overview } =
+            control(Some(token.clone()), None, ControlCommand::Overview).await
+            && let Some(approval) = overview.approvals.into_iter().next()
+        {
+            break approval;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no request waited for approval"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(approval.client.as_deref(), Some("claude-code"));
+    let decide = ControlCommand::Decide {
+        id: approval.id,
+        verdict: Verdict::AllowOnce,
+    };
+    control(Some(token), None, decide).await;
+    let reply: serde_json::Value =
+        serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(reply["id"], 1, "{reply}");
+    assert_ne!(reply["result"]["isError"], true, "{reply}");
+}
