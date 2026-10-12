@@ -7,8 +7,8 @@ use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{PolicyPatch, RequestedHandle};
 use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
 
-use super::app::Effect;
-use super::form::{Field, Form};
+use super::{Field, Form};
+use crate::tui::app::Effect;
 
 const KINDS: &[&str] = &["http", "env", "postgres", "redis"];
 const MODES: &[&str] = &["ask", "auto", "deny"];

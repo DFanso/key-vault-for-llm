@@ -10,8 +10,8 @@ use kv_core::vault::DeviceKind;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroizing;
 
-use super::edit::{self, Purpose};
 use super::form::{Form, Reply};
+use crate::forms::{self, Purpose};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -409,16 +409,16 @@ impl App {
                 self.selected_handle = (self.selected_handle + 1).min(rows.saturating_sub(1));
                 return None;
             }
-            (KeyCode::Char('n'), ..) => (edit::new_handle(), Purpose::Add),
+            (KeyCode::Char('n'), ..) => (forms::new_handle(), Purpose::Add),
             (KeyCode::Enter | KeyCode::Char('e'), Some(request), _) => {
-                (edit::requested_handle(request), Purpose::Add)
+                (forms::requested_handle(request), Purpose::Add)
             }
             (KeyCode::Char('x'), Some(request), _) => return Some(Effect::Dismiss(request.id)),
             (KeyCode::Char('e'), _, Some(handle)) => {
-                (edit::edit_handle(handle), Purpose::Edit(handle.clone()))
+                (forms::edit_handle(handle), Purpose::Edit(handle.clone()))
             }
             (KeyCode::Char('p'), _, Some(handle)) => {
-                (edit::edit_policy(handle), Purpose::Policy(handle.clone()))
+                (forms::edit_policy(handle), Purpose::Policy(handle.clone()))
             }
             (KeyCode::Char('x'), _, Some(handle)) => {
                 self.removing = Some(handle.name.clone());
@@ -451,7 +451,7 @@ impl App {
                 self.message = Some(message);
                 None
             }
-            Reply::Submit => match edit::submit(&editor.purpose, &editor.form) {
+            Reply::Submit => match forms::submit(&editor.purpose, &editor.form) {
                 Ok(effect) => {
                     editor.saving = true;
                     self.message = Some("saving…".into());

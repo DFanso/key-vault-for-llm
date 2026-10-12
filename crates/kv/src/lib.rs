@@ -6,6 +6,7 @@ pub mod cli;
 pub mod client;
 pub mod daemon;
 pub mod device;
+pub mod forms;
 pub mod frame;
 pub mod ipc;
 pub mod mcp;

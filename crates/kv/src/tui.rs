@@ -4,7 +4,6 @@
 //! the token.
 
 pub mod app;
-mod edit;
 pub mod form;
 pub mod view;
 
