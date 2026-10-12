@@ -246,9 +246,9 @@
         "tr",
         null,
         name,
-        el("td", null, handle.kind),
-        el("td", null, handle.read_only ? `${handle.mode}, read only` : handle.mode),
-        el("td", null, allows ? allows.join(", ") : ""),
+        el("td", "short", handle.kind),
+        el("td", "short", handle.read_only ? `${handle.mode}, read only` : handle.mode),
+        el("td", "long", allows ? allows.join(", ") : ""),
         el(
           "td",
           "actions",
@@ -268,12 +268,13 @@
       el(
         "tr",
         null,
-        el("td", "muted", e.ts),
-        el("td", null, e.action),
+        // `2026-10-08T12:03:04.123Z` → `2026-10-08 12:03:04`, as kv tui shows it
+        el("td", "short muted", e.ts.slice(0, 19).replace("T", " ")),
+        el("td", "short", e.action),
         el("td", null, e.handle || ""),
-        el("td", null, e.decision || ""),
-        el("td", null, e.outcome),
-        el("td", null, e.summary || ""),
+        el("td", "short", e.decision || ""),
+        el("td", "short", e.outcome),
+        el("td", "long", e.summary || ""),
       ),
     );
     $("audit-rows").replaceChildren(...rows);
