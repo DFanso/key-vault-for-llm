@@ -1,20 +1,18 @@
 //! `kv tray`: a menu bar (macOS) or notification area (Windows) icon that
-//! shows waiting agent requests and answers them from its menu, after
-//! unlocking with Touch ID or Windows Hello.
+//! shows waiting agent requests and answers them from its menu, and kv's
+//! window, where the vault is unlocked and handles are managed without
+//! `kv tui`.
 
 pub mod icon;
 pub mod login;
 pub mod model;
 #[cfg(any(target_os = "macos", windows))]
 mod ui;
+pub mod window;
 pub mod worker;
 
 use std::fs::{File, TryLockError};
 use std::io;
-#[cfg(any(target_os = "macos", windows))]
-use std::path::Path;
-#[cfg(any(target_os = "macos", windows))]
-use std::process::Command;
 
 use crate::paths::Paths;
 
@@ -49,36 +47,4 @@ pub fn lock_single(paths: &Paths) -> io::Result<File> {
         Err(TryLockError::WouldBlock) => Err(io::Error::other("kv tray is already running")),
         Err(TryLockError::Error(e)) => Err(e),
     }
-}
-
-/// Opens a Terminal window running `<exe> tui`.
-#[cfg(target_os = "macos")]
-pub fn tui_command(exe: &Path) -> Command {
-    let shell = format!("'{}' tui", exe.to_string_lossy().replace('\'', r"'\''"));
-    let script = shell.replace('\\', r"\\").replace('"', r#"\""#);
-    let mut command = Command::new("osascript");
-    command.args([
-        "-e",
-        &format!(r#"tell application "Terminal" to do script "{script}""#),
-        "-e",
-        r#"tell application "Terminal" to activate"#,
-    ]);
-    command
-}
-
-/// Opens a console window running `<exe> tui`, in the user's default
-/// terminal.
-#[cfg(windows)]
-pub fn tui_command(exe: &Path) -> Command {
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-
-    let mut command = Command::new("cmd");
-    command
-        .args(["/c", "start", ""])
-        .arg(exe)
-        .arg("tui")
-        // `start` opens the window; cmd itself needs none.
-        .creation_flags(CREATE_NO_WINDOW);
-    command
 }

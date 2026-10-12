@@ -4,7 +4,6 @@
 //! the token.
 
 pub mod app;
-mod edit;
 pub mod form;
 pub mod view;
 
@@ -93,6 +92,12 @@ impl Driver {
     pub fn with_reason(mut self, reason: &'static str) -> Self {
         self.reason = reason;
         self
+    }
+
+    /// Whether the driver holds a session. The daemon may have ended it
+    /// since; the next request finds out.
+    pub fn has_session(&self) -> bool {
+        self.token.is_some()
     }
 
     /// The device to offer: this platform's, if the vault has a slot for it.

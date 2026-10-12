@@ -1,5 +1,5 @@
-//! The parts of `kv tray` around its UI: the icon images, the
-//! one-tray-at-a-time lock, and the command that opens `kv tui`.
+//! The parts of `kv tray` around its UI: the icon images and the
+//! one-tray-at-a-time lock.
 
 use kv::paths::Paths;
 use kv::tray::icon::{SIZE, rgba};
@@ -64,39 +64,4 @@ fn only_one_tray_runs_at_a_time() {
     assert_eq!(error.to_string(), "kv tray is already running");
     drop(first);
     lock_single(&paths).unwrap();
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn terminal_runs_kv_tui_with_the_path_quoted() {
-    let command = kv::tray::tui_command(std::path::Path::new("/Users/me/it's here/kv"));
-    assert_eq!(command.get_program(), "osascript");
-    let args: Vec<_> = command
-        .get_args()
-        .map(|a| a.to_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(
-        args,
-        [
-            "-e",
-            r#"tell application "Terminal" to do script "'/Users/me/it'\\''s here/kv' tui""#,
-            "-e",
-            r#"tell application "Terminal" to activate"#,
-        ]
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn a_new_console_runs_kv_tui() {
-    let command = kv::tray::tui_command(std::path::Path::new(r"C:\Program Files\kv\kv.exe"));
-    assert_eq!(command.get_program(), "cmd");
-    let args: Vec<_> = command
-        .get_args()
-        .map(|a| a.to_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(
-        args,
-        ["/c", "start", "", r"C:\Program Files\kv\kv.exe", "tui"]
-    );
 }

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+<meta name="color-scheme" content="light dark">
+<title>kv</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<main id="unlock" class="unlock" hidden>
+  <h1>kv is locked</h1>
+  <p id="unlock-waiting" class="waiting" hidden></p>
+  <form id="unlock-form" hidden>
+    <label for="passphrase">Passphrase</label>
+    <div class="row">
+      <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
+      <button type="submit" class="primary">Unlock</button>
+    </div>
+  </form>
+  <button id="use-device" type="button" hidden></button>
+  <p id="unlock-message" class="message" role="alert"></p>
+</main>
+
+<div id="app" hidden>
+  <header>
+    <nav role="tablist">
+      <button type="button" role="tab" data-tab="approvals">Approvals</button>
+      <button type="button" role="tab" data-tab="handles">Handles</button>
+      <button type="button" role="tab" data-tab="audit">Audit</button>
+    </nav>
+    <span id="locks-in" class="muted"></span>
+    <button id="lock" type="button">Lock</button>
+  </header>
+  <p id="app-message" class="message" role="status" hidden></p>
+
+  <section id="approvals" role="tabpanel">
+    <p id="no-approvals" class="empty">No requests waiting</p>
+    <div id="cards"></div>
+  </section>
+
+  <section id="handles" role="tabpanel" hidden>
+    <div id="requests"></div>
+    <div class="toolbar">
+      <h2>Handles</h2>
+      <button id="add" type="button" class="primary">Add handle</button>
+    </div>
+    <p id="no-handles" class="empty">No handles yet</p>
+    <table id="handle-table">
+      <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Allows</th><th></th></tr></thead>
+      <tbody id="handle-rows"></tbody>
+    </table>
+  </section>
+
+  <section id="audit" role="tabpanel" hidden>
+    <p id="no-audit" class="empty">Nothing in the audit log yet</p>
+    <table id="audit-table">
+      <thead><tr><th>Time</th><th>Action</th><th>Handle</th><th>Decision</th><th>Outcome</th><th>Detail</th></tr></thead>
+      <tbody id="audit-rows"></tbody>
+    </table>
+  </section>
+</div>
+
+<dialog id="form-dialog">
+  <form id="form">
+    <h2 id="form-title"></h2>
+    <div id="form-fields"></div>
+    <p id="form-error" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="form-cancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirm-dialog">
+  <form id="confirm">
+    <p id="confirm-text"></p>
+    <div class="actions">
+      <button type="button" id="confirm-cancel">Cancel</button>
+      <button type="submit" class="danger">Remove</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

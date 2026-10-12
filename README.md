@@ -18,8 +18,8 @@ Protocol over stdio.
 
 Status: agents can make HTTP requests, run programs, and query or connect to
 Postgres and Redis with your secrets over MCP, `kv tui` or a menu bar icon
-(`kv tray`) approves `--mode ask` requests as they arrive, and Touch ID or
-Windows Hello can stand in for the passphrase.
+(`kv tray`, with a window of its own) approves `--mode ask` requests as they
+arrive, and Touch ID or Windows Hello can stand in for the passphrase.
 
 ![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
@@ -204,14 +204,22 @@ kv tray --login on            # --login off removes the login item
 ```
 
 Unlock the tray from its menu with Touch ID or Windows Hello (set up with
-`kv biometric enable`, below); it never asks for the passphrase, so without
-either its menu opens `kv tui` instead. Once unlocked, each waiting request is
-an entry with the agent, tool and handles, and a submenu showing what it
-asked for and the same four answers as the TUI: Allow once, Allow for this
-session, Deny, and Deny and block. "Lock vault" locks the vault for every
-client. Handle requests from agents are answered in `kv tui`, which the menu
-opens. Anything the tray cannot do, such as answering a request that has
-already timed out, shows up as a notification.
+`kv biometric enable`, below). Without either, or when the prompt is
+cancelled, "Unlock…" opens kv's window, which asks for the passphrase. Once
+unlocked, each waiting request is an entry with the agent, tool and handles,
+and a submenu showing what it asked for and the same four answers as the
+TUI: Allow once, Allow for this session, Deny, and Deny and block. "Lock
+vault" locks the vault for every client. Anything the menu cannot do, such as
+answering a request that has already timed out, shows up as a notification.
+
+"Open kv…" opens kv's window, which does everything `kv tui` does without a
+terminal: an Approvals tab with each waiting request in full, a Handles tab
+where you fill in agents' handle requests and add, edit, re-police or remove
+handles, and an Audit tab. The menu and the window share one session; closing
+the window keeps it, and Lock (in either) ends it. kv's window only opens
+when you pick one of these menu items. Treat a kv window that appears on its
+own, asking for your passphrase, as fake. On Windows the window needs the
+Microsoft Edge WebView2 Runtime, which Windows 10 and 11 normally have.
 
 The login item takes effect at your next login. On Windows a console window
 may flash as it starts.
@@ -306,9 +314,10 @@ program you let a handle run does receive the secret.
 
 An unlocked `kv tui` or `kv tray` answers requests for whoever drives it. A
 program running as you that can control other programs' windows can type
-into the TUI or click Allow in the tray's menu: on macOS only programs you
-have given the Accessibility permission, on Windows any program at the same
-integrity level. Lock the vault, or quit both, when agents run unattended.
+into the TUI or click Allow in the tray's menu or window: on macOS only
+programs you have given the Accessibility permission, on Windows any program
+at the same integrity level. Lock the vault, or quit both, when agents run
+unattended.
 
 Single-user, for macOS, Linux and Windows, written in Rust.
 

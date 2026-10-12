@@ -2,6 +2,7 @@
 //! in, the icon, its tooltip and the menu come out.
 
 use kv::tray::model::{Action, Edit, IconState, Item, Model, View, edits, one_line, same_shape};
+use kv::tray::window::Tab;
 use kv_core::proto::{Approval, Overview, RequestedHandle, Status, Verdict};
 use kv_core::vault::DeviceKind;
 
@@ -106,7 +107,7 @@ fn without_a_session_the_menu_offers_to_unlock() {
         labels(&model.menu),
         [
             "Unlock with Touch ID",
-            "Open kv tui",
+            "Open kv…",
             "--",
             "Start at login",
             "Quit kv tray"
@@ -118,19 +119,19 @@ fn without_a_session_the_menu_offers_to_unlock() {
     });
     assert_eq!(labels(&hello.menu)[0], "Unlock with Windows Hello");
 
-    // No device slot: the passphrase is only typed into a terminal.
+    // No device slot: kv's window asks for the passphrase.
     let model = Model::new(View {
         device: None,
         ..view(Some(&locked), None)
     });
     assert_eq!(
         labels(&model.menu),
-        ["Unlock in kv tui", "--", "Start at login", "Quit kv tray"]
+        ["Unlock…", "--", "Start at login", "Quit kv tray"]
     );
     assert!(matches!(
         &model.menu[0],
         Item::Action {
-            action: Action::OpenTui,
+            action: Action::Open(Tab::Approvals),
             ..
         }
     ));
@@ -142,7 +143,10 @@ fn without_a_session_the_menu_offers_to_unlock() {
     let mut fresh = status(true, 0);
     fresh.vault_exists = false;
     let model = Model::new(view(Some(&fresh), None));
-    assert_eq!(labels(&model.menu)[0], "(No vault yet: run `kv init`)");
+    assert_eq!(
+        labels(&model.menu)[..2],
+        ["(No vault yet: run `kv init`)", "Open kv…"]
+    );
 }
 
 #[test]
@@ -159,7 +163,7 @@ fn each_waiting_request_has_its_answers() {
             "> agent · http_request · openrouter",
             "--",
             "Lock vault",
-            "Open kv tui",
+            "Open kv…",
             "--",
             "Start at login",
             "Quit kv tray"
@@ -236,14 +240,24 @@ fn with_a_session_and_nothing_waiting_the_menu_says_so() {
     let model = Model::new(view(Some(&overview.status), Some(&overview)));
     assert_eq!(
         labels(&model.menu)[..2],
-        ["(No requests waiting)", "2 handle requests: open kv tui"]
+        ["(No requests waiting)", "2 handle requests: open kv…"]
     );
     assert!(matches!(
         &model.menu[1],
         Item::Action {
-            action: Action::HandleRequests,
+            action: Action::Open(Tab::Handles),
             ..
         }
+    ));
+    assert!(matches!(
+        model
+            .menu
+            .iter()
+            .find(|item| matches!(item, Item::Action { label, .. } if label == "Open kv…")),
+        Some(Item::Action {
+            action: Action::Open(Tab::Approvals),
+            ..
+        })
     ));
 }
 
@@ -285,6 +299,12 @@ fn ids_are_unique_and_lead_back_to_the_same_action() {
     );
     assert_eq!(Action::from_id("decide:9:sideways"), None);
     assert_eq!(Action::from_id("request:7"), None);
+    assert_eq!(Action::Open(Tab::Handles).id(), "open:handles");
+    assert_eq!(
+        Action::from_id("open:audit"),
+        Some(Action::Open(Tab::Audit))
+    );
+    assert_eq!(Action::from_id("open:settings"), None);
 
     // The checkbox turns the login item off when it is on.
     let check = model

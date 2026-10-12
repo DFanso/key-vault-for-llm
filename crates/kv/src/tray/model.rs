@@ -5,6 +5,8 @@
 use kv_core::proto::{Approval, Overview, Status, Verdict};
 use kv_core::vault::DeviceKind;
 
+use super::window::{FromPage, Tab};
+
 /// How long a request's label may be.
 const LABEL_LEN: usize = 60;
 /// How long a line of a request's detail may be.
@@ -25,10 +27,12 @@ pub enum IconState {
 pub enum Action {
     /// Touch ID or Windows Hello, then a session.
     Unlock,
-    /// A terminal running `kv tui`.
-    OpenTui,
-    /// `kv tui`, where agents' handle requests are answered.
-    HandleRequests,
+    /// kv's window, on this tab once unlocked, or on its unlock screen.
+    Open(Tab),
+    /// A message from the window's page. Never on a menu.
+    Window(FromPage),
+    /// The user closed the window. Never on a menu.
+    WindowClosed,
     Lock,
     /// Turns the login item on or off.
     Login(bool),
@@ -45,8 +49,12 @@ impl Action {
     pub fn id(&self) -> String {
         match self {
             Action::Unlock => "unlock".into(),
-            Action::OpenTui => "tui".into(),
-            Action::HandleRequests => "handle-requests".into(),
+            Action::Open(Tab::Approvals) => "open:approvals".into(),
+            Action::Open(Tab::Handles) => "open:handles".into(),
+            Action::Open(Tab::Audit) => "open:audit".into(),
+            // `from_id` reads neither, so no menu item can stand for them.
+            Action::Window(_) => "window".into(),
+            Action::WindowClosed => "window-closed".into(),
             Action::Lock => "lock".into(),
             Action::Login(true) => "login:on".into(),
             Action::Login(false) => "login:off".into(),
@@ -58,8 +66,9 @@ impl Action {
     pub fn from_id(id: &str) -> Option<Action> {
         Some(match id {
             "unlock" => Action::Unlock,
-            "tui" => Action::OpenTui,
-            "handle-requests" => Action::HandleRequests,
+            "open:approvals" => Action::Open(Tab::Approvals),
+            "open:handles" => Action::Open(Tab::Handles),
+            "open:audit" => Action::Open(Tab::Audit),
             "lock" => Action::Lock,
             "login:on" => Action::Login(true),
             "login:off" => Action::Login(false),
@@ -182,16 +191,16 @@ fn locked_menu(view: &View) -> Vec<Item> {
     if view.status.is_some_and(|s| !s.vault_exists) {
         return vec![
             Item::Text("No vault yet: run `kv init`".into()),
-            action("Open kv tui", Action::OpenTui),
+            action("Open kv…", Action::Open(Tab::Approvals)),
         ];
     }
     match view.device {
         Some(device) => vec![
             action(&format!("Unlock with {}", device.label()), Action::Unlock),
-            action("Open kv tui", Action::OpenTui),
+            action("Open kv…", Action::Open(Tab::Approvals)),
         ],
-        // The passphrase is only ever typed into a terminal.
-        None => vec![action("Unlock in kv tui", Action::OpenTui)],
+        // kv's window asks for the passphrase.
+        None => vec![action("Unlock…", Action::Open(Tab::Approvals))],
     }
 }
 
@@ -203,17 +212,17 @@ fn unlocked_menu(overview: &Overview) -> Vec<Item> {
     match overview.handle_requests.len() {
         0 => {}
         1 => menu.push(action(
-            "1 handle request: open kv tui",
-            Action::HandleRequests,
+            "1 handle request: open kv…",
+            Action::Open(Tab::Handles),
         )),
         n => menu.push(action(
-            &format!("{n} handle requests: open kv tui"),
-            Action::HandleRequests,
+            &format!("{n} handle requests: open kv…"),
+            Action::Open(Tab::Handles),
         )),
     }
     menu.push(Item::Separator);
     menu.push(action("Lock vault", Action::Lock));
-    menu.push(action("Open kv tui", Action::OpenTui));
+    menu.push(action("Open kv…", Action::Open(Tab::Approvals)));
     menu
 }
 
