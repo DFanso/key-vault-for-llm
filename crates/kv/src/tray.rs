@@ -3,3 +3,4 @@
 //! unlocking with Touch ID or Windows Hello.
 
 pub mod model;
+pub mod worker;
