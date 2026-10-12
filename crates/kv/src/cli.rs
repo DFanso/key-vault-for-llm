@@ -74,6 +74,19 @@ enum Command {
     Mcp,
     /// Approve agent requests, see handles and lock the vault in a terminal UI
     Tui,
+    /// Show waiting agent requests in the menu bar (macOS) or the
+    /// notification area (Windows) and answer them from its menu
+    Tray {
+        /// Start kv tray at login, or stop doing so: on or off. Changes the
+        /// login item and exits.
+        #[arg(
+            long,
+            value_name = "ON|OFF",
+            hide_possible_values = true,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        login: Option<bool>,
+    },
     /// Start a handle's run command with its variables set, on this
     /// process's stdin and stdout (for an MCP client that should talk to
     /// one server directly)
@@ -256,6 +269,17 @@ type Result<T> = std::result::Result<T, CliError>;
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Tray { login } = cli.command {
+        // The tray's event loop needs the main thread, so it runs before
+        // any runtime; its worker starts one of its own.
+        return match tray(login) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("kv: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -278,6 +302,21 @@ pub fn main() -> ExitCode {
             eprintln!("kv: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn tray(login: Option<bool>) -> io::Result<()> {
+    match login {
+        Some(on) => {
+            crate::tray::login::set(on)?;
+            if on {
+                println!("kv tray will start at login");
+            } else {
+                println!("kv tray will no longer start at login");
+            }
+            Ok(())
+        }
+        None => crate::tray::run(Paths::from_env()?),
     }
 }
 
@@ -424,6 +463,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Run { .. } => unreachable!("main runs kv run before this"),
+        Command::Tray { .. } => unreachable!("main runs kv tray before this"),
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;

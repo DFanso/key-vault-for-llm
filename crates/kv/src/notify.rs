@@ -19,3 +19,8 @@ fn show(summary: &'static str, text: String) {
             .show();
     });
 }
+
+/// Something `kv tray` could not do, since its menu cannot say so.
+pub fn tray(text: String) {
+    show("kv tray", text);
+}

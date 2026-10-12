@@ -689,3 +689,24 @@ fn kv_run_reports_a_refusal_and_fails() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.starts_with("kv run: unknown_handle"), "{stderr}");
 }
+
+/// One `kv tray` at a time; other platforms have no tray at all.
+#[test]
+fn a_second_tray_refuses_to_start() {
+    let kv = Kv::new();
+    let _held = kv::tray::lock_single(&kv.paths()).unwrap();
+    let stderr = kv.fails(&["tray"], "");
+    if cfg!(any(target_os = "macos", windows)) {
+        assert!(stderr.contains("kv tray is already running"), "{stderr}");
+    } else {
+        assert!(
+            stderr.contains("kv tray runs on macOS and Windows only"),
+            "{stderr}"
+        );
+        let stderr = kv.fails(&["tray", "--login", "on"], "");
+        assert!(
+            stderr.contains("kv tray runs on macOS and Windows only"),
+            "{stderr}"
+        );
+    }
+}
