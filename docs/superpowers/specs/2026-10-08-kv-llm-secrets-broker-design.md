@@ -122,8 +122,9 @@ on Windows. Both sockets verify the peer runs as the same OS user
   files from a crashed daemon are replaced once the lock is held.
 - `kv stop` locks and shuts the daemon down. `KV_HOME` puts the vault, audit
   log and sockets under one directory instead of the platform defaults.
-- The daemon starts locked and exits after an idle period while locked. No
-  launchd/systemd/Windows service install is required.
+- The daemon starts locked and exits after an idle period while locked.
+  Agent status reads, which `kv tray` makes every second, do not count as
+  use. No launchd/systemd/Windows service install is required.
 - If the daemon crashes, the key is gone with it. `kv mcp` respawns it, and it
   comes back locked.
 
@@ -510,6 +511,9 @@ A notification announces each request.
   `D` deny and set the secret to `mode: deny`. Decisions are audited as
   `decide`; the request itself is audited with decision `approved` or
   `denied`, and an unanswered one as `denied` with outcome `approval_timeout`.
+- `kv tray` (macOS and Windows) answers the same requests from a menu bar
+  or notification area icon with the same four actions, after a Touch ID or
+  Hello unlock; see `2026-10-12-kv-tray-design.md`.
 - OS notification via `notify-rust` when a request is queued, naming the
   client and handles but no arguments. On by default; `KV_NOTIFY=off` (or
   `kv daemon --notify off`) turns it off.
@@ -597,7 +601,8 @@ quarantine.
 ## 8. Out of scope for v1
 
 - Done after v1.0: `kv run` and servers reached through `kv mcp`, with the
-  command pinned in the handle; see `2026-10-09-kv-run-design.md`.
+  command pinned in the handle; see `2026-10-09-kv-run-design.md`. `kv tray`,
+  a menu bar icon that answers approvals; see `2026-10-12-kv-tray-design.md`.
 - v1.1: SSH (key-holding agent, `ssh_exec`); Claude Code guard hooks that
   block reads of `.env`, `~/.ssh/id_*`, `printenv`.
 - Later: lock on sleep / screen lock; pluggable backends (1Password,

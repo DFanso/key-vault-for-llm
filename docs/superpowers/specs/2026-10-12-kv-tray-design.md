@@ -1,7 +1,7 @@
 # kv tray: approve agent requests from the menu bar — design
 
 Date: 2026-10-12
-Status: approved for planning
+Status: implemented on feat/tray
 
 ## 1. Goal
 
@@ -103,6 +103,13 @@ still: unlocking starts the daemon, as every client does.
 - "Start at login"
 - "Quit kv tray"
 
+When the daemon has no vault yet, the menu says "No vault yet: run `kv init`"
+in place of the unlock item.
+
+The menu is replaced only when its items change. When only the countdowns
+("Expires in Ns") change, their text is updated in place, so a menu the user
+has open is not swapped for a new one every second.
+
 Labels are made single-line (control characters and line breaks become
 spaces, runs of whitespace collapse) and cut to 60 characters with "…";
 detail lines are cut to 100. The daemon has already made agent text safe to
@@ -112,12 +119,14 @@ show (main design, section 5 "Approval"); the tray only shortens it.
 
 New module `crates/kv/src/tray/`, compiled on macOS and Windows:
 
-- **`model`** — pure state. `Model::new(status, overview, device)` gives the
-  icon state, the tooltip or title, and a `Menu` of `Item`s (label, enabled,
-  checked, children, and an `Action`). Item ids are derived from the action
-  (`decide:<approval id>:<verdict>`, `unlock`, `lock`, `tui`, `login`,
-  `quit`), so a click maps back to the same request and answer however the
-  list moved. No UI or daemon code; unit-tested.
+- **`model`** — pure state. `Model::new(View { status, overview, device,
+  login })` gives the icon state, the tooltip and title, and the menu as a
+  list of `Item`s (actions, the login checkbox, disabled text lines,
+  separators, and a submenu per request). Item ids are derived from the
+  action (`decide:<approval id>:<verdict>`, `unlock`, `lock`, `tui`,
+  `handle-requests`, `login:on`, `login:off`, `quit`), so a click maps back
+  to the same request and answer however the list moved. No UI or daemon
+  code; unit-tested.
 - **`ui`** — the main thread. Runs the `tao` event loop (macOS requires the
   status item on the main thread), owns the `TrayIcon` and the `muda` menu,
   rebuilds the menu when a new `Model` arrives through the event loop's
@@ -134,8 +143,8 @@ New module `crates/kv/src/tray/`, compiled on macOS and Windows:
      - `Decide(id, verdict)`: `ControlCommand::Decide` through the driver;
      - `Lock`: the driver's lock, which also drops the session;
      - `OpenTui`: open a terminal running `<current exe> tui` (macOS:
-       `osascript` telling Terminal to `do script`; Windows: `wt.exe` when on
-       the PATH, otherwise `cmd /c start`);
+       `osascript` telling Terminal to `do script`; Windows: `cmd /c start`,
+       which opens the user's default terminal, Windows Terminal included);
      - `Login(on)`: `login::set(on)`;
      - `Quit`: end the loop and the event loop.
 - **`login`** — the login item.
@@ -148,6 +157,12 @@ New module `crates/kv/src/tray/`, compiled on macOS and Windows:
     `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, set to
     `"<current exe>" tray`; `--login off` deletes it.
   - `is_on()` reads the same place, for the checkbox.
+  - `kv tray --login on|off` changes the item, prints what it did and exits;
+    it does not start a tray.
+  - Started from the Run key, Windows gives `kv.exe` (a console program) a
+    console window of its own. The tray frees a console no other process
+    shares, so only a brief flash remains at login; started from a terminal
+    it keeps that terminal's console.
 
 `Driver::with_device`, `ask_device`, `finish_device` and the `DEVICE_REASON`
 constant become parameters where the tray needs a different prompt text:
@@ -213,8 +228,9 @@ replaced by the locked model.
   yields the unlocked model; allowing a waiting request lets the agent's
   call return 200; denying returns the agent's denial; locking elsewhere
   returns the model to locked; a decision on a request that has gone becomes
-  a notification-worthy error. The worker takes a `Notifier` trait so tests
-  record notifications instead of showing them.
+  a notification-worthy error. The worker takes a `Desktop` trait
+  (notifications, opening `kv tui`, the login item) so tests record what it
+  asked for instead of doing it.
 - `login` tests on macOS: `set(true)` writes the plist under a temporary
   home with the current exe and `tray`, `is_on()` sees it, `set(false)`
   removes it. The Windows registry code is compiled by CI on windows-latest.
