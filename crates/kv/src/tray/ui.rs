@@ -1,14 +1,17 @@
-//! The tray's main thread: the event loop, the icon and its menu. macOS
-//! wants the status item on the main thread, so the daemon side runs on a
-//! thread of its own (`worker`) and sends each new `Model` here through the
-//! event loop; menu clicks go back to it as `Action`s.
+//! The tray's main thread: the event loop, the icon, its menu and kv's
+//! window. macOS wants all of them on the main thread, so the daemon side
+//! runs on a thread of its own (`worker`) and sends each new `Model` and
+//! each message for the page here through the event loop; menu clicks and
+//! what the page sends go back to it as `Action`s.
+
+mod webview;
 
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
 
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::event::{Event, StartCause, WindowEvent};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -21,9 +24,14 @@ use super::{icon, login};
 use crate::device;
 use crate::notify;
 use crate::paths::Paths;
+use webview::KvWindow;
 
 enum Message {
     Show(Model),
+    /// Open kv's window, or bring it to the front. The worker sends the tab
+    /// to the page itself.
+    Open,
+    Page(ToPage),
     /// The worker has stopped.
     Quit,
 }
@@ -45,14 +53,18 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     }
 
     let (actions, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let clicks = actions.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if let Some(action) = Action::from_id(event.id.as_ref()) {
-            let _ = actions.send(action);
+            let _ = clicks.send(action);
         }
     }));
     let proxy = event_loop.create_proxy();
+    let system = System {
+        proxy: proxy.clone(),
+    };
     std::thread::spawn(move || {
-        let worker = Worker::new(paths, device::platform().map(Arc::from), System);
+        let worker = Worker::new(paths, device::platform().map(Arc::from), system);
         let show = proxy.clone();
         runtime.block_on(worker.run(inbox, move |model| {
             let _ = show.send_event(Message::Show(model));
@@ -61,7 +73,8 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     });
 
     let mut tray: Option<Tray> = None;
-    event_loop.run(move |event, _, flow| {
+    let mut window: Option<KvWindow> = None;
+    event_loop.run(move |event, target, flow| {
         // Held for as long as the loop runs.
         let _ = &lock;
         *flow = ControlFlow::Wait;
@@ -78,7 +91,32 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                     tray.show(model);
                 }
             }
+            Event::UserEvent(Message::Open) => match &window {
+                Some(open) => open.raise(),
+                None => match KvWindow::open(target, actions.clone()) {
+                    Ok(opened) => window = Some(opened),
+                    Err(e) => {
+                        eprintln!("kv: cannot open kv's window: {e}");
+                        notify::tray(no_window(&e));
+                        let _ = actions.send(Action::WindowClosed);
+                    }
+                },
+            },
+            Event::UserEvent(Message::Page(message)) => {
+                if let Some(open) = &window {
+                    open.send(&message);
+                }
+            }
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::CloseRequested,
+                ..
+            } if window.as_ref().is_some_and(|open| open.id() == window_id) => {
+                window = None;
+                let _ = actions.send(Action::WindowClosed);
+            }
             Event::UserEvent(Message::Quit) => {
+                window = None;
                 tray = None;
                 *flow = ControlFlow::Exit;
             }
@@ -96,6 +134,9 @@ struct Tray {
     /// What `menu` holds, item for item.
     items: Vec<Native>,
     shown: Option<Model>,
+    /// The editing keys for kv's window.
+    #[cfg(target_os = "macos")]
+    _edit: Option<Menu>,
 }
 
 impl Tray {
@@ -114,6 +155,8 @@ impl Tray {
             menu,
             items: Vec::new(),
             shown: None,
+            #[cfg(target_os = "macos")]
+            _edit: webview::edit_menu(),
         })
     }
 
@@ -249,18 +292,34 @@ fn native(item: &Item) -> Native {
     }
 }
 
+/// What to tell the user when the window cannot open.
+fn no_window(error: &str) -> String {
+    if cfg!(windows) {
+        // Almost always a missing runtime; the error is on stderr.
+        let _ = error;
+        "kv's window needs the Microsoft Edge WebView2 Runtime".to_owned()
+    } else {
+        format!("kv's window could not open: {error}")
+    }
+}
+
 /// The real desktop: notifications, kv's window, the login item.
-struct System;
+struct System {
+    proxy: EventLoopProxy<Message>,
+}
 
 impl Desktop for System {
     fn notify(&self, text: &str) {
         notify::tray(text.to_owned());
     }
 
-    // Task 5 draws the window.
-    fn show_window(&self, _tab: Tab) {}
+    fn show_window(&self, _tab: Tab) {
+        let _ = self.proxy.send_event(Message::Open);
+    }
 
-    fn page(&self, _message: ToPage) {}
+    fn page(&self, message: ToPage) {
+        let _ = self.proxy.send_event(Message::Page(message));
+    }
 
     fn login_is_on(&self) -> bool {
         login::is_on()

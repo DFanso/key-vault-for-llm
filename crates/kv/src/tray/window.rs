@@ -1,6 +1,7 @@
-//! What kv's window and the tray say to each other. The page sends JSON
-//! that is read into `FromPage` or dropped; the tray answers with `ToPage`,
-//! run in the page as a call to `kv.receive`. Nothing here touches the UI.
+//! kv's window, free of the UI: the page the binary carries, and what the
+//! page and the tray say to each other. The page sends JSON that is read
+//! into `FromPage` or dropped; the tray answers with `ToPage`, run in the
+//! page as a call to `kv.receive`.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::Entry;
 use crate::forms::FormView;
+
+/// What the page may load: its own files, nothing else.
+pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'";
+
+/// Where the page is served from: the `kv` protocol on macOS, and on
+/// Windows the https address WebView2 gives it.
+#[cfg(windows)]
+pub const PAGE_URL: &str = "https://kv.app/index.html";
+#[cfg(not(windows))]
+pub const PAGE_URL: &str = "kv://app/index.html";
+
+#[cfg(windows)]
+const ORIGIN: &str = "https://kv.app/";
+#[cfg(not(windows))]
+const ORIGIN: &str = "kv://app/";
+
+/// Whether `url` is kv's page, the only one whose messages count and the
+/// only one the window may show.
+pub fn is_page_url(url: &str) -> bool {
+    url.starts_with(ORIGIN)
+}
+
+/// One of the page's files.
+pub struct Asset {
+    pub mime: &'static str,
+    pub body: &'static str,
+}
+
+/// The file at `path` under the page's address, if the page has one.
+pub fn asset(path: &str) -> Option<Asset> {
+    let (mime, body) = match path {
+        "/" | "/index.html" => ("text/html", include_str!("page/index.html")),
+        "/app.js" => ("text/javascript", include_str!("page/app.js")),
+        "/app.css" => ("text/css", include_str!("page/app.css")),
+        _ => return None,
+    };
+    Some(Asset { mime, body })
+}
 
 /// The window's tabs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
