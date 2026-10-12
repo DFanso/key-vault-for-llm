@@ -264,19 +264,19 @@ fn action(label: &str, action: Action) -> Item {
 
 /// `text` on one line of at most `max` characters: control characters and
 /// line breaks become spaces, runs of whitespace collapse, and a longer
-/// text ends in "…".
+/// text ends in "…". Each `&` is then doubled, since menus read a single
+/// one as a keyboard shortcut marker and do not show it.
 pub fn one_line(text: &str, max: usize) -> String {
     let words: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || c.is_control())
         .filter(|word| !word.is_empty())
         .collect();
-    let line = words.join(" ");
-    if line.chars().count() <= max {
-        return line;
+    let mut line = words.join(" ");
+    if line.chars().count() > max {
+        line = line.chars().take(max.saturating_sub(1)).collect();
+        line.push('…');
     }
-    let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
+    line.replace('&', "&&")
 }
 
 /// Whether two menus differ only in the text of their `Text` lines, such as

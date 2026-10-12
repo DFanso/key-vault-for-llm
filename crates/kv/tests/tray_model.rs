@@ -349,3 +349,21 @@ fn a_countdown_does_not_change_the_menus_shape() {
     let e = Model::new(view(Some(&more.status), Some(&more)));
     assert!(!same_shape(&a.menu, &e.menu), "one more request");
 }
+
+/// Menus read a single `&` as a keyboard shortcut marker and drop it, so
+/// agent text has each `&` doubled to show as typed.
+#[test]
+fn an_ampersand_in_agent_text_survives_the_menu() {
+    assert_eq!(one_line("GET /a?x=1&y=2", 60), "GET /a?x=1&&y=2");
+    assert_eq!(one_line("abcd&fgh", 5), "abcd…", "cut before doubling");
+    let mut asking = approval(1, true);
+    asking.client = Some("me & co".into());
+    asking.detail = "make && deploy".into();
+    let overview = overview(vec![asking]);
+    let model = Model::new(view(Some(&overview.status), Some(&overview)));
+    let Item::Submenu { label, items, .. } = &model.menu[0] else {
+        panic!();
+    };
+    assert!(label.starts_with("me && co · "), "{label}");
+    assert_eq!(items[0], Item::Text("make &&&& deploy".into()));
+}
