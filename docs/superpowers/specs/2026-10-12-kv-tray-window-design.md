@@ -1,7 +1,7 @@
 # kv tray window: unlock and manage kv without the TUI — design
 
 Date: 2026-10-12
-Status: approved for planning
+Status: implemented on feat/tray-window
 
 ## 1. Goal
 
@@ -131,23 +131,28 @@ All in the `kv tray` process.
   `fill(&mut Form, values)` (sets each field the page sent, ignoring keys
   the form does not have). `tui::form` keeps the key handling and drawing.
 - **`tray::window`** (pure, all platforms): the page protocol.
-  - `FromPage` (serde, tagged): `Unlock { passphrase }`, `DeviceUnlock`,
-    `Decide { id, verdict }`, `OpenForm { form }` where `form` is
-    `New`, `Request { id }`, `Edit { name }` or `Policy { name }`,
-    `SubmitForm { values }`, `CloseForm`, `Dismiss { id }`, `Remove {
-    name }`, `Lock`, `Tab { tab }`.
+  - `FromPage` (serde, tagged): `Ready` (the page has loaded),
+    `Unlock { passphrase }`, `DeviceUnlock`, `Decide { id, verdict }`,
+    `OpenForm { form }` where `form` is `New`, `Request { id }`,
+    `Edit { name }` or `Policy { name }`, `SubmitForm { values }`,
+    `CloseForm`, `Dismiss { id }`, `Remove { name }`, `Lock`,
+    `Tab { tab }`.
   - `ToPage` (serde, tagged): `State { locked, device, waiting_for_device,
     overview }`, `Form { view }`, `FormError { message }`, `FormDone`,
-    `Audit { entries }`, `Message { text }`, `Show { screen }`.
+    `Audit { entries }`, `Message { text, request }` (`request` names the
+    card it belongs on), `Show { tab }`. The unlock screen is not a tab:
+    the page shows it whenever `State.locked` is true.
   - Passphrases and secret values arrive as plain strings and are turned
     into `SecretText` before anything else touches them.
 - **`tray::worker`** gains the window's state: whether it is open, its
-  active tab, the open form and its `Purpose`, and a pending device prompt
-  for the window. `Action` gains `Window(FromPage)`, `OpenWindow(Screen)`
-  and `WindowClosed`. Every tick it sends the menu's `Model` as today and,
+  active tab, the open form and its `Purpose`, and who is waiting on a
+  device prompt. The menu's `OpenTui` and `HandleRequests` become
+  `Action::Open(Tab)`, and `Action` gains `Window(FromPage)` and
+  `WindowClosed`. Its `Desktop` swaps `open_tui` for `show_window(Tab)` and
+  `page(ToPage)`. Every tick it sends the menu's `Model` as today and,
   while the window is open, a `State` (and `Audit` on the Audit tab).
-- **`tray::ui`** creates the wry `WebView` in a tao window on
-  `OpenWindow`, shows it if it exists, serves the page under the custom
+- **`tray::ui`** creates the wry `WebView` in a tao window when the worker
+  asks to show the window, raises it if it exists, serves the page under the custom
   protocol `kv`, forwards IPC strings to the worker as `FromPage` (dropping
   any that do not parse or that come from another URL), and runs
   `kv.receive(<json>)` for each `ToPage`. Closing the window sends

@@ -1,7 +1,8 @@
 # kv tray: approve agent requests from the menu bar — design
 
 Date: 2026-10-12
-Status: implemented on feat/tray
+Status: implemented on feat/tray; the menu items that opened `kv tui` now
+open kv's window (`2026-10-12-kv-tray-window-design.md`)
 
 ## 1. Goal
 
