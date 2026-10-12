@@ -15,7 +15,7 @@ use kv_core::proto::{
 };
 use kv_core::secret::{AuthPlacement, SecretKind};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{CallToolResult, ContentBlock, RequestMetaObject};
 use rmcp::{
     ErrorData, Peer, RoleServer, ServerHandler, ServiceExt, schemars, tool, tool_handler,
     tool_router,
@@ -179,9 +179,10 @@ impl KvServer {
     async fn http_request(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<HttpRequestArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .ask(
                 Some(&session),
@@ -202,9 +203,10 @@ impl KvServer {
     async fn exec(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<ExecArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .ask(
                 Some(&session),
@@ -224,9 +226,10 @@ impl KvServer {
     async fn db_query(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<DbQueryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .ask(
                 Some(&session),
@@ -245,9 +248,10 @@ impl KvServer {
     async fn db_connect(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<DbConnectArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .ask(
                 Some(&session),
@@ -265,6 +269,7 @@ impl KvServer {
     async fn request_handle(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<RequestHandleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let kind = match args.kind.as_str() {
@@ -286,7 +291,7 @@ impl KvServer {
             }),
             (None, None) => None,
         };
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         let request = AgentRequest::RequestHandle(HandleRequest {
             name: args.name,
             kind,
@@ -324,9 +329,10 @@ impl KvServer {
     async fn list_server_tools(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<ListServerToolsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .servers
             .list_tools(&args.server, session, args.filter.as_deref(), args.schemas)
@@ -339,9 +345,10 @@ impl KvServer {
     async fn call_server_tool(
         &self,
         peer: Peer<RoleServer>,
+        meta: RequestMetaObject,
         Parameters(args): Parameters<CallServerToolArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let session = self.session(&peer);
+        let session = self.session(&peer, &meta);
         Ok(self
             .servers
             .call(
@@ -378,13 +385,18 @@ impl ServerHandler for KvServer {}
 
 impl KvServer {
     /// Who is asking: this process's session id and the client's
-    /// self-reported name from MCP initialization.
-    fn session(&self, peer: &Peer<RoleServer>) -> SessionInfo {
-        let client = peer
-            .peer_info()
-            .map(|info| info.client_info.name.clone())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "unknown MCP client".into());
+    /// self-reported name. A client on the 2026-07-28 protocol skips
+    /// initialization and names itself in each request's `_meta`; older
+    /// clients name themselves once, in `initialize`.
+    fn session(&self, peer: &Peer<RoleServer>, meta: &RequestMetaObject) -> SessionInfo {
+        let client = [
+            meta.client_info().map(|info| info.name),
+            peer.peer_info().map(|info| info.client_info.name.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown MCP client".into());
         SessionInfo {
             id: self.session_id.clone(),
             client,
