@@ -15,8 +15,9 @@ use tray_icon::menu::{
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use super::model::{Action, Edit, IconState, Item, Model, edits};
+use super::window::{Tab, ToPage};
 use super::worker::{Desktop, Worker};
-use super::{icon, login, tui_command};
+use super::{icon, login};
 use crate::device;
 use crate::notify;
 use crate::paths::Paths;
@@ -248,7 +249,7 @@ fn native(item: &Item) -> Native {
     }
 }
 
-/// The real desktop: notifications, a terminal, the login item.
+/// The real desktop: notifications, kv's window, the login item.
 struct System;
 
 impl Desktop for System {
@@ -256,11 +257,10 @@ impl Desktop for System {
         notify::tray(text.to_owned());
     }
 
-    fn open_tui(&self) -> io::Result<()> {
-        let mut child = tui_command(&std::env::current_exe()?).spawn()?;
-        std::thread::spawn(move || child.wait());
-        Ok(())
-    }
+    // Task 5 draws the window.
+    fn show_window(&self, _tab: Tab) {}
+
+    fn page(&self, _message: ToPage) {}
 
     fn login_is_on(&self) -> bool {
         login::is_on()

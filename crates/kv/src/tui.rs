@@ -94,6 +94,12 @@ impl Driver {
         self
     }
 
+    /// Whether the driver holds a session. The daemon may have ended it
+    /// since; the next request finds out.
+    pub fn has_session(&self) -> bool {
+        self.token.is_some()
+    }
+
     /// The device to offer: this platform's, if the vault has a slot for it.
     pub fn device(&self) -> Option<DeviceKind> {
         let kind = self.device.as_ref()?.kind();

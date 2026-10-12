@@ -5,7 +5,7 @@
 use kv_core::proto::{Approval, Overview, Status, Verdict};
 use kv_core::vault::DeviceKind;
 
-use super::window::Tab;
+use super::window::{FromPage, Tab};
 
 /// How long a request's label may be.
 const LABEL_LEN: usize = 60;
@@ -29,6 +29,10 @@ pub enum Action {
     Unlock,
     /// kv's window, on this tab once unlocked, or on its unlock screen.
     Open(Tab),
+    /// A message from the window's page. Never on a menu.
+    Window(FromPage),
+    /// The user closed the window. Never on a menu.
+    WindowClosed,
     Lock,
     /// Turns the login item on or off.
     Login(bool),
@@ -48,6 +52,9 @@ impl Action {
             Action::Open(Tab::Approvals) => "open:approvals".into(),
             Action::Open(Tab::Handles) => "open:handles".into(),
             Action::Open(Tab::Audit) => "open:audit".into(),
+            // `from_id` reads neither, so no menu item can stand for them.
+            Action::Window(_) => "window".into(),
+            Action::WindowClosed => "window-closed".into(),
             Action::Lock => "lock".into(),
             Action::Login(true) => "login:on".into(),
             Action::Login(false) => "login:off".into(),
