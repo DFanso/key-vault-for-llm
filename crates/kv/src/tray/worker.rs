@@ -81,7 +81,7 @@ impl<D: Desktop> Worker<D> {
                 let outcome = self.driver.run(Effect::Lock).await;
                 self.report(outcome);
             }
-            Action::OpenTui | Action::HandleRequests => {
+            Action::Open(_) => {
                 if let Err(e) = self.desktop.open_tui() {
                     self.desktop.notify(&format!("Could not open kv tui: {e}"));
                 }

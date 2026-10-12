@@ -12,6 +12,7 @@ use fake::Fake;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
+use kv::tray::window::Tab;
 use kv::tray::worker::{Desktop, Worker};
 use kv_core::proto::{AgentErrorCode, AgentResponse, ControlCommand, Verdict};
 use live::{Daemon, PASS};
@@ -243,8 +244,8 @@ async fn a_stopped_daemon_ends_the_session() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tui_and_the_login_item_go_to_the_desktop() {
     let (_daemon, _fake, desk, mut worker) = locked().await;
-    assert!(!worker.act(Action::OpenTui).await);
-    assert!(!worker.act(Action::HandleRequests).await);
+    assert!(!worker.act(Action::Open(Tab::Approvals)).await);
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
     assert_eq!(*desk.tuis.lock().unwrap(), 2);
 
     assert!(!worker.act(Action::Login(true)).await);
