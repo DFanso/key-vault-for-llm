@@ -132,7 +132,7 @@ impl Audit {
 }
 
 /// One line of the audit log, as `kv tui` shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub ts: String,
     pub socket: String,

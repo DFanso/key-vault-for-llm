@@ -7,6 +7,7 @@ pub mod login;
 pub mod model;
 #[cfg(any(target_os = "macos", windows))]
 mod ui;
+pub mod window;
 pub mod worker;
 
 use std::fs::{File, TryLockError};
