@@ -1,7 +1,7 @@
 # key-vault-for-llm
 
 [![CI](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml)
-[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6e40c9)](https://modelcontextprotocol.io)
 [![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#what-kv-protects-against)
 [![Postgres and Redis](https://img.shields.io/badge/databases-Postgres%20%7C%20Redis-336791?logo=postgresql&logoColor=white)](#databases)
@@ -17,9 +17,9 @@ Codex, Windsurf, VS Code and any other client that speaks the Model Context
 Protocol over stdio.
 
 Status: agents can make HTTP requests, run programs, and query or connect to
-Postgres and Redis with your secrets over MCP, `kv tui` approves
-`--mode ask` requests as they arrive, and Touch ID or Windows Hello can stand
-in for the passphrase.
+Postgres and Redis with your secrets over MCP, `kv tui` or a menu bar icon
+(`kv tray`) approves `--mode ask` requests as they arrive, and Touch ID or
+Windows Hello can stand in for the passphrase.
 
 ![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
@@ -35,7 +35,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/DFanso/key-vault-for-ll
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/DFanso/key-vault-for-llm/releases/latest/download/kv-installer.ps1 | iex"
 ```
 
-or build it with `cargo install --path crates/kv` (Rust 1.89 or later). Then:
+or build it with `cargo install --path crates/kv` (Rust 1.90 or later). Then:
 
 ```sh
 kv init                       # create the vault and choose a passphrase
@@ -165,7 +165,7 @@ With `--read-only true`:
 ## Approving requests
 
 Handles in `--mode ask` (the default) make the agent wait until you answer in
-`kv tui`, for up to 60 seconds. kv also shows a desktop notification; set
+`kv tui` or `kv tray`, for up to 60 seconds. kv also shows a desktop notification; set
 `KV_NOTIFY=off` and run `kv stop` to turn that off.
 
 ```sh
@@ -191,6 +191,30 @@ newest entries of the audit log. `L` locks the vault, `q` quits.
 ![The Handles tab, with an agent's request for a new handle at the top](docs/images/tui-handles.svg)
 
 ![The Audit tab: queries, a lease, a run program and a refused host](docs/images/tui-audit.svg)
+
+### From the menu bar
+
+On macOS and Windows, `kv tray` puts a key in the menu bar (the notification
+area on Windows) that shows whether the vault is locked and how many
+requests are waiting, and answers them from its menu:
+
+```sh
+kv tray &                     # or start it at login:
+kv tray --login on            # --login off removes the login item
+```
+
+Unlock the tray from its menu with Touch ID or Windows Hello (set up with
+`kv biometric enable`, below); it never asks for the passphrase, so without
+either its menu opens `kv tui` instead. Once unlocked, each waiting request is
+an entry with the agent, tool and handles, and a submenu showing what it
+asked for and the same four answers as the TUI: Allow once, Allow for this
+session, Deny, and Deny and block. "Lock vault" locks the vault for every
+client. Handle requests from agents are answered in `kv tui`, which the menu
+opens. Anything the tray cannot do, such as answering a request that has
+already timed out, shows up as a notification.
+
+The login item takes effect at your next login. On Windows a console window
+may flash as it starts.
 
 ### When the agent needs a key you have not added
 
@@ -279,6 +303,12 @@ an agent can do with a handle through per-secret policy and approvals. It is
 not a sandbox: a malicious process running as your own user can still attack
 it (for example by reading process memory on platforms that allow it). A
 program you let a handle run does receive the secret.
+
+An unlocked `kv tui` or `kv tray` answers requests for whoever drives it. A
+program running as you that can control other programs' windows can type
+into the TUI or click Allow in the tray's menu: on macOS only programs you
+have given the Accessibility permission, on Windows any program at the same
+integrity level. Lock the vault, or quit both, when agents run unattended.
 
 Single-user, for macOS, Linux and Windows, written in Rust.
 

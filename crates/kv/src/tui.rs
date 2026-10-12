@@ -37,7 +37,7 @@ const REFRESH: Duration = Duration::from_millis(500);
 /// How many audit log lines the audit tab shows.
 const AUDIT_LINES: usize = 200;
 
-/// What the TUI's Touch ID prompt says kv is trying to do.
+/// What a Touch ID prompt from `kv tui` says kv is trying to do.
 const DEVICE_REASON: &str = "open kv tui, where you approve agent requests";
 
 /// A Touch ID or Hello prompt waiting for the user. It runs on a thread of
@@ -69,6 +69,7 @@ pub struct Driver {
     paths: Paths,
     token: Option<SecretText>,
     device: Option<Arc<dyn Device>>,
+    reason: &'static str,
 }
 
 impl Driver {
@@ -83,7 +84,15 @@ impl Driver {
             paths,
             token: None,
             device,
+            reason: DEVICE_REASON,
         }
+    }
+
+    /// Sets what the device prompt says kv is trying to do, for a client
+    /// other than `kv tui`.
+    pub fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = reason;
+        self
     }
 
     /// The device to offer: this platform's, if the vault has a slot for it.
@@ -157,11 +166,12 @@ impl Driver {
             }
             Some(chosen) => {
                 let vault = self.paths.vault.clone();
+                let reason = self.reason;
                 // A plain thread, not the runtime's blocking pool, which
                 // would hold up quitting until the user answered.
                 std::thread::spawn(move || {
                     let label = chosen.kind().label();
-                    let asked = device::credential(&vault, chosen.as_ref(), DEVICE_REASON);
+                    let asked = device::credential(&vault, chosen.as_ref(), reason);
                     let _ = tx.send(DeviceAnswer(Answer::Asked(label, asked)));
                 });
             }

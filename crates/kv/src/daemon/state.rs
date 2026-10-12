@@ -275,7 +275,11 @@ impl Daemon {
         request: AgentRequest,
         now: Instant,
     ) -> Prepared {
-        self.last_request = now;
+        // A status read is not use: `kv tray` asks every second, and must
+        // not keep a locked daemon running.
+        if !matches!(request, AgentRequest::Status) {
+            self.last_request = now;
+        }
         match request {
             AgentRequest::Hello(_) => Prepared::Reply(agent_error(
                 AgentErrorCode::BadRequest,

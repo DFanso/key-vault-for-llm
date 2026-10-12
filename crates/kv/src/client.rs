@@ -188,19 +188,38 @@ pub async fn control_if_running(
     paths: &Paths,
     request: &ControlRequest,
 ) -> io::Result<Option<ControlResponse>> {
-    let mut stream = match ipc::connect(&paths.control_endpoint()).await {
-        Ok(stream) => stream,
+    let Some(mut stream) = connect_if_running(&paths.control_endpoint()).await? else {
+        return Ok(None);
+    };
+    exchange(&mut stream, request).await.map(Some)
+}
+
+/// Sends one agent request without starting the daemon: `Ok(None)` when none
+/// is running. For `kv tray`, which asks every second and must not keep a
+/// daemon alive, or start one after `kv stop`.
+pub async fn agent_if_running(
+    paths: &Paths,
+    request: &AgentRequest,
+) -> io::Result<Option<AgentResponse>> {
+    let Some(mut stream) = connect_if_running(&paths.agent_endpoint()).await? else {
+        return Ok(None);
+    };
+    exchange(&mut stream, request).await.map(Some)
+}
+
+async fn connect_if_running(endpoint: &Endpoint) -> io::Result<Option<ClientStream>> {
+    match ipc::connect(endpoint).await {
+        Ok(stream) => Ok(Some(stream)),
         Err(e)
             if matches!(
                 e.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            return Ok(None);
+            Ok(None)
         }
-        Err(e) => return Err(e),
-    };
-    exchange(&mut stream, request).await.map(Some)
+        Err(e) => Err(e),
+    }
 }
 
 async fn exchange<Req: Serialize, Resp: DeserializeOwned>(
