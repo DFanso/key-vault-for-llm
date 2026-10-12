@@ -120,3 +120,18 @@ async fn a_device_prompt_does_not_hold_up_the_tui() {
         Outcome::Opened
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_driver_can_say_what_its_prompt_is_for() {
+    let daemon = Daemon::start().await;
+    let fake = enrolled(&daemon).await;
+    let reason = "open kv tray, where you approve agent requests";
+    let mut driver =
+        Driver::with_device(daemon.paths.clone(), Some(fake.clone() as Arc<dyn Device>))
+            .with_reason(reason);
+    assert!(matches!(
+        driver.run(Effect::DeviceUnlock).await,
+        Outcome::Opened
+    ));
+    assert_eq!(*fake.reasons.lock().unwrap(), vec![reason.to_owned()]);
+}

@@ -431,7 +431,7 @@ fn locked_daemon_exits_after_a_quiet_period() {
             .tick(f.t0 + Duration::from_secs(59), SystemTime::now()),
         After::Continue
     );
-    f.agent_at(f.t0 + Duration::from_secs(59), AgentRequest::Status);
+    f.agent_at(f.t0 + Duration::from_secs(59), AgentRequest::ListHandles);
     assert_eq!(
         f.daemon
             .tick(f.t0 + Duration::from_secs(100), SystemTime::now()),
@@ -440,6 +440,25 @@ fn locked_daemon_exits_after_a_quiet_period() {
     assert_eq!(
         f.daemon
             .tick(f.t0 + Duration::from_secs(120), SystemTime::now()),
+        After::Stop
+    );
+}
+
+/// `kv tray` reads the status every second; that alone must not keep a
+/// locked daemon running.
+#[test]
+fn status_reads_do_not_keep_a_locked_daemon_running() {
+    let mut f = Fixture::with_settings(Settings {
+        idle_lock: Duration::from_secs(10),
+        locked_exit: Duration::from_secs(60),
+        ..Settings::default()
+    });
+    for second in [20, 40, 59] {
+        f.agent_at(f.t0 + Duration::from_secs(second), AgentRequest::Status);
+    }
+    assert_eq!(
+        f.daemon
+            .tick(f.t0 + Duration::from_secs(60), SystemTime::now()),
         After::Stop
     );
 }

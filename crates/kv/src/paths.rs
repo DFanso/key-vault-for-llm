@@ -51,6 +51,11 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// Held by the running `kv tray`, so a second one can tell.
+    pub fn tray_lock_file(&self) -> PathBuf {
+        self.runtime.join("tray.lock")
+    }
+
     pub fn agent_endpoint(&self) -> Endpoint {
         Endpoint::new(&self.runtime, "agent")
     }
@@ -124,6 +129,10 @@ mod tests {
         assert_eq!(paths.vault, Path::new("/tmp/kv-home/vault.kv"));
         assert_eq!(paths.audit, Path::new("/tmp/kv-home/audit.jsonl"));
         assert_eq!(paths.lock_file(), Path::new("/tmp/kv-home/run/daemon.lock"));
+        assert_eq!(
+            paths.tray_lock_file(),
+            Path::new("/tmp/kv-home/run/tray.lock")
+        );
     }
 
     #[test]
