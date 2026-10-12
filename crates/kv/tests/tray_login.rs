@@ -2,6 +2,7 @@
 //! a value under the Run key on Windows. The Windows test only builds the
 //! value, so running the tests never changes the login items of the
 //! machine they run on.
+#![cfg(any(target_os = "macos", windows))]
 
 use std::path::Path;
 
