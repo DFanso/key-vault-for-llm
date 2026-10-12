@@ -301,3 +301,70 @@ pub fn same_shape(a: &[Item], b: &[Item]) -> bool {
             (a, b) => a == b,
         })
 }
+
+/// One step of turning the menu on screen into a new one. Applied in
+/// order; `at` is a position in the menu as the earlier steps left it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edit {
+    /// The item at `at` stays; its text and check mark come from
+    /// `new[index]`.
+    Keep {
+        at: usize,
+        index: usize,
+    },
+    Insert {
+        at: usize,
+        index: usize,
+    },
+    Remove {
+        at: usize,
+    },
+}
+
+/// The edits that turn `shown` into `new` while keeping every item both
+/// have, so a request the user has open is never taken out and put back
+/// (on Windows a click on an item that was taken out is lost).
+pub fn edits(shown: &[Item], new: &[Item]) -> Vec<Edit> {
+    let mut out = Vec::new();
+    // What is on screen past the edits so far, as indices into `shown`.
+    let mut left: Vec<usize> = (0..shown.len()).collect();
+    let mut at = 0;
+    for (index, item) in new.iter().enumerate() {
+        match left.iter().position(|&s| same_item(&shown[s], item)) {
+            Some(skip) => {
+                for _ in 0..skip {
+                    out.push(Edit::Remove { at });
+                }
+                left.drain(..=skip);
+                out.push(Edit::Keep { at, index });
+            }
+            None => out.push(Edit::Insert { at, index }),
+        }
+        at += 1;
+    }
+    out.extend(left.iter().map(|_| Edit::Remove { at }));
+    out
+}
+
+/// Whether `new` can stand in for `shown` by changing text in place.
+fn same_item(shown: &Item, new: &Item) -> bool {
+    match (shown, new) {
+        (Item::Text(a), Item::Text(b)) => a == b,
+        (Item::Separator, Item::Separator) => true,
+        (Item::Action { action: a, .. }, Item::Action { action: b, .. })
+        | (Item::Check { action: a, .. }, Item::Check { action: b, .. }) => a == b,
+        (
+            Item::Submenu {
+                id: a_id,
+                label: a_label,
+                items: a_items,
+            },
+            Item::Submenu {
+                id: b_id,
+                label: b_label,
+                items: b_items,
+            },
+        ) => a_id == b_id && a_label == b_label && same_shape(a_items, b_items),
+        _ => false,
+    }
+}

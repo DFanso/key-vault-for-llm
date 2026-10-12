@@ -14,7 +14,7 @@ use tray_icon::menu::{
 };
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use super::model::{Action, IconState, Item, Model, same_shape};
+use super::model::{Action, Edit, IconState, Item, Model, edits};
 use super::worker::{Desktop, Worker};
 use super::{icon, login, tui_command};
 use crate::device;
@@ -88,16 +88,20 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
 
 struct Tray {
     icon: TrayIcon,
+    /// The icon's menu. It stays the same menu for the tray's life and
+    /// `show` changes its items in place: on Windows a click on a menu that
+    /// was replaced while open is lost, and on macOS the open menu closes.
+    menu: Menu,
+    /// What `menu` holds, item for item.
+    items: Vec<Native>,
     shown: Option<Model>,
-    /// The menu's `Text` lines in the order `texts` lists them, to change
-    /// in place.
-    lines: Vec<MenuItem>,
 }
 
 impl Tray {
     fn new() -> Result<Self, tray_icon::Error> {
+        let menu = Menu::new();
         let builder = TrayIconBuilder::new()
-            .with_menu(Box::new(Menu::new()))
+            .with_menu(Box::new(menu.clone()))
             .with_tooltip("kv");
         let image = image(IconState::Off);
         #[cfg(target_os = "macos")]
@@ -106,8 +110,9 @@ impl Tray {
         let builder = builder.with_icon(image);
         Ok(Self {
             icon: builder.build()?,
+            menu,
+            items: Vec::new(),
             shown: None,
-            lines: Vec::new(),
         })
     }
 
@@ -126,24 +131,21 @@ impl Tray {
         if shown.as_ref().map(|s| &s.title) != Some(&model.title) {
             self.icon.set_title(model.title.as_deref());
         }
-        match &shown {
-            Some(shown) if shown.menu == model.menu => {}
-            Some(shown) if same_shape(&shown.menu, &model.menu) => {
-                let mut now = Vec::new();
-                texts(&model.menu, &mut now);
-                for (line, text) in self.lines.iter().zip(now) {
-                    if line.text() != text {
-                        line.set_text(text);
-                    }
+        // Also run when nothing changed: `update` puts back a check mark
+        // that a click flipped but that did not take.
+        let before = shown.map(|s| s.menu).unwrap_or_default();
+        for edit in edits(&before, &model.menu) {
+            match edit {
+                Edit::Keep { at, index } => self.items[at].update(&model.menu[index]),
+                Edit::Insert { at, index } => {
+                    let item = native(&model.menu[index]);
+                    let _ = self.menu.insert(item.as_item(), at);
+                    self.items.insert(at, item);
                 }
-            }
-            _ => {
-                let menu = Menu::new();
-                self.lines.clear();
-                for item in &model.menu {
-                    let _ = menu.append(build(item, &mut self.lines).as_ref());
+                Edit::Remove { at } => {
+                    let item = self.items.remove(at);
+                    let _ = self.menu.remove(item.as_item());
                 }
-                self.icon.set_menu(Some(Box::new(menu)));
             }
         }
         self.shown = Some(model);
@@ -160,45 +162,88 @@ fn image(state: IconState) -> Icon {
     Icon::from_rgba(icon::rgba(state), icon::SIZE, icon::SIZE).expect("the icon is SIZE square")
 }
 
-fn build(item: &Item, lines: &mut Vec<MenuItem>) -> Box<dyn IsMenuItem> {
+/// A menu item on screen, kept to change it in place.
+enum Native {
+    Action(MenuItem),
+    Check(CheckMenuItem),
+    Text(MenuItem),
+    Separator(PredefinedMenuItem),
+    /// With its `Text` lines, in order.
+    Submenu(Submenu, Vec<MenuItem>),
+}
+
+impl Native {
+    fn as_item(&self) -> &dyn IsMenuItem {
+        match self {
+            Native::Action(item) | Native::Text(item) => item,
+            Native::Check(item) => item,
+            Native::Separator(item) => item,
+            Native::Submenu(item, _) => item,
+        }
+    }
+
+    /// Takes the text and check mark of `item`, which `edits` matched to
+    /// this one.
+    fn update(&self, item: &Item) {
+        match (self, item) {
+            (Native::Action(native), Item::Action { label, .. }) => set_text(native, label),
+            (Native::Check(native), Item::Check { label, checked, .. }) => {
+                if native.text() != *label {
+                    native.set_text(label);
+                }
+                if native.is_checked() != *checked {
+                    native.set_checked(*checked);
+                }
+            }
+            (Native::Submenu(_, lines), Item::Submenu { items, .. }) => {
+                let texts = items.iter().filter_map(|item| match item {
+                    Item::Text(text) => Some(text),
+                    _ => None,
+                });
+                for (line, text) in lines.iter().zip(texts) {
+                    set_text(line, text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn set_text(item: &MenuItem, text: &str) {
+    if item.text() != text {
+        item.set_text(text);
+    }
+}
+
+fn native(item: &Item) -> Native {
     match item {
         Item::Action { label, action } => {
-            Box::new(MenuItem::with_id(action.id(), label, true, None))
+            Native::Action(MenuItem::with_id(action.id(), label, true, None))
         }
         Item::Check {
             label,
             checked,
             action,
-        } => Box::new(CheckMenuItem::with_id(
+        } => Native::Check(CheckMenuItem::with_id(
             action.id(),
             label,
             true,
             *checked,
             None,
         )),
-        Item::Text(text) => {
-            let line = MenuItem::new(text, false, None);
-            lines.push(line.clone());
-            Box::new(line)
-        }
-        Item::Separator => Box::new(PredefinedMenuItem::separator()),
+        Item::Text(text) => Native::Text(MenuItem::new(text, false, None)),
+        Item::Separator => Native::Separator(PredefinedMenuItem::separator()),
         Item::Submenu { id, label, items } => {
             let submenu = Submenu::with_id(id.as_str(), label, true);
+            let mut lines = Vec::new();
             for item in items {
-                let _ = submenu.append(build(item, lines).as_ref());
+                let item = native(item);
+                let _ = submenu.append(item.as_item());
+                if let Native::Text(line) = item {
+                    lines.push(line);
+                }
             }
-            Box::new(submenu)
-        }
-    }
-}
-
-/// The text of every `Text` line, in the order `build` creates them.
-fn texts(items: &[Item], out: &mut Vec<String>) {
-    for item in items {
-        match item {
-            Item::Text(text) => out.push(text.clone()),
-            Item::Submenu { items, .. } => texts(items, out),
-            _ => {}
+            Native::Submenu(submenu, lines)
         }
     }
 }

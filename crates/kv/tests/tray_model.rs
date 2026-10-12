@@ -1,7 +1,7 @@
 //! What `kv tray` shows, free of any UI: the daemon's status and overview go
 //! in, the icon, its tooltip and the menu come out.
 
-use kv::tray::model::{Action, IconState, Item, Model, View, one_line, same_shape};
+use kv::tray::model::{Action, Edit, IconState, Item, Model, View, edits, one_line, same_shape};
 use kv_core::proto::{Approval, Overview, RequestedHandle, Status, Verdict};
 use kv_core::vault::DeviceKind;
 
@@ -366,4 +366,116 @@ fn an_ampersand_in_agent_text_survives_the_menu() {
     };
     assert!(label.starts_with("me && co · "), "{label}");
     assert_eq!(items[0], Item::Text("make &&&& deploy".into()));
+}
+
+/// Carries out `edits` on a copy of `shown`, checking that every kept item
+/// is the same item as the one it stands for.
+fn apply(shown: &[Item], new: &[Item], edits: &[Edit]) -> Vec<Item> {
+    let mut menu = shown.to_vec();
+    for edit in edits {
+        match *edit {
+            Edit::Keep { at, index } => {
+                match (&menu[at], &new[index]) {
+                    (Item::Submenu { id: a, .. }, Item::Submenu { id: b, .. }) => assert_eq!(a, b),
+                    (Item::Action { action: a, .. }, Item::Action { action: b, .. })
+                    | (Item::Check { action: a, .. }, Item::Check { action: b, .. }) => {
+                        assert_eq!(a, b)
+                    }
+                    (Item::Text(a), Item::Text(b)) => assert_eq!(a, b),
+                    (Item::Separator, Item::Separator) => {}
+                    (a, b) => panic!("kept {a:?} as {b:?}"),
+                }
+                menu[at] = new[index].clone();
+            }
+            Edit::Insert { at, index } => menu.insert(at, new[index].clone()),
+            Edit::Remove { at } => {
+                menu.remove(at);
+            }
+        }
+    }
+    menu
+}
+
+fn removed_ids(shown: &[Item], edits: &[Edit]) -> Vec<String> {
+    let mut menu = shown.to_vec();
+    let mut gone = Vec::new();
+    for edit in edits {
+        match *edit {
+            Edit::Remove { at } => {
+                if let Item::Submenu { id, .. } = menu.remove(at) {
+                    gone.push(id);
+                }
+            }
+            Edit::Insert { at, .. } => menu.insert(at, Item::Separator),
+            Edit::Keep { .. } => {}
+        }
+    }
+    gone
+}
+
+/// The tray changes the menu in place, so a request the user may have open
+/// is never taken out and put back when others come or go: on Windows a
+/// click on an item that was taken out is lost.
+#[test]
+fn requests_that_stay_are_kept_when_the_menu_changes() {
+    let menu = |approvals: Vec<Approval>| {
+        let overview = overview(approvals);
+        Model::new(view(Some(&overview.status), Some(&overview))).menu
+    };
+    let one = menu(vec![approval(1, true)]);
+    let two = menu(vec![approval(1, true), approval(2, true)]);
+    let later = menu(vec![approval(2, true)]);
+
+    let arrived = edits(&one, &two);
+    assert_eq!(apply(&one, &two, &arrived), two);
+    assert!(
+        arrived.contains(&Edit::Keep { at: 0, index: 0 }),
+        "{arrived:?}"
+    );
+    assert_eq!(removed_ids(&one, &arrived), Vec::<String>::new());
+
+    let answered = edits(&two, &later);
+    assert_eq!(apply(&two, &later, &answered), later);
+    assert_eq!(removed_ids(&two, &answered), ["request:1"]);
+
+    let mut ticked = two.clone();
+    if let Item::Submenu { items, .. } = &mut ticked[0] {
+        items[1] = Item::Text("Expires in 41s".into());
+    }
+    let tick = edits(&two, &ticked);
+    assert!(
+        tick.iter().all(|e| matches!(e, Edit::Keep { .. })),
+        "{tick:?}"
+    );
+    assert_eq!(apply(&two, &ticked, &tick), ticked);
+}
+
+#[test]
+fn any_menu_becomes_any_other() {
+    let locked = status(true, 0);
+    let mut fresh = status(true, 0);
+    fresh.vault_exists = false;
+    let busy = overview(vec![approval(1, true), approval(2, false)]);
+    let mut asked = overview(Vec::new());
+    asked.handle_requests = vec![RequestedHandle {
+        id: 1,
+        client: None,
+        request: serde_json::from_str(r#"{"name":"github","kind":"http"}"#).unwrap(),
+    }];
+    let mut logged = view(Some(&locked), None);
+    logged.login = true;
+    let menus = [
+        Model::new(view(None, None)).menu,
+        Model::new(view(Some(&fresh), None)).menu,
+        Model::new(view(Some(&locked), None)).menu,
+        Model::new(logged).menu,
+        Model::new(view(Some(&busy.status), Some(&busy))).menu,
+        Model::new(view(Some(&asked.status), Some(&asked))).menu,
+        Vec::new(),
+    ];
+    for a in &menus {
+        for b in &menus {
+            assert_eq!(&apply(a, b, &edits(a, b)), b, "{a:?} -> {b:?}");
+        }
+    }
 }
