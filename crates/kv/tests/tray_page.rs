@@ -89,3 +89,18 @@ fn messages_count_only_from_the_page() {
         assert!(!is_page_url(url), "{url}");
     }
 }
+
+/// Secret values, variables' included, are only ever typed into password
+/// fields, which hide them and turn on secure input.
+#[test]
+fn secrets_are_typed_only_into_password_fields() {
+    for path in FILES {
+        let body = asset(path).unwrap().body;
+        assert!(!body.contains("textarea"), "{path} draws a textarea");
+    }
+    let script = asset("/app.js").unwrap().body;
+    assert!(
+        script.contains(r#"value.type = "password""#),
+        "variable values"
+    );
+}

@@ -269,8 +269,10 @@ pub struct FieldView {
     /// secrets and variables.
     pub value: String,
     pub hint: String,
-    /// Shown only while another choice field has one of these options.
-    pub when: Option<When>,
+    /// Shown only while each of these choice fields has one of its options:
+    /// the field this one depends on, then the one that depends on, and so
+    /// on, so a field is hidden along with the field it hangs from.
+    pub when: Vec<When>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,14 +316,35 @@ pub fn describe(form: &Form) -> FormView {
                     options,
                     value,
                     hint: field.hint.clone(),
-                    when: field.when.map(|(key, options)| When {
-                        key: key.to_owned(),
-                        options: options.iter().map(|o| (*o).to_owned()).collect(),
-                    }),
+                    when: conditions(form, field),
                 }
             })
             .collect(),
     }
+}
+
+/// What must hold for `field` to be shown, nearest first; the same chain
+/// `Form::is_shown` follows.
+fn conditions(form: &Form, field: &Field) -> Vec<When> {
+    let mut when = Vec::new();
+    let mut next = field.when;
+    // Each step moves to another field, so a chain is never longer than
+    // the form.
+    while let Some((key, options)) = next {
+        if when.len() == form.fields.len() {
+            break;
+        }
+        when.push(When {
+            key: key.to_owned(),
+            options: options.iter().map(|o| (*o).to_owned()).collect(),
+        });
+        next = form
+            .fields
+            .iter()
+            .find(|f| f.key == key)
+            .and_then(|f| f.when);
+    }
+    when
 }
 
 /// Puts what the window sent into `form`: text as typed, a choice by its

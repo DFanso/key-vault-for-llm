@@ -38,7 +38,7 @@ body {
 h1 { font-size: 18px; margin: 0 0 16px; }
 h2 { font-size: 14px; margin: 0; }
 
-button, input, select, textarea {
+button, input, select {
   font: inherit;
   color: inherit;
 }
@@ -53,12 +53,12 @@ button {
 
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 button.danger { color: var(--danger); }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-input, select, textarea {
+input, select {
   border: 1px solid var(--line);
   background: var(--bg);
   border-radius: 6px;
@@ -66,7 +66,9 @@ input, select, textarea {
   width: 100%;
 }
 
-textarea { min-height: 64px; resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.pair { display: flex; gap: 6px; margin-bottom: 6px; }
+.pair-name { flex: 2; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.pair-value { flex: 3; }
 
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 12px; margin: 2px 0 0; }

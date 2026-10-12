@@ -65,6 +65,9 @@
         if (page.locked) {
           closeForm(false);
           closeConfirm();
+          // Whatever it said belonged to the session that just ended.
+          $("app-message").textContent = "";
+          show($("app-message"), false);
         }
         draw();
         break;
@@ -311,9 +314,7 @@
         input.addEventListener("change", applyConditions);
         break;
       case "pairs":
-        input = el("textarea");
-        input.placeholder = "NAME=value, one per line";
-        input.spellcheck = false;
+        input = pairs(id);
         break;
       case "secret":
         input = el("input");
@@ -326,22 +327,71 @@
         input.value = spec.value;
         input.spellcheck = false;
     }
-    input.id = id;
+    if (spec.kind !== "pairs") input.id = id;
     input.dataset.key = spec.key;
     const label = el("label", null, spec.label);
     label.htmlFor = id;
     const node = el("div", "field", label, input, spec.hint ? el("p", "hint", spec.hint) : null);
     node.dataset.key = spec.key;
+    node.dataset.kind = spec.kind;
     return node;
   }
 
+  // Variables: a name and a value per row. The value is a password field,
+  // like every other secret.
+  function pairs(id) {
+    const rows = el("div", "pairs");
+    const add = button("Add variable", () => {
+      rows.insertBefore(pair(null), add);
+      rows.querySelector(".pair:last-of-type .pair-name").focus();
+    });
+    rows.append(pair(id), add);
+    return rows;
+  }
+
+  function pair(id) {
+    const name = el("input", "pair-name");
+    name.type = "text";
+    name.placeholder = "NAME";
+    name.spellcheck = false;
+    name.autocomplete = "off";
+    if (id) name.id = id;
+    const value = el("input", "pair-value");
+    value.type = "password";
+    value.placeholder = "value";
+    value.autocomplete = "off";
+    const row = el("div", "pair", name, value);
+    row.append(button("Remove", () => row.remove()));
+    return row;
+  }
+
+  // The rows as `NAME=value` lines, as the tray reads them. Empty rows are
+  // left out.
+  function pairLines(node) {
+    const lines = [];
+    for (const row of node.querySelectorAll(".pair")) {
+      const name = row.querySelector(".pair-name").value;
+      const value = row.querySelector(".pair-value").value;
+      if (name || value) lines.push(`${name}=${value}`);
+    }
+    return lines.join("\n");
+  }
+
+  // A field shows while every choice in its chain has one of its options;
+  // the tray sends the whole chain, so a field hides with the one it hangs
+  // from.
   function applyConditions() {
     if (!page.form) return;
     for (const spec of page.form.fields) {
-      if (!spec.when) continue;
-      const other = $(`field-${spec.when.key}`);
       const node = document.querySelector(`.field[data-key="${CSS.escape(spec.key)}"]`);
-      if (other && node) show(node, spec.when.options.includes(other.value));
+      if (!node) continue;
+      show(
+        node,
+        spec.when.every((when) => {
+          const other = $(`field-${when.key}`);
+          return other !== null && when.options.includes(other.value);
+        }),
+      );
     }
   }
 
@@ -351,7 +401,11 @@
     const values = {};
     for (const node of $("form-fields").children) {
       if (node.hidden) continue;
-      const input = node.querySelector("input, select, textarea");
+      if (node.dataset.kind === "pairs") {
+        values[node.dataset.key] = pairLines(node);
+        continue;
+      }
+      const input = node.querySelector("input, select");
       values[input.dataset.key] = input.value;
     }
     $("form-error").textContent = "";

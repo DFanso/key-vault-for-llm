@@ -49,12 +49,36 @@ fn a_described_form_never_carries_a_secret() {
     assert_eq!(kind.value, "http");
     let header = field(&view, "header");
     assert_eq!(header.value, "Authorization");
-    let when = header.when.as_ref().unwrap();
-    assert_eq!(
-        (when.key.as_str(), when.options.as_slice()),
-        ("placement", &["header".to_owned()][..])
-    );
     assert_eq!(field(&view, "vars").kind, FieldKind::Pairs);
+}
+
+fn conditions(view: &FormView, key: &str) -> Vec<(String, Vec<String>)> {
+    field(view, key)
+        .when
+        .iter()
+        .map(|when| (when.key.clone(), when.options.clone()))
+        .collect()
+}
+
+/// A field is shown only while the field it depends on is shown too, so
+/// its conditions include that field's: the header fields belong to http
+/// handles, whatever the hidden "Token goes in" still holds.
+#[test]
+fn a_fields_conditions_include_those_of_the_field_it_depends_on() {
+    let view = forms::describe(&forms::new_handle());
+    let strings = |options: &[&str]| options.iter().map(|o| (*o).to_owned()).collect();
+    assert_eq!(
+        conditions(&view, "header"),
+        [
+            ("placement".to_owned(), strings(&["header"])),
+            ("kind".to_owned(), strings(&["http"])),
+        ]
+    );
+    assert_eq!(
+        conditions(&view, "placement"),
+        [("kind".to_owned(), strings(&["http"]))]
+    );
+    assert!(conditions(&view, "name").is_empty());
 }
 
 /// What the window sends gives the same effect as the same values typed

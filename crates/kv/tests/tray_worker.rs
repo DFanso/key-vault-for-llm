@@ -798,3 +798,48 @@ async fn the_window_shows_it_is_waiting_for_touch_id() {
         .expect("the loop stops on Quit")
         .unwrap();
 }
+
+/// When the session ends at a tick, the page hears it is locked first, so
+/// the reason lands on the unlock screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_ends_says_why_after_the_locked_state() {
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Approvals)).await);
+    desk.take();
+    daemon.control(None, ControlCommand::Lock).await;
+    worker.model().await;
+    let pages = desk.take();
+    let locked = pages
+        .iter()
+        .position(|page| matches!(page, ToPage::State { locked: true, .. }))
+        .unwrap_or_else(|| panic!("{pages:?}"));
+    let reason = pages
+        .iter()
+        .position(|page| matches!(page, ToPage::Message { .. }))
+        .unwrap_or_else(|| panic!("{pages:?}"));
+    assert!(locked < reason, "{pages:?}");
+}
+
+/// A page that loads is a window that is open, even if the worker heard it
+/// close: an "Open kv…" and a close can cross on their way to the worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_that_loads_is_an_open_window() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    assert!(!worker.act(Action::WindowClosed).await);
+    desk.take();
+    assert!(!worker.act(page(FromPage::Ready)).await);
+    let pages = desk.take();
+    assert!(
+        pages
+            .iter()
+            .any(|page| matches!(page, ToPage::State { .. })),
+        "{pages:?}"
+    );
+    worker.model().await;
+    assert!(
+        desk.take()
+            .iter()
+            .any(|page| matches!(page, ToPage::State { .. }))
+    );
+}

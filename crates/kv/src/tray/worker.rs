@@ -91,10 +91,11 @@ impl<D: Desktop> Worker<D> {
             Ok(Some(AgentResponse::Status { status })) => Some(status),
             _ => None,
         };
+        let mut ended = None;
         self.overview = match self.driver.refresh().await {
             Some(Outcome::Overview(overview)) => Some(overview),
             Some(Outcome::Ended(message)) => {
-                self.say(Asker::Window, &message, None);
+                ended = Some(message);
                 None
             }
             _ => None,
@@ -103,6 +104,10 @@ impl<D: Desktop> Worker<D> {
             self.set_form(None);
         }
         self.send_state();
+        // After the locked state, so the reason shows on the unlock screen.
+        if let Some(message) = ended {
+            self.say(Asker::Window, &message, None);
+        }
         if self.window.as_ref().is_some_and(|w| w.tab == Tab::Audit) {
             self.send_audit().await;
         }
@@ -200,9 +205,17 @@ impl<D: Desktop> Worker<D> {
         Next::Done
     }
 
-    /// Does what the page asks for. A page message while the window is
-    /// closed is a leftover and is dropped.
+    /// Does what the page asks for. A page that has just loaded means the
+    /// window is open, even if the worker heard it close: an "Open kv…" and
+    /// a close can cross on their way here. Any other page message while
+    /// the window is closed is a leftover and is dropped.
     async fn on_page(&mut self, message: FromPage) -> Next {
+        if self.window.is_none() && message == FromPage::Ready {
+            self.window = Some(Window {
+                tab: Tab::Approvals,
+                form: None,
+            });
+        }
         let Some(window) = &self.window else {
             return Next::Done;
         };
@@ -348,8 +361,15 @@ impl<D: Desktop> Worker<D> {
 
     /// Tells `asker` how an action went, when it failed.
     fn report(&self, asker: Asker, outcome: Outcome, request: Option<u64>) {
-        if let Outcome::Failed(message) | Outcome::Ended(message) = outcome {
-            self.say(asker, &message, request);
+        match outcome {
+            Outcome::Failed(message) => self.say(asker, &message, request),
+            // The page hears it is locked first, so the reason shows on
+            // the unlock screen.
+            Outcome::Ended(message) => {
+                self.send_state();
+                self.say(asker, &message, request);
+            }
+            _ => {}
         }
     }
 
