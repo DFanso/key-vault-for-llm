@@ -23,7 +23,7 @@ use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
-use kv_core::share::{self, OpenRequest, Received, Sent, ShareRequest, SharedSecret};
+use kv_core::share::{self, OpenRequest, Received, Sent, ShareError, ShareRequest, SharedSecret};
 use kv_core::vault::{DeviceKind, DeviceSlot, Vault, device_slots};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -168,6 +168,17 @@ pub struct Daemon {
     /// Programs started through `run`. All end when the vault locks; a
     /// handle's end when it changes.
     runs: Leases,
+}
+
+/// A handle sealed to someone's request, not yet let out.
+struct Sealed {
+    share: String,
+    safety_code: String,
+    /// Who made the request and what they asked for, made safe to show.
+    to: String,
+    asked_for: String,
+    /// What to record once it goes out.
+    sent: Sent,
 }
 
 /// A request waiting for approval, as the daemon keeps it.
@@ -349,7 +360,17 @@ impl Daemon {
             AgentRequest::ReceiveShare(call) => {
                 let response = self.receive_share(call, now);
                 let saved = match &response {
-                    AgentResponse::ShareReceived { handle, .. } => Some(handle.name.as_str()),
+                    AgentResponse::ShareReceived { handle, from, .. } => {
+                        // The user did not see it happen; a share saved
+                        // from kv's window needs no notice.
+                        let name = &handle.name;
+                        self.share_notice = Some(if from.is_empty() {
+                            format!("A shared secret was saved as {name}.")
+                        } else {
+                            format!("A secret shared by {from} was saved as {name}.")
+                        });
+                        Some(handle.name.as_str())
+                    }
                     _ => None,
                 };
                 self.audit
@@ -383,8 +404,8 @@ impl Daemon {
             return agent_error(
                 AgentErrorCode::BadRequest,
                 format!(
-                    "{MAX_SHARE_REQUESTS} share requests are open already; ask the user to cancel \
-                     ones they no longer need in kv's window (Shares)"
+                    "{MAX_SHARE_REQUESTS} share requests are open already; cancel the ones no \
+                     longer needed on the Shares tab of kv's window"
                 ),
             );
         }
@@ -426,24 +447,77 @@ impl Daemon {
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("send_share", &call.handle, &summary, decision, response)
         };
-        let bad = |message: String| agent_error(AgentErrorCode::BadRequest, message);
+        let sealed = match self.seal_share(&call, decoded) {
+            Ok(sealed) => sealed,
+            Err((decision, response)) => return refuse(self, decision, response),
+        };
+        if self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
+        }
+        self.touch(now);
+        let mut detail = format!("send {} to request {safety}", call.handle);
+        if !sealed.to.is_empty() {
+            detail.push_str(&format!(" from {}", sealed.to));
+        }
+        if !sealed.asked_for.is_empty() {
+            detail.push_str(&format!(", who asked for: {}", sealed.asked_for));
+        }
+        let job = Prepared::Reply(AgentResponse::ShareSealed {
+            share: sealed.share,
+            safety_code: sealed.safety_code,
+        });
+        let ask = Ask {
+            tool: "send_share",
+            ask: vec![call.handle.clone()],
+            handles: call.handle.clone(),
+            summary: summary.clone(),
+            detail,
+            cwd: None,
+            grantable: false,
+            sent: Some(sealed.sent),
+        };
+        self.queue(ask, job, session, now)
+    }
+
+    /// Seals a handle for the user in kv's window and records it as sent.
+    /// The sealed text goes only to the user, who passes it on, so asking
+    /// is the approval.
+    fn send_share_by_hand(&mut self, call: &SendShareCall) -> Result<ControlResponse, Failure> {
+        let sealed = self
+            .seal_share(call, ShareRequest::decode(&call.request))
+            .map_err(|(_, response)| control_failure(response))?;
+        let vault = self
+            .vault
+            .as_mut()
+            .expect("a session needs the vault unlocked");
+        record_sent(vault, sealed.sent)
+            .map_err(|e| internal(format!("could not save the vault: {e}")))?;
+        Ok(ControlResponse::ShareSealed {
+            share: sealed.share,
+            safety_code: sealed.safety_code,
+            to: sealed.to,
+            asked_for: sealed.asked_for,
+        })
+    }
+
+    /// Seals `call.handle` to the request in `decoded`, or says why not,
+    /// with the decision for the audit log.
+    fn seal_share(
+        &self,
+        call: &SendShareCall,
+        decoded: Result<ShareRequest, ShareError>,
+    ) -> Result<Sealed, (&'static str, AgentResponse)> {
+        let bad = |message: String| ("invalid", agent_error(AgentErrorCode::BadRequest, message));
         let Some(vault) = &self.vault else {
-            return refuse(self, "locked", self.locked_error());
+            return Err(("locked", self.locked_error()));
         };
-        let Some(secret) = vault.get(&call.handle).cloned() else {
-            return refuse(self, "invalid", unknown_handle(vault, &call.handle));
+        let Some(secret) = vault.get(&call.handle) else {
+            return Err(("invalid", unknown_handle(vault, &call.handle)));
         };
-        let request = match decoded {
-            Ok(request) => request,
-            Err(e) => return refuse(self, "invalid", bad(e.to_string())),
-        };
+        let request = decoded.map_err(|e| bad(e.to_string()))?;
         if secret.policy.mode == Mode::Deny {
             let message = format!("{} is set to deny, so it cannot be shared", call.handle);
-            return refuse(
-                self,
-                "policy",
-                agent_error(AgentErrorCode::PolicyDenied, message),
-            );
+            return Err(("policy", agent_error(AgentErrorCode::PolicyDenied, message)));
         }
         let name = call
             .name
@@ -453,18 +527,11 @@ impl Daemon {
             .unwrap_or(&secret.name)
             .to_owned();
         if validate_handle(&name).is_err() {
-            return refuse(
-                self,
-                "invalid",
-                bad(
-                    "name is up to 63 lowercase letters, digits, - and _, starting with a \
-                     letter or digit"
-                        .into(),
-                ),
-            );
-        }
-        if self.approvals.len() >= MAX_PENDING {
-            return refuse(self, "denied", too_many_waiting());
+            return Err(bad(
+                "name is up to 63 lowercase letters, digits, - and _, starting with a \
+                 letter or digit"
+                    .into(),
+            ));
         }
         let note = printable(&call.note, 200);
         let shared = SharedSecret {
@@ -478,44 +545,25 @@ impl Daemon {
             from: printable(&call.from, 64),
             note: note.clone(),
         };
-        let sealed = match share::seal(&request, &shared) {
-            Ok(sealed) => sealed,
-            Err(e) => return refuse(self, "invalid", bad(e.to_string())),
-        };
-        self.touch(now);
-        let requester = printable(&request.from, 64);
-        let asked_for = printable(&request.note, 200);
-        let mut detail = format!("send {} to request {safety}", call.handle);
-        if !requester.is_empty() {
-            detail.push_str(&format!(" from {requester}"));
-        }
-        if !asked_for.is_empty() {
-            detail.push_str(&format!(", who asked for: {asked_for}"));
-        }
+        let share = share::seal(&request, &shared).map_err(|e| bad(e.to_string()))?;
+        let safety_code = request.safety_code();
+        let to = printable(&request.from, 64);
         let sent = Sent {
             id: share::new_id(),
             handle: call.handle.clone(),
             kind: secret.kind(),
-            safety_code: safety.clone(),
-            to: requester,
+            safety_code: safety_code.clone(),
+            to: to.clone(),
             note,
             sent_at: 0,
         };
-        let job = Prepared::Reply(AgentResponse::ShareSealed {
-            share: sealed,
-            safety_code: safety,
-        });
-        let ask = Ask {
-            tool: "send_share",
-            ask: vec![call.handle.clone()],
-            handles: call.handle.clone(),
-            summary: summary.clone(),
-            detail,
-            cwd: None,
-            grantable: false,
-            sent: Some(sent),
-        };
-        self.queue(ask, job, session, now)
+        Ok(Sealed {
+            share,
+            safety_code,
+            to,
+            asked_for: printable(&request.note, 200),
+            sent,
+        })
     }
 
     /// Opens a share sealed to one of this vault's requests and saves it as
@@ -548,15 +596,14 @@ impl Daemon {
             .to_owned();
         if validate_handle(&name).is_err() {
             return bad(format!(
-                "{:?} is not a handle name; pass name (lowercase letters, digits, - and _) to \
-                 save the share under another",
+                "{:?} is not a handle name; save the share under another name (lowercase \
+                 letters, digits, - and _)",
                 printable(&name, 63)
             ));
         }
         if vault.get(&name).is_some() {
             return bad(format!(
-                "a handle named {name} exists already; pass name to save the share under \
-                 another name"
+                "a handle named {name} exists already; save the share under another name"
             ));
         }
         let from = printable(&shared.from, 64);
@@ -637,11 +684,6 @@ impl Daemon {
             self.leases.set_scrubber(scrubber.clone());
             self.runs.set_scrubber(scrubber);
         }
-        self.share_notice = Some(if from.is_empty() {
-            format!("A shared secret was saved as {name}.")
-        } else {
-            format!("A secret shared by {from} was saved as {name}.")
-        });
         AgentResponse::ShareReceived {
             handle: Box::new(info),
             from,
@@ -1413,7 +1455,12 @@ impl Daemon {
         if matches!(verdict, Verdict::Deny | Verdict::DenyAlways) {
             self.record_unanswered(&pending, "denied", "approval_denied", now);
         } else if let Some(sent) = pending.sent.clone() {
-            warnings.extend(record_sent(vault, sent));
+            // The share has left by then, so a failed save is a warning.
+            if let Err(e) = record_sent(vault, sent) {
+                warnings.push(format!(
+                    "the share went out, but kv could not record it: {e}"
+                ));
+            }
             self.audit.record_use(&Use {
                 action: pending.tool,
                 handle: &pending.handles,
@@ -1578,6 +1625,45 @@ impl Daemon {
                 .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .and_then(|vault| forget_share(vault, &id))
                 .map(done),
+            ControlCommand::RequestShare(call) => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .map(drop)
+                .and_then(|()| match self.request_share(call, now) {
+                    AgentResponse::ShareRequested {
+                        code,
+                        safety_code,
+                        expires_in_secs,
+                    } => Ok(ControlResponse::ShareRequested {
+                        code,
+                        safety_code,
+                        expires_in_secs,
+                    }),
+                    other => Err(control_failure(other)),
+                }),
+            ControlCommand::SendShare(call) => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .map(drop)
+                .and_then(|()| self.send_share_by_hand(&call)),
+            ControlCommand::ReceiveShare(call) => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .map(drop)
+                .and_then(|()| match self.receive_share(call, now) {
+                    AgentResponse::ShareReceived {
+                        handle: saved,
+                        from,
+                        note,
+                        safety_code,
+                    } => {
+                        handle = Some(saved.name.clone());
+                        Ok(ControlResponse::ShareReceived {
+                            handle: saved,
+                            from,
+                            note,
+                            safety_code,
+                        })
+                    }
+                    other => Err(control_failure(other)),
+                }),
             ControlCommand::DismissRequest { id } => self
                 .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .map(drop)
@@ -1920,7 +2006,10 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::Decide { .. }
         | ControlCommand::DismissRequest { .. }
         | ControlCommand::RevealShare { .. }
-        | ControlCommand::ForgetShare { .. } => Ok(Vec::new()),
+        | ControlCommand::ForgetShare { .. }
+        | ControlCommand::RequestShare(_)
+        | ControlCommand::SendShare(_)
+        | ControlCommand::ReceiveShare(_) => Ok(Vec::new()),
     }
 }
 
@@ -2200,6 +2289,10 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::RemoveDevice { .. } => ("remove_device", None),
         ControlCommand::RevealShare { handle } => ("reveal_share", Some(handle.clone())),
         ControlCommand::ForgetShare { .. } => ("forget_share", None),
+        ControlCommand::RequestShare(_) => ("request_share", None),
+        ControlCommand::SendShare(call) => ("send_share", Some(call.handle.clone())),
+        // The handle is named once the share is open.
+        ControlCommand::ReceiveShare(_) => ("receive_share", None),
     }
 }
 
@@ -2256,18 +2349,27 @@ fn forget_share(vault: &mut Vault, id: &str) -> Result<Vec<String>, Failure> {
     Ok(Vec::new())
 }
 
-/// Records a share the user let go out. The share has left by then, so a
-/// failed save is a warning rather than an error.
-fn record_sent(vault: &mut Vault, mut sent: Sent) -> Vec<String> {
+/// Records a share the user let go out.
+fn record_sent(vault: &mut Vault, mut sent: Sent) -> Result<(), VaultError> {
     sent.sent_at = unix_now();
     let mut shares = vault.shares().clone();
     shares.sent.push(sent);
     keep_newest(&mut shares.sent);
-    match vault.replace_shares(shares) {
-        Ok(()) => Vec::new(),
-        Err(e) => vec![format!(
-            "the share went out, but kv could not record it: {e}"
-        )],
+    vault.replace_shares(shares)
+}
+
+/// An agent's error as kv's window hears it, for the steps the two share.
+fn control_failure(response: AgentResponse) -> Failure {
+    match response {
+        AgentResponse::Error { code, message } => fail(
+            match code {
+                AgentErrorCode::UnknownHandle => ControlErrorCode::UnknownHandle,
+                AgentErrorCode::UpstreamError => ControlErrorCode::Internal,
+                _ => ControlErrorCode::Invalid,
+            },
+            message,
+        ),
+        other => internal(format!("unexpected reply: {other:?}")),
     }
 }
 
