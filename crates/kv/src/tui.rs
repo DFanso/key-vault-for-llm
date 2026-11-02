@@ -28,7 +28,7 @@ use ratatui::crossterm::execute;
 use crate::device::{self, Device};
 use crate::paths::Paths;
 use crate::{audit, client};
-use app::{App, Effect, Outcome, Tab};
+use app::{App, Effect, Outcome, ShareDone, Tab};
 
 /// How often the screen asks the daemon for news.
 const REFRESH: Duration = Duration::from_millis(500);
@@ -146,6 +146,9 @@ impl Driver {
             Effect::Dismiss(id) => self.send(ControlCommand::DismissRequest { id }).await,
             Effect::Reveal(handle) => self.send(ControlCommand::RevealShare { handle }).await,
             Effect::Forget(id) => self.send(ControlCommand::ForgetShare { id }).await,
+            Effect::RequestShare(call) => self.send(ControlCommand::RequestShare(call)).await,
+            Effect::SendShare(call) => self.send(ControlCommand::SendShare(call)).await,
+            Effect::ReceiveShare(call) => self.send(ControlCommand::ReceiveShare(call)).await,
             Effect::Lock => {
                 self.token = None;
                 let request = ControlRequest {
@@ -260,6 +263,31 @@ impl Driver {
             Ok(Some(ControlResponse::Revealed { handle, fields })) => {
                 Outcome::Revealed { handle, fields }
             }
+            Ok(Some(ControlResponse::ShareRequested {
+                code, safety_code, ..
+            })) => Outcome::Share(ShareDone::Requested { code, safety_code }),
+            Ok(Some(ControlResponse::ShareSealed {
+                share,
+                safety_code,
+                to,
+                asked_for,
+            })) => Outcome::Share(ShareDone::Sealed {
+                share,
+                safety_code,
+                to,
+                asked_for,
+            }),
+            Ok(Some(ControlResponse::ShareReceived {
+                handle,
+                from,
+                safety_code,
+                ..
+            })) => Outcome::Share(ShareDone::Received {
+                handle: handle.name,
+                kind: handle.kind,
+                from,
+                safety_code,
+            }),
             Ok(Some(ControlResponse::Error {
                 code: ControlErrorCode::SessionEnded,
                 message,
