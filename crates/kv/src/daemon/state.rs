@@ -483,13 +483,18 @@ impl Daemon {
     /// The sealed text goes only to the user, who passes it on, so asking
     /// is the approval.
     fn send_share_by_hand(&mut self, call: &SendShareCall) -> Result<ControlResponse, Failure> {
+        // Seal first: it checks the handle, its mode and the request code,
+        // so only a share that exists is recorded. Then record, and hand
+        // the share back only once that is saved: if the save fails the
+        // user never sees the share, so nothing has left the vault and the
+        // Sent list stays true.
         let sealed = self
             .seal_share(call, ShareRequest::decode(&call.request))
             .map_err(|(_, response)| control_failure(response))?;
         let vault = self
             .vault
             .as_mut()
-            .expect("a session needs the vault unlocked");
+            .ok_or_else(|| fail(ControlErrorCode::SessionEnded, SESSION_ENDED))?;
         record_sent(vault, sealed.sent)
             .map_err(|e| internal(format!("could not save the vault: {e}")))?;
         Ok(ControlResponse::ShareSealed {
