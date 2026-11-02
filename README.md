@@ -266,18 +266,33 @@ be given to. Add those with Policy if it needs them. A share never replaces a
 handle: pick another name if the suggested one is taken. Each request answers
 one share and expires after 7 days.
 
-The Shares tab of kv's window lists open requests (with their codes, to copy
-by hand), what you received and what you sent. **View** shows a received
-value as long as the handle still holds what arrived, never a value you typed
-in yourself. **Cancel request** throws away a request's key, so a share sealed
-to it can no longer be opened.
+You don't need an agent for any of it. The same three steps are buttons on the
+Shares tab of kv's window, and each shows its code or share with a Copy
+button, ready to paste into whatever chat you use:
+
+1. **Request a secret** makes the request code. Say what you need and who you
+   are if you like; both go in the code, which anyone in the chat can read.
+2. **Send a secret**: paste their request code and pick a handle. kv seals it
+   at once, without the Approvals tab, since you are the one asking. kv
+   doesn't keep the sealed text, so copy it before you close the dialog. A
+   handle set to deny can't be sent.
+3. **Receive a share**: paste the share they sent back, and a name to save it
+   under if the suggested one is taken.
+
+Either side can use an agent or the window; the codes are the same.
+
+The Shares tab also lists open requests (with their codes and a Copy button),
+what you received and what you sent. **View** shows a received value as long
+as the handle still holds what arrived, never a value you typed in yourself.
+**Cancel request** throws away a request's key, so a share sealed to it can no
+longer be opened.
 
 Anyone who can read the chat can seal something to a request code, so kv
 cannot tell who a share came from; the sender's name is whatever they typed.
 Each request has a safety code such as `7KQ2-M9XD`, shown to both people: the
-requester when the code is made, the sender on the approval. For anything
-sensitive, compare the two over a call or another channel before you approve
-or use the handle.
+requester when the code is made, the sender on the approval or with the sealed
+share. For anything sensitive, compare the two over a call or another channel
+before you send the share or use the handle.
 
 ## Day to day
 
