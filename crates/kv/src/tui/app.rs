@@ -2,7 +2,7 @@
 //! become effects for the driver to carry out, and the driver's outcomes
 //! update what is shown.
 
-use kv_core::proto::{Overview, PolicyPatch, Verdict};
+use kv_core::proto::{Overview, PolicyPatch, RevealedField, Verdict};
 
 use crate::audit::Entry;
 use kv_core::secret::{Secret, SecretText, SecretValue};
@@ -49,6 +49,10 @@ pub enum Effect {
     Remove(String),
     /// Drops an agent's handle request.
     Dismiss(u64),
+    /// Fetches the value of a handle that came from a share.
+    Reveal(String),
+    /// Cancels a share request, or drops a received or sent record.
+    Forget(String),
     Lock,
     Quit,
 }
@@ -66,6 +70,11 @@ pub enum Outcome {
     Done(Vec<String>),
     /// The end of the audit log, newest first.
     Audit(Vec<Entry>),
+    /// A received handle's value. Only kv's window asks for one.
+    Revealed {
+        handle: String,
+        fields: Vec<RevealedField>,
+    },
 }
 
 /// An open form and what saving it means.
@@ -255,6 +264,9 @@ impl App {
                 self.overview = Some(overview);
             }
             Outcome::Audit(entries) => self.audit = entries,
+            // `kv tui` never asks: a value drawn in a terminal stays in its
+            // scrollback.
+            Outcome::Revealed { .. } => {}
             Outcome::Ended(reason) => {
                 self.screen = Screen::Unlock;
                 self.overview = None;

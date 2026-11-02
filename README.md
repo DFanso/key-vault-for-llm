@@ -57,6 +57,8 @@ The agent then sees these tools:
 - `db_connect`: a connection URL on this machine for tools that need their own
   connection, such as `psql` or a migration tool (see below).
 - `request_handle`: asks you to add a handle it needs (see below).
+- `request_share`, `send_share` and `receive_share`: pass a secret to or from
+  someone else's kv without it showing up in a chat (see below).
 - `status`: whether the vault is unlocked.
 - `list_servers`, `list_server_tools`, `call_server_tool` and `stop_server`:
   MCP servers that need your secrets (see below).
@@ -215,8 +217,9 @@ answering a request that has already timed out, shows up as a notification.
 "Open kv…" opens kv's window, which does everything `kv tui` does without a
 terminal: an Approvals tab with each waiting request in full, a Handles tab
 where you fill in agents' handle requests and add, edit, re-police or remove
-handles, and an Audit tab. The menu and the window share one session; closing
-the window keeps it, and Lock (in either) ends it. kv's window only opens
+handles, a Shares tab (see sharing, below), and an Audit tab. The menu and
+the window share one session; closing the window keeps it, and Lock (in
+either) ends it. kv's window only opens
 when you pick one of these menu items. Treat a kv window that appears on its
 own, asking for your passphrase, as fake. On Windows the window needs the
 Microsoft Edge WebView2 Runtime, which Windows 10 and 11 normally have.
@@ -237,6 +240,44 @@ in, since one could be a shell; type the ones you allow. `x` dismisses the
 request. At most 16 wait at once; they survive a lock but not a daemon restart.
 
 ![The New handle form, filled in from the agent's request](docs/images/tui-request.svg)
+
+## Sharing a secret with someone else
+
+When a colleague needs one of your secrets, or you need one of theirs, don't
+paste it into Telegram or Slack, where anyone who gets into the chat can
+read it. Let both agents pass it between the two vaults instead:
+
+1. The person who needs it asks their agent. It calls `request_share` and
+   gets a request code (`kv-request:v1:…`) to post in the chat. The code
+   holds only a public key; the private half stays in their vault.
+2. The person who has it asks their agent to answer. It calls `send_share`
+   with the code and a handle, and kv waits for that person to approve on
+   the Approvals tab, every time, whatever the handle's mode. Once they
+   allow it, the agent gets a share (`kv-share:v1:…`) to post back: the
+   handle's value, sealed so that only the requesting vault can open it
+   (X25519, HKDF-SHA256 and XChaCha20-Poly1305).
+3. The requester's agent calls `receive_share`. kv opens the share and saves
+   it as a new handle. The agent sees the handle's name and policy, never
+   the value.
+
+A received handle starts in ask mode and keeps only the hosts, methods and
+read-only setting it was sent with, never a `run` command or programs it may
+be given to. Add those with Policy if it needs them. A share never replaces a
+handle: pick another name if the suggested one is taken. Each request answers
+one share and expires after 7 days.
+
+The Shares tab of kv's window lists open requests (with their codes, to copy
+by hand), what you received and what you sent. **View** shows a received
+value as long as the handle still holds what arrived, never a value you typed
+in yourself. **Cancel request** throws away a request's key, so a share sealed
+to it can no longer be opened.
+
+Anyone who can read the chat can seal something to a request code, so kv
+cannot tell who a share came from; the sender's name is whatever they typed.
+Each request has a safety code such as `7KQ2-M9XD`, shown to both people: the
+requester when the code is made, the sender on the approval. For anything
+sensitive, compare the two over a call or another channel before you approve
+or use the handle.
 
 ## Day to day
 

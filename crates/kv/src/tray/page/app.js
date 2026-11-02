@@ -13,10 +13,14 @@
     overview: null,
     tab: "approvals",
     // What each list was last drawn from, to redraw only on a change.
-    drawn: { cards: "", requests: "", handles: "" },
+    drawn: { cards: "", requests: "", handles: "", shares: "" },
     form: null,
-    removing: null,
+    // What the confirm dialog's button sends.
+    confirming: null,
+    revealTimer: null,
   };
+
+  const REVEAL_SECS = 60;
 
   function send(message) {
     window.ipc.postMessage(JSON.stringify(message));
@@ -65,6 +69,7 @@
         if (page.locked) {
           closeForm(false);
           closeConfirm();
+          closeReveal();
           // Whatever it said belonged to the session that just ended.
           $("app-message").textContent = "";
           show($("app-message"), false);
@@ -86,6 +91,9 @@
         break;
       case "audit":
         drawAudit(message.entries);
+        break;
+      case "revealed":
+        openReveal(message.handle, message.fields);
         break;
       case "message":
         say(message.text, message.request);
@@ -134,7 +142,7 @@
     useDevice.textContent = page.device ? `Use ${page.device}` : "";
     show(useDevice, Boolean(page.device) && !waiting);
     if (wasHidden && !waiting) $("passphrase").focus();
-    page.drawn = { cards: "", requests: "", handles: "" };
+    page.drawn = { cards: "", requests: "", handles: "", shares: "" };
   }
 
   function drawApp() {
@@ -151,13 +159,14 @@
         tab.textContent = waiting > 0 ? `Approvals (${waiting})` : "Approvals";
       }
     }
-    for (const name of ["approvals", "handles", "audit"]) {
+    for (const name of ["approvals", "handles", "shares", "audit"]) {
       show($(name), name === page.tab);
     }
     if (!overview) return;
     drawCards(overview.approvals);
     drawRequests(overview.handle_requests);
     drawHandles(overview.handles, overview.role_warnings || {});
+    drawShares(overview.shares || { requests: [], received: [], sent: [] }, overview.handles);
   }
 
   function drawCards(approvals) {
@@ -259,6 +268,129 @@
       );
     });
     $("handle-rows").replaceChildren(...rows);
+  }
+
+  // A Unix time as the user's local date and time.
+  function when(secs) {
+    return new Date(secs * 1000).toLocaleString();
+  }
+
+  function drawShares(shares, handles) {
+    const shape = JSON.stringify([shares, handles.map((h) => h.name)]);
+    if (shape === page.drawn.shares) return;
+    page.drawn.shares = shape;
+
+    show($("no-share-requests"), shares.requests.length === 0);
+    const requests = shares.requests.map((request) => {
+      const title = request.note
+        ? `Request ${request.safety_code} · ${request.note}`
+        : `Request ${request.safety_code}`;
+      const status = request.expired
+        ? `Expired ${when(request.expires_at)}`
+        : `Opened ${when(request.created_at)} · open until ${when(request.expires_at)}`;
+      return el(
+        "div",
+        "card",
+        el("div", "title", title),
+        el("div", "muted", status),
+        el("div", "detail code", request.code),
+        el(
+          "div",
+          "buttons",
+          button(
+            request.expired ? "Remove" : "Cancel request",
+            () =>
+              confirmThen(
+                `Cancel request ${request.safety_code}? A share sealed to it can no longer be opened.`,
+                "Cancel request",
+                { type: "forget", id: request.id },
+              ),
+            "danger",
+          ),
+        ),
+      );
+    });
+    $("share-requests").replaceChildren(...requests);
+
+    const names = new Set(handles.map((h) => h.name));
+    const forget = (id, what) =>
+      button("Forget", () => confirmThen(`Forget ${what}? This only clears the record.`, "Forget", { type: "forget", id }));
+
+    show($("no-received"), shares.received.length === 0);
+    show($("received-table"), shares.received.length > 0);
+    $("received-rows").replaceChildren(
+      ...shares.received
+        .slice()
+        .reverse()
+        .map((r) => {
+          const name = el("td", null, el("div", "title", r.handle));
+          if (r.note) name.append(el("div", "muted", r.note));
+          if (!names.has(r.handle)) {
+            name.append(el("div", "muted", "removed since"));
+          } else if (!r.viewable) {
+            name.append(el("div", "muted", "changed since, so kv no longer shows it"));
+          }
+          return el(
+            "tr",
+            null,
+            name,
+            el("td", "short", r.kind),
+            el("td", null, r.from || "not given"),
+            el("td", "short code", r.safety_code),
+            el("td", "short muted", when(r.received_at)),
+            el(
+              "td",
+              "actions",
+              r.viewable ? button("View", () => send({ type: "reveal", handle: r.handle })) : null,
+              forget(r.id, `the record of ${r.handle}`),
+            ),
+          );
+        }),
+    );
+
+    show($("no-sent"), shares.sent.length === 0);
+    show($("sent-table"), shares.sent.length > 0);
+    $("sent-rows").replaceChildren(
+      ...shares.sent
+        .slice()
+        .reverse()
+        .map((s) => {
+          const name = el("td", null, el("div", "title", s.handle));
+          if (s.note) name.append(el("div", "muted", s.note));
+          return el(
+            "tr",
+            null,
+            name,
+            el("td", "short", s.kind),
+            el("td", null, s.to || "not given"),
+            el("td", "short code", s.safety_code),
+            el("td", "short muted", when(s.sent_at)),
+            el("td", "actions", forget(s.id, `the record of sending ${s.handle}`)),
+          );
+        }),
+    );
+  }
+
+  // A received value, drawn as text the user can select, and wiped when the
+  // dialog closes, the timer runs out or the vault locks.
+  function openReveal(handle, fields) {
+    $("reveal-title").textContent = handle;
+    $("reveal-fields").replaceChildren(
+      ...fields.map((f) => el("div", "field", el("div", "muted", f.label), el("div", "detail code secret-value", f.value))),
+    );
+    const dialog = $("reveal-dialog");
+    if (!dialog.open) dialog.showModal();
+    clearTimeout(page.revealTimer);
+    page.revealTimer = setTimeout(closeReveal, REVEAL_SECS * 1000);
+  }
+
+  function closeReveal() {
+    clearTimeout(page.revealTimer);
+    page.revealTimer = null;
+    $("reveal-fields").replaceChildren();
+    $("reveal-title").textContent = "";
+    const dialog = $("reveal-dialog");
+    if (dialog.open) dialog.close();
   }
 
   function drawAudit(entries) {
@@ -426,13 +558,23 @@
   }
 
   function confirmRemove(name) {
-    page.removing = name;
-    $("confirm-text").textContent = `Remove ${name}? Agents lose it at once, and its secret is gone.`;
+    confirmThen(
+      `Remove ${name}? Agents lose it at once, and its secret is gone.`,
+      "Remove",
+      { type: "remove", name },
+    );
+  }
+
+  // Asks first, then sends `message` to the tray.
+  function confirmThen(text, label, message) {
+    page.confirming = message;
+    $("confirm-text").textContent = text;
+    $("confirm-ok").textContent = label;
     $("confirm-dialog").showModal();
   }
 
   function closeConfirm() {
-    page.removing = null;
+    page.confirming = null;
     const dialog = $("confirm-dialog");
     if (dialog.open) dialog.close();
   }
@@ -471,10 +613,15 @@
     });
     $("confirm").addEventListener("submit", (event) => {
       event.preventDefault();
-      if (page.removing) send({ type: "remove", name: page.removing });
+      if (page.confirming) send(page.confirming);
       closeConfirm();
     });
     $("confirm-cancel").addEventListener("click", closeConfirm);
+    $("reveal-close").addEventListener("click", closeReveal);
+    $("reveal-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeReveal();
+    });
     $("confirm-dialog").addEventListener("cancel", (event) => {
       event.preventDefault();
       closeConfirm();

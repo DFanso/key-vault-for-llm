@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::policy::{Mode, Policy};
 use crate::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
+use crate::share::SharesView;
 use crate::vault::DeviceKind;
 
 /// Largest frame either side accepts, in bytes. Room for the output caps
@@ -45,6 +46,51 @@ pub enum AgentRequest {
     /// it in `kv tui`.
     RequestHandle(HandleRequest),
     Run(RunCall),
+    /// Makes a request code to send to someone who has a secret this vault
+    /// needs.
+    RequestShare(ShareRequestCall),
+    /// Seals a handle to someone else's request code. Always waits for the
+    /// user.
+    SendShare(SendShareCall),
+    /// Opens a share sealed to one of this vault's requests and saves it as
+    /// a handle.
+    ReceiveShare(ReceiveShareCall),
+}
+
+/// A request for someone else's secret. The note and name go into the code,
+/// which anyone in the chat can read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRequestCall {
+    /// What is wanted, such as "the staging database URL".
+    #[serde(default)]
+    pub note: String,
+    /// Who is asking, as the other side should see it.
+    #[serde(default)]
+    pub from: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendShareCall {
+    /// The `kv-request:v1:` code, or a message containing it.
+    pub request: String,
+    pub handle: String,
+    /// The handle name to suggest to the receiver; defaults to `handle`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Who is sending, as the receiver should see it.
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveShareCall {
+    /// The `kv-share:v1:` text, or a message containing it.
+    pub share: String,
+    /// The handle name to save it as; defaults to the sender's suggestion.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Starts the handle's `run` command.
@@ -213,6 +259,27 @@ pub enum AgentResponse {
     /// The handle's program is running. From here on the connection
     /// carries `RunInput` frames to the daemon and `RunOutput` frames back.
     Started,
+    /// A request code to send to whoever has the secret.
+    ShareRequested {
+        code: String,
+        safety_code: String,
+        expires_in_secs: u64,
+    },
+    /// A handle sealed to someone's request: text to send back to them.
+    /// Only their vault can open it.
+    ShareSealed {
+        share: String,
+        /// The safety code of the request it was sealed to.
+        safety_code: String,
+    },
+    /// A share opened and saved as a handle.
+    ShareReceived {
+        handle: Box<HandleInfo>,
+        /// Who the sender said they were. Not verified.
+        from: String,
+        note: String,
+        safety_code: String,
+    },
     Error {
         code: AgentErrorCode,
         message: String,
@@ -416,6 +483,15 @@ pub enum ControlCommand {
     RemoveDevice {
         kind: DeviceKind,
     },
+    /// The value of a handle that came from a share, for the user to read.
+    RevealShare {
+        handle: String,
+    },
+    /// Drops an open share request, with its key, or a received or sent
+    /// record.
+    ForgetShare {
+        id: String,
+    },
 }
 
 /// The user's answer to a request waiting for approval.
@@ -443,6 +519,11 @@ pub enum ControlResponse {
     },
     Overview {
         overview: Overview,
+    },
+    /// A received handle's value, for the user.
+    Revealed {
+        handle: String,
+        fields: Vec<RevealedField>,
     },
     Error {
         code: ControlErrorCode,
@@ -483,6 +564,16 @@ pub struct Overview {
     /// access, by handle name.
     #[serde(default)]
     pub role_warnings: BTreeMap<String, String>,
+    /// Open share requests, and shares received and sent. No keys or values.
+    #[serde(default)]
+    pub shares: SharesView,
+}
+
+/// One part of a revealed value: the token, a URL or a variable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevealedField {
+    pub label: String,
+    pub value: SecretText,
 }
 
 /// A handle request waiting for the user. Agent text has been made safe to

@@ -843,3 +843,107 @@ async fn a_page_that_loads_is_an_open_window() {
             .any(|page| matches!(page, ToPage::State { .. }))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_received_share_is_listed_viewed_and_forgotten_in_the_window() {
+    use kv_core::proto::{ReceiveShareCall, ShareRequestCall};
+    use kv_core::secret::{AuthPlacement, SecretValue};
+    use kv_core::share::{ShareRequest, SharedSecret, seal};
+
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Shares)).await);
+    let code = match client::agent(
+        &daemon.paths,
+        None,
+        &AgentRequest::RequestShare(ShareRequestCall {
+            note: "the staging key".into(),
+            from: "bob".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    {
+        AgentResponse::ShareRequested { code, .. } => code,
+        other => panic!("expected a request code, got {other:?}"),
+    };
+    // Someone else's kv seals a token to it.
+    let share = seal(
+        &ShareRequest::decode(&code).unwrap(),
+        &SharedSecret {
+            name: "staging".into(),
+            description: "Staging API".into(),
+            value: SecretValue::Http {
+                token: SecretText::new("stg-0123456789abcdef"),
+                placement: AuthPlacement::Header {
+                    name: "Authorization".into(),
+                    template: "Bearer {}".into(),
+                },
+                base_url: None,
+            },
+            allowed_hosts: vec!["staging.example.com".into()],
+            allow_plain_http: false,
+            allowed_methods: Vec::new(),
+            read_only: false,
+            from: "alice".into(),
+            note: String::new(),
+        },
+    )
+    .unwrap();
+    let received = client::agent(
+        &daemon.paths,
+        None,
+        &AgentRequest::ReceiveShare(ReceiveShareCall { share, name: None }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(received, AgentResponse::ShareReceived { .. }),
+        "{received:?}"
+    );
+
+    worker.model().await;
+    let (_, _, overview) = state(&desk.take());
+    let shares = overview.unwrap().shares;
+    assert!(shares.requests.is_empty());
+    assert_eq!(shares.received.len(), 1);
+    assert!(shares.received[0].viewable);
+    let id = shares.received[0].id.clone();
+
+    assert!(
+        !worker
+            .act(page(FromPage::Reveal {
+                handle: "staging".into()
+            }))
+            .await
+    );
+    let pages = desk.take();
+    let fields = pages
+        .iter()
+        .find_map(|page| match page {
+            ToPage::Revealed { handle, fields } if handle == "staging" => Some(fields.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("nothing revealed in {pages:?}"));
+    assert_eq!(fields[0].value.expose(), "stg-0123456789abcdef");
+
+    // A handle the user typed in stays hidden.
+    assert!(
+        !worker
+            .act(page(FromPage::Reveal {
+                handle: "missing".into()
+            }))
+            .await
+    );
+    let pages = desk.take();
+    assert!(
+        !pages.iter().any(|p| matches!(p, ToPage::Revealed { .. })),
+        "{pages:?}"
+    );
+    assert_eq!(messages(&pages).len(), 1, "{pages:?}");
+
+    assert!(!worker.act(page(FromPage::Forget { id })).await);
+    worker.model().await;
+    let (_, _, overview) = state(&desk.take());
+    assert!(overview.unwrap().shares.received.is_empty());
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}

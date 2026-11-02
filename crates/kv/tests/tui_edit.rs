@@ -122,6 +122,7 @@ fn handles(handles: Vec<HandleInfo>) -> App {
         approvals: Vec::new(),
         handle_requests: Vec::new(),
         role_warnings: Default::default(),
+        shares: Default::default(),
     }));
     key(&mut app, '2');
     app
@@ -684,6 +685,7 @@ fn a_read_only_handle_whose_role_can_write_is_flagged() {
             "prod-db is read-only, but...".to_owned(),
         )]
         .into(),
+        shares: Default::default(),
     }));
     let shown = screen(&app);
     let line = shown.lines().find(|l| l.contains("prod-db")).unwrap();

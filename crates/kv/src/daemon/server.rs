@@ -132,12 +132,21 @@ async fn serve_agent(
         let prepared = tokio::task::spawn_blocking(move || {
             let mut daemon = lock(&shared);
             let prepared = daemon.prepare_in(asking.as_ref(), request, Instant::now());
-            (prepared, daemon.take_request_notice())
+            (
+                prepared,
+                daemon.take_request_notice(),
+                daemon.take_share_notice(),
+            )
         })
         .await;
-        let Ok((prepared, requested)) = prepared else {
+        let Ok((prepared, requested, shared)) = prepared else {
             return;
         };
+        if let Some(text) = shared
+            && notify
+        {
+            notify::share_received(text);
+        }
         if let Some(name) = requested
             && notify
         {

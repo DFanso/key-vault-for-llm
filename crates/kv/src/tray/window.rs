@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use kv_core::proto::{Overview, Verdict};
+use kv_core::proto::{Overview, RevealedField, Verdict};
 use kv_core::secret::SecretText;
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +56,7 @@ pub fn asset(path: &str) -> Option<Asset> {
 pub enum Tab {
     Approvals,
     Handles,
+    Shares,
     Audit,
 }
 
@@ -104,6 +105,14 @@ pub enum FromPage {
     Remove {
         name: String,
     },
+    /// Show the value of a handle that came from a share.
+    Reveal {
+        handle: String,
+    },
+    /// Cancel a share request, or drop a received or sent record.
+    Forget {
+        id: String,
+    },
     Lock,
     Tab {
         tab: Tab,
@@ -144,6 +153,11 @@ pub enum ToPage {
     FormDone,
     Audit {
         entries: Vec<Entry>,
+    },
+    /// A received handle's value, which the user asked to see.
+    Revealed {
+        handle: String,
+        fields: Vec<RevealedField>,
     },
     /// What an action from the window came to; `request` names the card it
     /// belongs on.

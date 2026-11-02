@@ -89,6 +89,7 @@ fn overview(approvals: Vec<Approval>) -> Overview {
         approvals,
         handle_requests: Vec::new(),
         role_warnings: Default::default(),
+        shares: Default::default(),
     }
 }
 

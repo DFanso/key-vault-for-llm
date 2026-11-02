@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, KdfParams, SymmetricKey};
 use crate::error::VaultError;
 use crate::secret::{Secret, validate_handle};
+use crate::share::Shares;
 
 const MAGIC: &[u8; 4] = b"KVLT";
 const FORMAT_VERSION: u16 = 1;
@@ -150,6 +151,11 @@ impl<'de> Deserialize<'de> for Slot {
 #[derive(Default, Serialize, Deserialize)]
 struct VaultData {
     secrets: Vec<Secret>,
+    /// Open share requests with their keys, and what was received and sent.
+    /// Left out while empty, so a vault that never shared reads the same to
+    /// an older kv.
+    #[serde(default, skip_serializing_if = "Shares::is_empty")]
+    shares: Shares,
 }
 
 pub struct Vault {
@@ -344,6 +350,26 @@ impl Vault {
                 secret.created_at = now;
                 self.data.secrets.push(secret);
             }
+        }
+        Ok(())
+    }
+
+    pub fn shares(&self) -> &Shares {
+        &self.data.shares
+    }
+
+    /// Call `save` to persist.
+    pub fn shares_mut(&mut self) -> &mut Shares {
+        &mut self.data.shares
+    }
+
+    /// Replaces what the vault keeps about sharing and saves. If the save
+    /// fails, nothing changes.
+    pub fn replace_shares(&mut self, shares: Shares) -> Result<(), VaultError> {
+        let previous = std::mem::replace(&mut self.data.shares, shares);
+        if let Err(error) = self.save() {
+            self.data.shares = previous;
+            return Err(error);
         }
         Ok(())
     }

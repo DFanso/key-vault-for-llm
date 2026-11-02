@@ -259,6 +259,16 @@ impl<D: Desktop> Worker<D> {
                 let outcome = self.driver.run(Effect::Remove(name)).await;
                 self.report(Asker::Window, outcome, None);
             }
+            FromPage::Reveal { handle } => match self.driver.run(Effect::Reveal(handle)).await {
+                Outcome::Revealed { handle, fields } => {
+                    self.desktop.page(ToPage::Revealed { handle, fields });
+                }
+                other => self.report(Asker::Window, other, None),
+            },
+            FromPage::Forget { id } => {
+                let outcome = self.driver.run(Effect::Forget(id)).await;
+                self.report(Asker::Window, outcome, None);
+            }
             FromPage::Lock => self.lock(Asker::Window).await,
             FromPage::Tab { tab } => {
                 if let Some(window) = &mut self.window {

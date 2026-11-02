@@ -152,3 +152,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
 .field { margin: 10px 0; }
 .field label { display: block; margin-bottom: 3px; }
 div.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+.intro { margin: 0 0 8px; }
+.code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.card .detail.code { word-break: break-all; user-select: all; }
+/* One click selects the whole value, ready to copy. */
+.secret-value { user-select: all; overflow-wrap: anywhere; background: var(--panel); border-radius: 6px; padding: 6px 8px; }
+#shares h2 { margin-top: 12px; }

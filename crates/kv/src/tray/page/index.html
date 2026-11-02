@@ -28,6 +28,7 @@
     <nav role="tablist">
       <button type="button" role="tab" data-tab="approvals">Approvals</button>
       <button type="button" role="tab" data-tab="handles">Handles</button>
+      <button type="button" role="tab" data-tab="shares">Shares</button>
       <button type="button" role="tab" data-tab="audit">Audit</button>
     </nav>
     <span id="locks-in" class="muted"></span>
@@ -50,6 +51,27 @@
     <table id="handle-table">
       <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Allows</th><th></th></tr></thead>
       <tbody id="handle-rows"></tbody>
+    </table>
+  </section>
+
+  <section id="shares" role="tabpanel" hidden>
+    <p class="muted intro">Secrets travel between kv vaults sealed to the receiver's key, so the chat
+    that carries them never holds them in the clear. An agent starts with <code>request_share</code>;
+    every share you send waits for you on the Approvals tab.</p>
+    <div class="toolbar"><h2>Waiting for a share</h2></div>
+    <p id="no-share-requests" class="empty">No open requests</p>
+    <div id="share-requests"></div>
+    <div class="toolbar"><h2>Received</h2></div>
+    <p id="no-received" class="empty">Nothing received yet</p>
+    <table id="received-table">
+      <thead><tr><th>Handle</th><th>Kind</th><th>From</th><th>Safety code</th><th>Received</th><th></th></tr></thead>
+      <tbody id="received-rows"></tbody>
+    </table>
+    <div class="toolbar"><h2>Sent</h2></div>
+    <p id="no-sent" class="empty">Nothing sent yet</p>
+    <table id="sent-table">
+      <thead><tr><th>Handle</th><th>Kind</th><th>To</th><th>Safety code</th><th>Sent</th><th></th></tr></thead>
+      <tbody id="sent-rows"></tbody>
     </table>
   </section>
 
@@ -79,9 +101,18 @@
     <p id="confirm-text"></p>
     <div class="actions">
       <button type="button" id="confirm-cancel">Cancel</button>
-      <button type="submit" class="danger">Remove</button>
+      <button type="submit" id="confirm-ok" class="danger">Remove</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="reveal-dialog">
+  <h2 id="reveal-title"></h2>
+  <p class="muted">Anyone who can see your screen can read these. They hide again after a minute.</p>
+  <div id="reveal-fields"></div>
+  <div class="actions">
+    <button type="button" id="reveal-close" class="primary">Hide</button>
+  </div>
 </dialog>
 </body>
 </html>
