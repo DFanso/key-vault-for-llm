@@ -17,6 +17,7 @@ use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
 use kv::tray::window::{FormRequest, FromPage, Tab, ToPage};
 use kv::tray::worker::{Desktop, Worker};
+use kv::tui::app::ShareDone;
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, HandleRequest, Overview,
     SessionInfo, Verdict,
@@ -946,4 +947,178 @@ async fn a_received_share_is_listed_viewed_and_forgotten_in_the_window() {
     let (_, _, overview) = state(&desk.take());
     assert!(overview.unwrap().shares.received.is_empty());
     assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+/// The `Shared` results and share errors in `pages`.
+fn shared(pages: &[ToPage]) -> (Vec<ShareDone>, Vec<String>) {
+    let mut done = Vec::new();
+    let mut errors = Vec::new();
+    for page in pages {
+        match page {
+            ToPage::Shared { result } => done.push(result.clone()),
+            ToPage::ShareError { message } => errors.push(message.clone()),
+            _ => {}
+        }
+    }
+    (done, errors)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_share_is_requested_sealed_and_received_by_hand_in_the_window() {
+    use kv_core::policy::Policy;
+    use kv_core::secret::{AuthPlacement, Secret, SecretValue};
+
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    daemon
+        .control(
+            Some(PASS),
+            ControlCommand::Add {
+                secret: Secret {
+                    name: "staging".into(),
+                    description: "Staging API".into(),
+                    value: SecretValue::Http {
+                        token: SecretText::new("stg-0123456789abcdef"),
+                        placement: AuthPlacement::Header {
+                            name: "Authorization".into(),
+                            template: "Bearer {}".into(),
+                        },
+                        base_url: None,
+                    },
+                    policy: Policy::default(),
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                replace: false,
+            },
+        )
+        .await;
+    assert!(!worker.act(Action::Open(Tab::Shares)).await);
+    desk.take();
+
+    // A request made in the window comes back as a code to copy.
+    assert!(
+        !worker
+            .act(page(FromPage::RequestShare {
+                note: "the staging key".into(),
+                from: "bob".into(),
+            }))
+            .await
+    );
+    let (done, errors) = shared(&desk.take());
+    assert_eq!(errors, Vec::<String>::new());
+    let [ShareDone::Requested { code, safety_code }] = done.as_slice() else {
+        panic!("expected a request code, got {done:?}");
+    };
+    assert!(code.starts_with("kv-request:v1:"), "{code}");
+
+    // A handle that is not there is said in the dialog, not sealed.
+    assert!(
+        !worker
+            .act(page(FromPage::SendShare {
+                request: code.clone(),
+                handle: "missing".into(),
+                name: String::new(),
+                from: "alice".into(),
+                note: String::new(),
+            }))
+            .await
+    );
+    let (done, errors) = shared(&desk.take());
+    assert!(done.is_empty(), "{done:?}");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("There is no handle named missing"),
+        "{errors:?}"
+    );
+
+    // The vault seals its own handle to its own request: as good a test of
+    // the window as two people.
+    assert!(
+        !worker
+            .act(page(FromPage::SendShare {
+                request: format!("can you send it?\n{code}"),
+                handle: "staging".into(),
+                name: String::new(),
+                from: "alice".into(),
+                note: "for the deploy".into(),
+            }))
+            .await
+    );
+    let (done, errors) = shared(&desk.take());
+    assert_eq!(errors, Vec::<String>::new());
+    let [
+        ShareDone::Sealed {
+            share,
+            safety_code: sealed_to,
+            to,
+            asked_for,
+        },
+    ] = done.as_slice()
+    else {
+        panic!("expected a sealed share, got {done:?}");
+    };
+    assert_eq!(sealed_to, safety_code);
+    assert_eq!(
+        (to.as_str(), asked_for.as_str()),
+        ("bob", "the staging key")
+    );
+    assert!(!share.contains("stg-0123456789abcdef"));
+
+    // Its suggested name is taken here, so the dialog says to pick another.
+    let receive = |name: &str| {
+        page(FromPage::ReceiveShare {
+            share: share.clone(),
+            name: name.into(),
+        })
+    };
+    assert!(!worker.act(receive("")).await);
+    let (done, errors) = shared(&desk.take());
+    assert!(done.is_empty(), "{done:?}");
+    assert!(
+        errors.len() == 1 && errors[0].contains("exists already"),
+        "{errors:?}"
+    );
+    assert!(!worker.act(receive("staging-copy")).await);
+    let (done, errors) = shared(&desk.take());
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(
+        done,
+        [ShareDone::Received {
+            handle: "staging-copy".into(),
+            kind: SecretKind::Http,
+            from: "alice".into(),
+            safety_code: safety_code.clone(),
+        }]
+    );
+
+    worker.model().await;
+    let (_, _, overview) = state(&desk.take());
+    let overview = overview.unwrap();
+    assert!(overview.shares.requests.is_empty());
+    assert_eq!(overview.shares.sent.len(), 1);
+    assert_eq!(overview.shares.received.len(), 1);
+    assert!(overview.handles.iter().any(|h| h.name == "staging-copy"));
+    // The user did all of it: nothing to notify.
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sharing_from_a_locked_window_asks_to_unlock() {
+    let (_daemon, _fake, desk, mut worker) = locked().await;
+    // A page that loads opens the window without a Touch ID prompt.
+    assert!(!worker.act(page(FromPage::Ready)).await);
+    desk.take();
+    assert!(
+        !worker
+            .act(page(FromPage::RequestShare {
+                note: String::new(),
+                from: String::new(),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    let (done, _) = shared(&pages);
+    assert!(done.is_empty(), "{pages:?}");
+    assert!(state(&pages).0, "{pages:?}");
+    assert_eq!(messages(&pages), [("Unlock first".to_owned(), None)]);
 }

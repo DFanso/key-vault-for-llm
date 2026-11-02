@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 use kv::audit::Entry;
 use kv::tray::window::{FormRequest, FromPage, Tab, ToPage};
+use kv::tui::app::ShareDone;
 use kv_core::proto::Verdict;
-use kv_core::secret::SecretText;
+use kv_core::secret::{SecretKind, SecretText};
 
 #[test]
 fn what_the_page_sends_is_read() {
@@ -93,6 +94,30 @@ fn what_the_page_sends_is_read() {
                 id: "0a1b2c3d4e5f6071".into(),
             },
         ),
+        (
+            r#"{"type":"request_share","note":"the staging key","from":"bob"}"#,
+            FromPage::RequestShare {
+                note: "the staging key".into(),
+                from: "bob".into(),
+            },
+        ),
+        (
+            r#"{"type":"send_share","request":"kv-request:v1:abc","handle":"staging","name":"","from":"alice","note":""}"#,
+            FromPage::SendShare {
+                request: "kv-request:v1:abc".into(),
+                handle: "staging".into(),
+                name: String::new(),
+                from: "alice".into(),
+                note: String::new(),
+            },
+        ),
+        (
+            r#"{"type":"receive_share","share":"kv-share:v1:abc","name":"staging-2"}"#,
+            FromPage::ReceiveShare {
+                share: "kv-share:v1:abc".into(),
+                name: "staging-2".into(),
+            },
+        ),
     ];
     for (json, expected) in cases {
         assert_eq!(FromPage::parse(json), Some(expected), "{json}");
@@ -115,6 +140,9 @@ fn anything_else_is_dropped() {
         r#"{"type":"reveal"}"#,
         r#"{"type":"reveal","handle":"a","value":"x"}"#,
         r#"{"type":"forget","id":7}"#,
+        r#"{"type":"request_share","note":"x"}"#,
+        r#"{"type":"send_share","request":"kv-request:v1:abc","handle":"a","name":"","from":"","note":"","value":"x"}"#,
+        r#"{"type":"receive_share","share":"kv-share:v1:abc"}"#,
     ] {
         assert_eq!(FromPage::parse(json), None, "{json}");
     }
@@ -169,6 +197,48 @@ fn what_the_tray_sends_is_a_call_to_kv_receive() {
     assert_eq!(
         locked.script(),
         r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null})"#
+    );
+}
+
+/// The share dialog reads each step's result by `step`.
+#[test]
+fn share_results_reach_the_dialog_as_steps() {
+    let cases = [
+        (
+            ShareDone::Requested {
+                code: "kv-request:v1:abc".into(),
+                safety_code: "7KQ2-M9XD".into(),
+            },
+            r#"kv.receive({"type":"shared","result":{"step":"requested","code":"kv-request:v1:abc","safety_code":"7KQ2-M9XD"}})"#,
+        ),
+        (
+            ShareDone::Sealed {
+                share: "kv-share:v1:xyz".into(),
+                safety_code: "7KQ2-M9XD".into(),
+                to: "bob".into(),
+                asked_for: "the staging key".into(),
+            },
+            r#"kv.receive({"type":"shared","result":{"step":"sealed","share":"kv-share:v1:xyz","safety_code":"7KQ2-M9XD","to":"bob","asked_for":"the staging key"}})"#,
+        ),
+        (
+            ShareDone::Received {
+                handle: "staging".into(),
+                kind: SecretKind::Http,
+                from: "alice".into(),
+                safety_code: "7KQ2-M9XD".into(),
+            },
+            r#"kv.receive({"type":"shared","result":{"step":"received","handle":"staging","kind":"http","from":"alice","safety_code":"7KQ2-M9XD"}})"#,
+        ),
+    ];
+    for (result, script) in cases {
+        assert_eq!(ToPage::Shared { result }.script(), script);
+    }
+    let error = ToPage::ShareError {
+        message: "That is not a kv share".into(),
+    };
+    assert_eq!(
+        error.script(),
+        r#"kv.receive({"type":"share_error","message":"That is not a kv share"})"#
     );
 }
 

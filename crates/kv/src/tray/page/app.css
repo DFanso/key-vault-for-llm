@@ -159,3 +159,18 @@ div.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14
 /* One click selects the whole value, ready to copy. */
 .secret-value { user-select: all; overflow-wrap: anywhere; background: var(--panel); border-radius: 6px; padding: 6px 8px; }
 #shares h2 { margin-top: 12px; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+/* A code or share, shown whole; one click selects it all. */
+.share-output {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+  max-height: 30vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.safety { background: var(--warn-bg); border-radius: 6px; padding: 6px 8px; margin: 10px 0 0; }

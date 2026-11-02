@@ -18,9 +18,51 @@
     // What the confirm dialog's button sends.
     confirming: null,
     revealTimer: null,
+    // The share dialog's step, while it is open, and whether the tray is
+    // working on it.
+    share: null,
+    shareBusy: false,
   };
 
   const REVEAL_SECS = 60;
+
+  // The keys that copy a selection here.
+  const COPY_KEYS = /Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+C";
+
+  // The share dialog's three steps. The tray checks what is typed; the page
+  // only shows the fields each step needs.
+  const SHARE_STEPS = {
+    request: {
+      title: "Request a secret",
+      about:
+        "kv makes a code for you to send to the person who has the secret. It holds only a public " +
+        "key, so any chat can carry it.",
+      submit: "Make code",
+      note: [
+        "What you need",
+        "Optional, e.g. the staging database URL. It goes in the code, which anyone in the chat can read.",
+      ],
+    },
+    send: {
+      title: "Send a secret",
+      about:
+        "Paste the request code they sent you and pick a handle. kv seals its value so that only " +
+        "the vault that made the code can open it.",
+      submit: "Seal",
+      code: ["Their request code", "kv-request:v1:…"],
+      note: ["Note", "Optional; they see it with the share."],
+      name: ["Name to suggest", "Optional; blank suggests the handle's own name."],
+    },
+    receive: {
+      title: "Receive a share",
+      about:
+        "Paste the share they sent back. kv opens it with the key of your open request and saves it " +
+        "as a new handle in ask mode.",
+      submit: "Save",
+      code: ["Their share", "kv-share:v1:…"],
+      name: ["Save as", "Optional; blank uses the name they suggested."],
+    },
+  };
 
   function send(message) {
     window.ipc.postMessage(JSON.stringify(message));
@@ -70,6 +112,7 @@
           closeForm(false);
           closeConfirm();
           closeReveal();
+          closeShare();
           // Whatever it said belonged to the session that just ended.
           $("app-message").textContent = "";
           show($("app-message"), false);
@@ -94,6 +137,13 @@
         break;
       case "revealed":
         openReveal(message.handle, message.fields);
+        break;
+      case "shared":
+        shareDone(message.result);
+        break;
+      case "share_error":
+        shareBusy(false);
+        $("share-error").textContent = message.message;
         break;
       case "message":
         say(message.text, message.request);
@@ -288,15 +338,17 @@
       const status = request.expired
         ? `Expired ${when(request.expires_at)}`
         : `Opened ${when(request.created_at)} · open until ${when(request.expires_at)}`;
+      const code = el("div", "detail code", request.code);
       return el(
         "div",
         "card",
         el("div", "title", title),
         el("div", "muted", status),
-        el("div", "detail code", request.code),
+        code,
         el(
           "div",
           "buttons",
+          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget)),
           button(
             request.expired ? "Remove" : "Cancel request",
             () =>
@@ -390,6 +442,199 @@
     $("reveal-fields").replaceChildren();
     $("reveal-title").textContent = "";
     const dialog = $("reveal-dialog");
+    if (dialog.open) dialog.close();
+  }
+
+  // Copies `node`'s text. The copy command needs the text selected; where
+  // it fails, the clipboard API may still work, and failing that the text
+  // stays selected for the user's own keys.
+  function copyText(node, label) {
+    const text = node.textContent;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (_) {
+      copied = false;
+    }
+    const tell = (done) => {
+      if (done) selection.removeAllRanges();
+      const was = label.dataset.label || label.textContent;
+      label.dataset.label = was;
+      label.textContent = done ? "Copied" : `Selected: press ${COPY_KEYS}`;
+      clearTimeout(label.copyTimer);
+      label.copyTimer = setTimeout(() => {
+        label.textContent = was;
+      }, 2000);
+    };
+    if (copied || !navigator.clipboard) {
+      tell(copied);
+      return;
+    }
+    navigator.clipboard.writeText(text).then(
+      () => tell(true),
+      () => tell(false),
+    );
+  }
+
+  // The share dialog: what to type for `step`, then what came of it.
+
+  function openShare(step) {
+    const spec = SHARE_STEPS[step];
+    page.share = step;
+    $("share-form").reset();
+    $("share-title").textContent = spec.title;
+    $("share-about").textContent = spec.about;
+    $("share-submit").textContent = spec.submit;
+    for (const node of $("share-ask").querySelectorAll(".field")) {
+      show(node, node.dataset.for.split(" ").includes(step));
+    }
+    if (spec.code) {
+      $("share-code-label").textContent = spec.code[0];
+      $("share-code").placeholder = spec.code[1];
+    }
+    if (spec.note) {
+      $("share-note-label").textContent = spec.note[0];
+      $("share-note-hint").textContent = spec.note[1];
+    }
+    if (spec.name) {
+      $("share-name-label").textContent = spec.name[0];
+      $("share-name-hint").textContent = spec.name[1];
+    }
+    if (step === "send") fillShareHandles();
+    shareResult(false);
+    shareBusy(false);
+    $("share-error").textContent = "";
+    const dialog = $("share-dialog");
+    if (!dialog.open) dialog.showModal();
+    const first = [...$("share-ask").querySelectorAll(".field")].find((node) => !node.hidden);
+    if (first) first.querySelector("input, select").focus();
+  }
+
+  // Every handle, the ones set to deny greyed out: kv will not share those.
+  function fillShareHandles() {
+    const handles = (page.overview && page.overview.handles) || [];
+    const options = handles.map((handle) => {
+      const deny = handle.mode === "deny";
+      const option = el("option", null, deny ? `${handle.name} (${handle.kind}) · set to deny` : `${handle.name} (${handle.kind})`);
+      option.value = handle.name;
+      option.disabled = deny;
+      return option;
+    });
+    $("share-handle").replaceChildren(...options);
+    const first = handles.find((handle) => handle.mode !== "deny");
+    $("share-handle").value = first ? first.name : "";
+  }
+
+  function submitShare(event) {
+    event.preventDefault();
+    if (!page.share || page.shareBusy || !$("share-result").hidden) return;
+    const value = (id) => $(id).value;
+    let message;
+    switch (page.share) {
+      case "request":
+        message = { type: "request_share", note: value("share-note"), from: value("share-from") };
+        break;
+      case "send":
+        if (!value("share-handle")) {
+          $("share-error").textContent = "Pick a handle to send; add one on the Handles tab first.";
+          return;
+        }
+        message = {
+          type: "send_share",
+          request: value("share-code"),
+          handle: value("share-handle"),
+          name: value("share-name"),
+          from: value("share-from"),
+          note: value("share-note"),
+        };
+        break;
+      case "receive":
+        message = { type: "receive_share", share: value("share-code"), name: value("share-name") };
+        break;
+      default:
+        return;
+    }
+    $("share-error").textContent = "";
+    shareBusy(true);
+    send(message);
+  }
+
+  function shareBusy(busy) {
+    page.shareBusy = busy;
+    $("share-submit").disabled = busy;
+  }
+
+  function shareDone(result) {
+    shareBusy(false);
+    if (!page.share) return;
+    let about;
+    let output = "";
+    let safety;
+    switch (result.step) {
+      case "requested":
+        about =
+          "Send this code to the person who has the secret. It also waits under Waiting for a share " +
+          "until their share comes back; then use Receive a share.";
+        output = result.code;
+        safety =
+          `Safety code ${result.safety_code}. They see it when they send. For anything sensitive, ` +
+          "check over a call that theirs matches before you use what arrives.";
+        break;
+      case "sealed":
+        about =
+          `Send this back to ${result.to || "them"}. Only the vault that made the request can open ` +
+          "it. kv does not keep this text, so copy it before you close.";
+        if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
+        output = result.share;
+        safety =
+          `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
+          "for anything sensitive, check over a call that their request shows the same code before " +
+          "you send this.";
+        break;
+      case "received":
+        about =
+          `Saved as ${result.handle} (${result.kind}). ` +
+          (result.from ? `It says it is from ${result.from}; nothing checks that. ` : "It gives no sender. ") +
+          "It starts in ask mode, so each use waits for you; add what it needs with Policy on the " +
+          "Handles tab.";
+        safety =
+          `Safety code ${result.safety_code}. For anything sensitive, check over a call that the ` +
+          "sender saw the same code.";
+        break;
+      default:
+        return;
+    }
+    $("share-result-about").textContent = about;
+    $("share-output").textContent = output;
+    show($("share-output"), Boolean(output));
+    $("share-safety").textContent = safety;
+    shareResult(true);
+    show($("share-copy"), Boolean(output));
+    if (output) $("share-copy").focus();
+    else $("share-cancel").focus();
+  }
+
+  function shareResult(shown) {
+    show($("share-ask"), !shown);
+    show($("share-about"), !shown);
+    show($("share-result"), shown);
+    show($("share-submit"), !shown);
+    show($("share-copy"), false);
+    $("share-cancel").textContent = shown ? "Done" : "Cancel";
+  }
+
+  // Closes the share dialog and drops what was typed and shown.
+  function closeShare() {
+    page.share = null;
+    shareBusy(false);
+    $("share-form").reset();
+    $("share-output").textContent = "";
+    const dialog = $("share-dialog");
     if (dialog.open) dialog.close();
   }
 
@@ -618,6 +863,16 @@
     });
     $("confirm-cancel").addEventListener("click", closeConfirm);
     $("reveal-close").addEventListener("click", closeReveal);
+    $("share-request").addEventListener("click", () => openShare("request"));
+    $("share-send").addEventListener("click", () => openShare("send"));
+    $("share-receive").addEventListener("click", () => openShare("receive"));
+    $("share-form").addEventListener("submit", submitShare);
+    $("share-cancel").addEventListener("click", closeShare);
+    $("share-copy").addEventListener("click", () => copyText($("share-output"), $("share-copy")));
+    $("share-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeShare();
+    });
     $("reveal-dialog").addEventListener("cancel", (event) => {
       event.preventDefault();
       closeReveal();

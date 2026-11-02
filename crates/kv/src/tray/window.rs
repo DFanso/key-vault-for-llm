@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::Entry;
 use crate::forms::FormView;
+use crate::tui::app::ShareDone;
 
 /// What the page may load: its own files, nothing else.
 pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'";
@@ -113,6 +114,26 @@ pub enum FromPage {
     Forget {
         id: String,
     },
+    /// Make a request code for the user to send someone.
+    RequestShare {
+        note: String,
+        from: String,
+    },
+    /// Seal a handle to a request code the user pasted. Blank `name` keeps
+    /// the handle's own.
+    SendShare {
+        request: String,
+        handle: String,
+        name: String,
+        from: String,
+        note: String,
+    },
+    /// Save a share the user pasted as a handle. Blank `name` takes the
+    /// sender's suggestion.
+    ReceiveShare {
+        share: String,
+        name: String,
+    },
     Lock,
     Tab {
         tab: Tab,
@@ -158,6 +179,14 @@ pub enum ToPage {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// A share step the user took in the share dialog.
+    Shared {
+        result: ShareDone,
+    },
+    /// Why a share step failed, for the share dialog.
+    ShareError {
+        message: String,
     },
     /// What an action from the window came to; `request` names the card it
     /// belongs on.

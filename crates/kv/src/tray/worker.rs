@@ -8,7 +8,9 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kv_core::proto::{AgentRequest, AgentResponse, Overview};
+use kv_core::proto::{
+    AgentRequest, AgentResponse, Overview, ReceiveShareCall, SendShareCall, ShareRequestCall,
+};
 use kv_core::secret::SecretText;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -269,6 +271,33 @@ impl<D: Desktop> Worker<D> {
                 let outcome = self.driver.run(Effect::Forget(id)).await;
                 self.report(Asker::Window, outcome, None);
             }
+            FromPage::RequestShare { note, from } => {
+                self.share(Effect::RequestShare(ShareRequestCall { note, from }))
+                    .await;
+            }
+            FromPage::SendShare {
+                request,
+                handle,
+                name,
+                from,
+                note,
+            } => {
+                let call = SendShareCall {
+                    request,
+                    handle,
+                    name: Some(name),
+                    from,
+                    note,
+                };
+                self.share(Effect::SendShare(call)).await;
+            }
+            FromPage::ReceiveShare { share, name } => {
+                let call = ReceiveShareCall {
+                    share,
+                    name: Some(name),
+                };
+                self.share(Effect::ReceiveShare(call)).await;
+            }
             FromPage::Lock => self.lock(Asker::Window).await,
             FromPage::Tab { tab } => {
                 if let Some(window) = &mut self.window {
@@ -308,6 +337,17 @@ impl<D: Desktop> Worker<D> {
         self.desktop.page(ToPage::FormError {
             message: sentence(&failed),
         });
+    }
+
+    /// Takes a share step from the share dialog, which hears how it went.
+    async fn share(&mut self, effect: Effect) {
+        match self.driver.run(effect).await {
+            Outcome::Share(result) => self.desktop.page(ToPage::Shared { result }),
+            Outcome::Failed(message) => self.desktop.page(ToPage::ShareError {
+                message: sentence(&message),
+            }),
+            other => self.report(Asker::Window, other, None),
+        }
     }
 
     fn form(&self) -> Option<&(Purpose, Form)> {
