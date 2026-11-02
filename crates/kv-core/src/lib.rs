@@ -8,6 +8,7 @@ pub mod policy;
 pub mod proto;
 pub mod scrub;
 pub mod secret;
+pub mod share;
 pub mod vault;
 
 pub use error::VaultError;
