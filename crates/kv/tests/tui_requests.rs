@@ -122,6 +122,7 @@ fn overview(requests: Vec<HandleRequest>, handles: Vec<HandleInfo>) -> Overview 
             })
             .collect(),
         role_warnings: Default::default(),
+        shares: Default::default(),
     }
 }
 

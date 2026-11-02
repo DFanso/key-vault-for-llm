@@ -600,3 +600,141 @@ async fn a_client_without_initialize_is_named_from_its_request() {
     assert_eq!(reply["id"], 1, "{reply}");
     assert_ne!(reply["result"]["isError"], true, "{reply}");
 }
+
+/// The code after `prefix` in an agent's tool result.
+fn code_after(text: &str, prefix: &str) -> String {
+    let start = text
+        .find(prefix)
+        .unwrap_or_else(|| panic!("no {prefix} in {text}"));
+    text[start..].split_whitespace().next().unwrap().to_owned()
+}
+
+/// Two people's kv, each with its own `kv mcp`: Bob's agent asks, Alice's
+/// agent seals her handle once she allows it, and Bob's agent saves it.
+/// Neither agent ever sees the token.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_is_shared_between_two_vaults_through_their_agents() {
+    use kv::client;
+    use kv::paths::Paths;
+    use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
+    use kv_core::secret::SecretText;
+
+    let alice = Home::new();
+    alice.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    alice.kv(
+        &[
+            "add",
+            "openrouter",
+            "--kind",
+            "http",
+            "--host",
+            "openrouter.ai",
+            "--mode",
+            "auto",
+        ],
+        &format!("{PASS}\n{TOKEN}\n"),
+    );
+    let bob = Home::new();
+    bob.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    let project = TempDir::new().unwrap();
+    let alice_agent = alice.mcp(project.path()).await;
+    let bob_agent = bob.mcp(project.path()).await;
+
+    let (failed, text) = call(
+        &bob_agent,
+        "request_share",
+        serde_json::json!({ "note": "the OpenRouter key", "from": "bob" }),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    let code = code_after(&text, "kv-request:v1:");
+
+    // Alice allows it from her side while her agent waits.
+    let control = |home: &Home, command: ControlCommand, token: Option<SecretText>| {
+        let paths = Paths::under(home.dir.path());
+        let passphrase = token.is_none().then(|| SecretText::new(PASS));
+        async move {
+            let request = ControlRequest {
+                passphrase,
+                device: None,
+                token,
+                command,
+            };
+            client::control(&paths, &request, false).await.unwrap()
+        }
+    };
+    let approve = async {
+        let ControlResponse::Session { token } =
+            control(&alice, ControlCommand::OpenSession, None).await
+        else {
+            panic!("no session");
+        };
+        loop {
+            let ControlResponse::Overview { overview } =
+                control(&alice, ControlCommand::Overview, Some(token.clone())).await
+            else {
+                panic!("no overview");
+            };
+            if let Some(approval) = overview.approvals.first() {
+                assert_eq!(approval.tool, "send_share");
+                assert!(approval.detail.contains("the OpenRouter key"));
+                let decided = control(
+                    &alice,
+                    ControlCommand::Decide {
+                        id: approval.id,
+                        verdict: Verdict::AllowOnce,
+                    },
+                    Some(token.clone()),
+                )
+                .await;
+                assert!(matches!(decided, ControlResponse::Done { .. }));
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    let send = call(
+        &alice_agent,
+        "send_share",
+        serde_json::json!({
+            "request": format!("Bob says: please send it\n{code}"),
+            "handle": "openrouter",
+            "from": "alice",
+        }),
+    );
+    let ((failed, text), ()) = tokio::join!(send, approve);
+    assert!(!failed, "{text}");
+    assert!(!text.contains(TOKEN), "{text}");
+    let share = code_after(&text, "kv-share:v1:");
+
+    let (failed, text) = call(
+        &bob_agent,
+        "receive_share",
+        serde_json::json!({ "share": share }),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    assert!(text.contains("openrouter"), "{text}");
+    assert!(text.contains("ask mode"), "{text}");
+    assert!(!text.contains(TOKEN), "{text}");
+    let (_, handles) = call(&bob_agent, "list_handles", serde_json::json!({})).await;
+    assert!(handles.contains("openrouter.ai"), "{handles}");
+    assert!(!handles.contains(TOKEN), "{handles}");
+
+    // Bob can read it himself.
+    let ControlResponse::Revealed { fields, .. } = control(
+        &bob,
+        ControlCommand::RevealShare {
+            handle: "openrouter".into(),
+        },
+        None,
+    )
+    .await
+    else {
+        panic!("no value");
+    };
+    assert_eq!(fields[0].value.expose(), TOKEN);
+
+    alice_agent.cancel().await.unwrap();
+    bob_agent.cancel().await.unwrap();
+}

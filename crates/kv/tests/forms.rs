@@ -113,6 +113,7 @@ fn filled_values_save_as_the_tui_would() {
         approvals: Vec::new(),
         handle_requests: Vec::new(),
         role_warnings: Default::default(),
+        shares: Default::default(),
     }));
     let press = |app: &mut App, code| app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
     press(&mut app, KeyCode::Char('2'));

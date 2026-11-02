@@ -4,25 +4,26 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kv_core::VaultError;
 use kv_core::crypto::{KdfParams, SymmetricKey, fill_random};
 use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
 use kv_core::policy::{
-    Decision, DenyReason, Mode, Operation, evaluate, http_target, is_host_entry, program_name,
-    validate_run,
+    Decision, DenyReason, Mode, Operation, Policy, evaluate, http_target, is_host_entry,
+    program_name, validate_run,
 };
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ConnectCall, ControlCommand,
     ControlErrorCode, ControlRequest, ControlResponse, DbCall, DeviceCredential, ExecCall,
-    HandleRequest, HttpCall, Overview, PolicyPatch, RequestedHandle, RunCall, SessionInfo, Status,
-    Verdict,
+    HandleRequest, HttpCall, Overview, PolicyPatch, ReceiveShareCall, RequestedHandle,
+    RevealedField, RunCall, SendShareCall, SessionInfo, ShareRequestCall, Status, Verdict,
 };
 use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
+use kv_core::share::{self, OpenRequest, Received, Sent, ShareRequest, SharedSecret};
 use kv_core::vault::{DeviceKind, DeviceSlot, Vault, device_slots};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -78,6 +79,15 @@ const MAX_RUNS: usize = 32;
 /// Handle requests kept for the user at once.
 const MAX_HANDLE_REQUESTS: usize = 16;
 const MAX_REQUESTED_HOSTS: usize = 4;
+
+/// How long a share request stays open for an answer.
+pub const SHARE_REQUEST_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Share requests open at once.
+const MAX_SHARE_REQUESTS: usize = 16;
+/// Received and sent shares remembered, each; the oldest go first.
+const MAX_SHARE_RECORDS: usize = 100;
+/// Most hosts or methods a received share keeps.
+const MAX_SHARED_LIST: usize = 16;
 
 /// Argon2 settings for `kv init --insecure-fast-kdf`. Tests only.
 const TEST_KDF: KdfParams = KdfParams {
@@ -147,6 +157,8 @@ pub struct Daemon {
     next_request: u64,
     /// The name of a handle request not yet announced; only new names are.
     request_notice: Option<String>,
+    /// A share saved as a handle and not yet announced.
+    share_notice: Option<String>,
     /// Read-only Postgres handles whose role has been checked since the
     /// vault was unlocked. Forgotten when the handle changes.
     role_checks: RoleChecks,
@@ -171,6 +183,11 @@ struct Pending {
     cwd: Option<String>,
     client: Option<String>,
     session: Option<String>,
+    /// Whether "allow for the session" may grant anything. Sending a share
+    /// never can: each one waits for the user.
+    grantable: bool,
+    /// For a share, what to record once the user allows it.
+    sent: Option<Sent>,
     queued: Instant,
     expires: Instant,
     /// Dropping it without sending tells the waiting request the vault
@@ -192,6 +209,8 @@ struct Ask {
     summary: String,
     detail: String,
     cwd: Option<String>,
+    grantable: bool,
+    sent: Option<Sent>,
 }
 
 /// An authorized request waiting for the user. The server waits on
@@ -252,6 +271,7 @@ impl Daemon {
             handle_requests: Vec::new(),
             next_request: 0,
             request_notice: None,
+            share_notice: None,
             role_checks: RoleChecks::default(),
             leases: Leases::default(),
             runs: Leases::with_limit(MAX_RUNS),
@@ -319,12 +339,316 @@ impl Daemon {
                 );
                 Prepared::Reply(response)
             }
+            AgentRequest::RequestShare(call) => {
+                let response = self.request_share(call, now);
+                self.audit
+                    .record("agent", "request_share", None, agent_outcome(&response));
+                Prepared::Reply(response)
+            }
+            AgentRequest::SendShare(call) => self.prepare_send_share(call, session, now),
+            AgentRequest::ReceiveShare(call) => {
+                let response = self.receive_share(call, now);
+                let saved = match &response {
+                    AgentResponse::ShareReceived { handle, .. } => Some(handle.name.as_str()),
+                    _ => None,
+                };
+                self.audit
+                    .record("agent", "receive_share", saved, agent_outcome(&response));
+                Prepared::Reply(response)
+            }
         }
     }
 
     /// The name of a newly requested handle to announce, once.
     pub fn take_request_notice(&mut self) -> Option<String> {
         self.request_notice.take()
+    }
+
+    /// What to announce about a share just saved as a handle, once.
+    pub fn take_share_notice(&mut self) -> Option<String> {
+        self.share_notice.take()
+    }
+
+    /// Makes a key pair for a share request and keeps it in the vault.
+    fn request_share(&mut self, call: ShareRequestCall, now: Instant) -> AgentResponse {
+        if self.vault.is_none() {
+            return self.locked_error();
+        }
+        self.touch(now);
+        let vault = self.vault.as_mut().expect("checked above");
+        let unix = unix_now();
+        let mut shares = vault.shares().clone();
+        shares.requests.retain(|r| !r.is_expired(unix));
+        if shares.requests.len() >= MAX_SHARE_REQUESTS {
+            return agent_error(
+                AgentErrorCode::BadRequest,
+                format!(
+                    "{MAX_SHARE_REQUESTS} share requests are open already; ask the user to cancel \
+                     ones they no longer need in kv's window (Shares)"
+                ),
+            );
+        }
+        let request = OpenRequest::new(
+            printable(&call.note, 200),
+            printable(&call.from, 64),
+            unix,
+            SHARE_REQUEST_TTL.as_secs(),
+        );
+        let response = AgentResponse::ShareRequested {
+            code: request.code(),
+            safety_code: request.safety_code(),
+            expires_in_secs: SHARE_REQUEST_TTL.as_secs(),
+        };
+        shares.requests.push(request);
+        match vault.replace_shares(shares) {
+            Ok(()) => response,
+            Err(e) => agent_error(
+                AgentErrorCode::UpstreamError,
+                format!("could not save the vault: {e}"),
+            ),
+        }
+    }
+
+    /// Seals a handle to someone's request code. The sealed text goes back
+    /// only once the user allows it; a session grant never covers it.
+    fn prepare_send_share(
+        &mut self,
+        call: SendShareCall,
+        session: Option<&SessionInfo>,
+        now: Instant,
+    ) -> Prepared {
+        let decoded = ShareRequest::decode(&call.request);
+        let safety = decoded
+            .as_ref()
+            .map(ShareRequest::safety_code)
+            .unwrap_or_default();
+        let summary = format!("to request {safety}");
+        let refuse = |daemon: &Self, decision, response| {
+            daemon.refuse("send_share", &call.handle, &summary, decision, response)
+        };
+        let bad = |message: String| agent_error(AgentErrorCode::BadRequest, message);
+        let Some(vault) = &self.vault else {
+            return refuse(self, "locked", self.locked_error());
+        };
+        let Some(secret) = vault.get(&call.handle).cloned() else {
+            return refuse(self, "invalid", unknown_handle(vault, &call.handle));
+        };
+        let request = match decoded {
+            Ok(request) => request,
+            Err(e) => return refuse(self, "invalid", bad(e.to_string())),
+        };
+        if secret.policy.mode == Mode::Deny {
+            let message = format!("{} is set to deny, so it cannot be shared", call.handle);
+            return refuse(
+                self,
+                "policy",
+                agent_error(AgentErrorCode::PolicyDenied, message),
+            );
+        }
+        let name = call
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&secret.name)
+            .to_owned();
+        if validate_handle(&name).is_err() {
+            return refuse(
+                self,
+                "invalid",
+                bad(
+                    "name is up to 63 lowercase letters, digits, - and _, starting with a \
+                     letter or digit"
+                        .into(),
+                ),
+            );
+        }
+        if self.approvals.len() >= MAX_PENDING {
+            return refuse(self, "denied", too_many_waiting());
+        }
+        let note = printable(&call.note, 200);
+        let shared = SharedSecret {
+            name,
+            description: secret.description.clone(),
+            value: secret.value.clone(),
+            allowed_hosts: secret.policy.allowed_hosts.clone(),
+            allow_plain_http: secret.policy.allow_plain_http,
+            allowed_methods: secret.policy.allowed_methods.clone(),
+            read_only: secret.policy.read_only,
+            from: printable(&call.from, 64),
+            note: note.clone(),
+        };
+        let sealed = match share::seal(&request, &shared) {
+            Ok(sealed) => sealed,
+            Err(e) => return refuse(self, "invalid", bad(e.to_string())),
+        };
+        self.touch(now);
+        let requester = printable(&request.from, 64);
+        let asked_for = printable(&request.note, 200);
+        let mut detail = format!("send {} to request {safety}", call.handle);
+        if !requester.is_empty() {
+            detail.push_str(&format!(" from {requester}"));
+        }
+        if !asked_for.is_empty() {
+            detail.push_str(&format!(", who asked for: {asked_for}"));
+        }
+        let sent = Sent {
+            id: share::new_id(),
+            handle: call.handle.clone(),
+            kind: secret.kind(),
+            safety_code: safety.clone(),
+            to: requester,
+            note,
+            sent_at: 0,
+        };
+        let job = Prepared::Reply(AgentResponse::ShareSealed {
+            share: sealed,
+            safety_code: safety,
+        });
+        let ask = Ask {
+            tool: "send_share",
+            ask: vec![call.handle.clone()],
+            handles: call.handle.clone(),
+            summary: summary.clone(),
+            detail,
+            cwd: None,
+            grantable: false,
+            sent: Some(sent),
+        };
+        self.queue(ask, job, session, now)
+    }
+
+    /// Opens a share sealed to one of this vault's requests and saves it as
+    /// a new handle in ask mode. Never replaces a handle, and keeps no
+    /// program the sender's handle could run or hand its values to.
+    fn receive_share(&mut self, call: ReceiveShareCall, now: Instant) -> AgentResponse {
+        let bad = |message: String| agent_error(AgentErrorCode::BadRequest, message);
+        if self.vault.is_none() {
+            return self.locked_error();
+        }
+        self.touch(now);
+        let unix = unix_now();
+        let vault = self.vault.as_mut().expect("checked above");
+        let mut shares = vault.shares().clone();
+        let (index, shared) = match share::open(&call.share, &shares.requests) {
+            Ok(opened) => opened,
+            Err(e) => return bad(e.to_string()),
+        };
+        let request = shares.requests.remove(index);
+        if request.is_expired(unix) {
+            let _ = vault.replace_shares(shares);
+            return bad("the request this share answers has expired; make a new one".into());
+        }
+        let name = call
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&shared.name)
+            .to_owned();
+        if validate_handle(&name).is_err() {
+            return bad(format!(
+                "{:?} is not a handle name; pass name (lowercase letters, digits, - and _) to \
+                 save the share under another",
+                printable(&name, 63)
+            ));
+        }
+        if vault.get(&name).is_some() {
+            return bad(format!(
+                "a handle named {name} exists already; pass name to save the share under \
+                 another name"
+            ));
+        }
+        let from = printable(&shared.from, 64);
+        let note = printable(&shared.note, 200);
+        let description = match printable(shared.description.trim(), 300) {
+            text if text.is_empty() && from.is_empty() => "received through a share".to_owned(),
+            text if text.is_empty() => format!("shared by {from}"),
+            text => text,
+        };
+        let policy = Policy {
+            mode: Mode::Ask,
+            allowed_hosts: shared
+                .allowed_hosts
+                .iter()
+                .map(|host| host.trim().to_owned())
+                .filter(|host| is_host_entry(host))
+                .take(MAX_SHARED_LIST)
+                .collect(),
+            allow_plain_http: shared.allow_plain_http,
+            allowed_methods: shared
+                .allowed_methods
+                .iter()
+                .filter(|method| check_method(method).is_ok())
+                .take(MAX_SHARED_LIST)
+                .cloned()
+                .collect(),
+            read_only: shared.read_only,
+            ..Policy::default()
+        };
+        let secret = Secret {
+            name: name.clone(),
+            description,
+            value: shared.value,
+            policy,
+            created_at: 0,
+            updated_at: 0,
+        };
+        if let Err(failure) = validate_value(&secret.value).and_then(|()| validate_secret(&secret))
+        {
+            return bad(format!("the share holds {}", failure.message));
+        }
+        let kind = secret.kind();
+        if let Err(e) = vault.upsert(secret) {
+            return bad(e.to_string());
+        }
+        let value_digest = vault
+            .get(&name)
+            .map(|s| share::value_digest(&s.value))
+            .unwrap_or_default();
+        let safety_code = request.safety_code();
+        shares.received.push(Received {
+            id: share::new_id(),
+            handle: name.clone(),
+            kind,
+            from: from.clone(),
+            note: note.clone(),
+            safety_code: safety_code.clone(),
+            received_at: unix,
+            value_digest,
+        });
+        keep_newest(&mut shares.received);
+        let previous = std::mem::replace(vault.shares_mut(), shares);
+        if let Err(e) = vault.save() {
+            vault.remove(&name);
+            *vault.shares_mut() = previous;
+            return agent_error(
+                AgentErrorCode::UpstreamError,
+                format!("could not save the vault: {e}"),
+            );
+        }
+        let info = vault
+            .get(&name)
+            .map(Secret::info)
+            .expect("the handle was just saved");
+        self.scrubber = None;
+        self.handle_changed(&name, now);
+        if self.leases.count() > 0 || self.runs.count() > 0 {
+            let scrubber = self.scrubber();
+            self.leases.set_scrubber(scrubber.clone());
+            self.runs.set_scrubber(scrubber);
+        }
+        self.share_notice = Some(if from.is_empty() {
+            format!("A shared secret was saved as {name}.")
+        } else {
+            format!("A secret shared by {from} was saved as {name}.")
+        });
+        AgentResponse::ShareReceived {
+            handle: Box::new(info),
+            from,
+            note,
+            safety_code,
+        }
     }
 
     /// Queues a handle for the user to add in `kv tui`, keeping only what
@@ -533,6 +857,8 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            grantable: true,
+            sent: None,
         };
         self.queue(ask, job, session, now)
     }
@@ -649,6 +975,8 @@ impl Daemon {
             summary,
             detail,
             cwd: Some(cwd),
+            grantable: true,
+            sent: None,
         };
         self.queue(ask, job, session, now)
     }
@@ -746,6 +1074,8 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            grantable: true,
+            sent: None,
         };
         self.queue(ask, job, session, now)
     }
@@ -830,6 +1160,8 @@ impl Daemon {
                 humantime::format_duration(ttl)
             ),
             cwd: None,
+            grantable: true,
+            sent: None,
         };
         self.queue(ask, job, session, now)
     }
@@ -916,6 +1248,8 @@ impl Daemon {
             summary: program.clone(),
             detail: format!("starts {program}"),
             cwd: None,
+            grantable: true,
+            sent: None,
         };
         self.queue(ask, job, session, now)
     }
@@ -956,6 +1290,8 @@ impl Daemon {
             cwd: ask.cwd.map(|cwd| printable(&cwd, 300)),
             client,
             session: session.map(|s| s.id.clone()),
+            grantable: ask.grantable,
+            sent: ask.sent,
             queued: now,
             expires: now + self.settings.approval_wait,
             reply,
@@ -1049,7 +1385,7 @@ impl Daemon {
         match verdict {
             Verdict::AllowOnce | Verdict::Deny => {}
             Verdict::AllowSession => {
-                if let Some(session) = &pending.session {
+                if let Some(session) = pending.session.as_ref().filter(|_| pending.grantable) {
                     self.grants.retain(|g| g.until > now);
                     for handle in &pending.ask {
                         let ttl = vault
@@ -1077,6 +1413,16 @@ impl Daemon {
         }
         if matches!(verdict, Verdict::Deny | Verdict::DenyAlways) {
             self.record_unanswered(&pending, "denied", "approval_denied", now);
+        } else if let Some(sent) = pending.sent.clone() {
+            warnings.extend(record_sent(vault, sent));
+            self.audit.record_use(&Use {
+                action: pending.tool,
+                handle: &pending.handles,
+                decision: "approved",
+                summary: &pending.summary,
+                outcome: "sealed",
+                duration: now.saturating_duration_since(pending.queued),
+            });
         }
         // The request may have given up already; then nothing is waiting.
         let _ = pending.reply.send(verdict);
@@ -1222,6 +1568,17 @@ impl Daemon {
                 .authenticate(passphrase.as_ref(), None, None, now)
                 .and_then(|vault| run_authenticated(vault, command))
                 .map(done),
+            ControlCommand::RevealShare { handle: name } => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .and_then(|vault| reveal_share(vault, &name))
+                .map(|fields| ControlResponse::Revealed {
+                    handle: name.clone(),
+                    fields,
+                }),
+            ControlCommand::ForgetShare { id } => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .and_then(|vault| forget_share(vault, &id))
+                .map(done),
             ControlCommand::DismissRequest { id } => self
                 .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .map(drop)
@@ -1338,7 +1695,7 @@ impl Daemon {
                 handles: p.ask.clone(),
                 detail: p.detail.clone(),
                 cwd: p.cwd.clone(),
-                can_grant: p.session.is_some(),
+                can_grant: p.session.is_some() && p.grantable,
                 expires_in_secs: p.expires.saturating_duration_since(now).as_secs(),
             })
             .collect();
@@ -1349,6 +1706,9 @@ impl Daemon {
                 approvals,
                 handle_requests: self.handle_requests.clone(),
                 role_warnings: self.role_checks.warnings(),
+                shares: vault.shares().view(unix_now(), |name| {
+                    vault.get(name).map(|s| share::value_digest(&s.value))
+                }),
             },
         }
     }
@@ -1559,7 +1919,9 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::OpenSession
         | ControlCommand::Overview
         | ControlCommand::Decide { .. }
-        | ControlCommand::DismissRequest { .. } => Ok(Vec::new()),
+        | ControlCommand::DismissRequest { .. }
+        | ControlCommand::RevealShare { .. }
+        | ControlCommand::ForgetShare { .. } => Ok(Vec::new()),
     }
 }
 
@@ -1837,7 +2199,88 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::DismissRequest { .. } => ("dismiss_request", None),
         ControlCommand::EnrollDevice { .. } => ("enroll_device", None),
         ControlCommand::RemoveDevice { .. } => ("remove_device", None),
+        ControlCommand::RevealShare { handle } => ("reveal_share", Some(handle.clone())),
+        ControlCommand::ForgetShare { .. } => ("forget_share", None),
     }
+}
+
+/// The value of a handle that came from a share. Only such handles: kv
+/// never shows the values the user typed in.
+fn reveal_share(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure> {
+    let secret = vault.get(name).ok_or_else(|| unknown(name))?;
+    // A value the user typed in since, or a handle added under the same
+    // name, is not one kv received.
+    if !vault
+        .shares()
+        .holds_received(name, &share::value_digest(&secret.value))
+    {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            format!(
+                "{name} does not hold a value kv received through a share; kv shows only those"
+            ),
+        ));
+    }
+    let field = |label: &str, value: &SecretText| RevealedField {
+        label: label.to_owned(),
+        value: value.clone(),
+    };
+    Ok(match &secret.value {
+        SecretValue::Http {
+            token, base_url, ..
+        } => {
+            let mut fields = vec![field("Token", token)];
+            if let Some(base) = base_url {
+                fields.push(field("Base URL", &SecretText::new(base.clone())));
+            }
+            fields
+        }
+        SecretValue::Postgres { url } | SecretValue::Redis { url } => vec![field("URL", url)],
+        SecretValue::Env { vars } => vars
+            .iter()
+            .map(|(name, value)| field(name, value))
+            .collect(),
+    })
+}
+
+fn forget_share(vault: &mut Vault, id: &str) -> Result<Vec<String>, Failure> {
+    let mut shares = vault.shares().clone();
+    if !shares.forget(id) {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            "that share is gone already",
+        ));
+    }
+    vault
+        .replace_shares(shares)
+        .map_err(|e| internal(format!("could not save the vault: {e}")))?;
+    Ok(Vec::new())
+}
+
+/// Records a share the user let go out. The share has left by then, so a
+/// failed save is a warning rather than an error.
+fn record_sent(vault: &mut Vault, mut sent: Sent) -> Vec<String> {
+    sent.sent_at = unix_now();
+    let mut shares = vault.shares().clone();
+    shares.sent.push(sent);
+    keep_newest(&mut shares.sent);
+    match vault.replace_shares(shares) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!(
+            "the share went out, but kv could not record it: {e}"
+        )],
+    }
+}
+
+fn keep_newest<T>(records: &mut Vec<T>) {
+    let extra = records.len().saturating_sub(MAX_SHARE_RECORDS);
+    records.drain(..extra);
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// A device key as sent: 32 bytes in hex.

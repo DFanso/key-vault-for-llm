@@ -9,6 +9,10 @@ pub fn handle_requested(text: String) {
     show("kv: handle requested", text);
 }
 
+pub fn share_received(text: String) {
+    show("kv: shared secret received", text);
+}
+
 /// Shows `text` from a thread of its own, so a slow or missing notification
 /// service never holds up the daemon. Failures are ignored.
 fn show(summary: &'static str, text: String) {
