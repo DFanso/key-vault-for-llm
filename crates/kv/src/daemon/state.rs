@@ -575,7 +575,6 @@ impl Daemon {
                 .filter(|host| is_host_entry(host))
                 .take(MAX_SHARED_LIST)
                 .collect(),
-            allow_plain_http: shared.allow_plain_http,
             allowed_methods: shared
                 .allowed_methods
                 .iter()
