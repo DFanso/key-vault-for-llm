@@ -55,9 +55,16 @@
   </section>
 
   <section id="shares" role="tabpanel" hidden>
-    <p class="muted intro">Secrets travel between kv vaults sealed to the receiver's key, so the chat
-    that carries them never holds them in the clear. An agent starts with <code>request_share</code>;
-    every share you send waits for you on the Approvals tab.</p>
+    <p class="muted intro">Pass a secret to or from someone else's kv. It travels sealed to the
+    receiver's vault, so any chat can carry it. To get one, request it and send them the code; when
+    their share comes back, receive it. To give one, send it to the code they sent you. Agents can do
+    the same with <code>request_share</code>, <code>send_share</code> and <code>receive_share</code>;
+    every share an agent sends waits for you on the Approvals tab.</p>
+    <div class="share-actions">
+      <button id="share-request" type="button" class="primary">Request a secret</button>
+      <button id="share-send" type="button">Send a secret</button>
+      <button id="share-receive" type="button">Receive a share</button>
+    </div>
     <div class="toolbar"><h2>Waiting for a share</h2></div>
     <p id="no-share-requests" class="empty">No open requests</p>
     <div id="share-requests"></div>
@@ -92,6 +99,49 @@
     <div class="actions">
       <button type="button" id="form-cancel">Cancel</button>
       <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="share-dialog">
+  <form id="share-form">
+    <h2 id="share-title"></h2>
+    <p id="share-about" class="muted"></p>
+    <div id="share-ask">
+      <div class="field" data-for="send receive">
+        <label for="share-code" id="share-code-label"></label>
+        <input id="share-code" type="text" class="code" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field" data-for="send">
+        <label for="share-handle">Handle to send</label>
+        <select id="share-handle"></select>
+      </div>
+      <div class="field" data-for="send receive">
+        <label for="share-name" id="share-name-label"></label>
+        <input id="share-name" type="text" class="code" autocomplete="off" spellcheck="false">
+        <p class="hint" id="share-name-hint"></p>
+      </div>
+      <div class="field" data-for="request send">
+        <label for="share-note" id="share-note-label"></label>
+        <input id="share-note" type="text" autocomplete="off">
+        <p class="hint" id="share-note-hint"></p>
+      </div>
+      <div class="field" data-for="request send">
+        <label for="share-from">Your name</label>
+        <input id="share-from" type="text" autocomplete="off">
+        <p class="hint">Shown to them as who it is from; nothing checks it.</p>
+      </div>
+    </div>
+    <div id="share-result" hidden>
+      <p id="share-result-about"></p>
+      <div id="share-output" class="detail code share-output"></div>
+      <p id="share-safety" class="safety"></p>
+    </div>
+    <p id="share-error" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="share-copy" hidden>Copy</button>
+      <button type="button" id="share-cancel">Cancel</button>
+      <button type="submit" id="share-submit" class="primary"></button>
     </div>
   </form>
 </dialog>
