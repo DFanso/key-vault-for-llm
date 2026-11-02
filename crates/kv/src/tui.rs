@@ -144,6 +144,8 @@ impl Driver {
             }
             Effect::Remove(name) => self.send(ControlCommand::Remove { name }).await,
             Effect::Dismiss(id) => self.send(ControlCommand::DismissRequest { id }).await,
+            Effect::Reveal(handle) => self.send(ControlCommand::RevealShare { handle }).await,
+            Effect::Forget(id) => self.send(ControlCommand::ForgetShare { id }).await,
             Effect::Lock => {
                 self.token = None;
                 let request = ControlRequest {
@@ -255,6 +257,9 @@ impl Driver {
         match client::control_if_running(&self.paths, &request).await {
             Ok(Some(ControlResponse::Overview { overview })) => Outcome::Overview(overview),
             Ok(Some(ControlResponse::Done { warnings })) => Outcome::Done(warnings),
+            Ok(Some(ControlResponse::Revealed { handle, fields })) => {
+                Outcome::Revealed { handle, fields }
+            }
             Ok(Some(ControlResponse::Error {
                 code: ControlErrorCode::SessionEnded,
                 message,

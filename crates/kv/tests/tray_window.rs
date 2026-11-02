@@ -77,6 +77,22 @@ fn what_the_page_sends_is_read() {
             r#"{"type":"tab","tab":"audit"}"#,
             FromPage::Tab { tab: Tab::Audit },
         ),
+        (
+            r#"{"type":"tab","tab":"shares"}"#,
+            FromPage::Tab { tab: Tab::Shares },
+        ),
+        (
+            r#"{"type":"reveal","handle":"openrouter"}"#,
+            FromPage::Reveal {
+                handle: "openrouter".into(),
+            },
+        ),
+        (
+            r#"{"type":"forget","id":"0a1b2c3d4e5f6071"}"#,
+            FromPage::Forget {
+                id: "0a1b2c3d4e5f6071".into(),
+            },
+        ),
     ];
     for (json, expected) in cases {
         assert_eq!(FromPage::parse(json), Some(expected), "{json}");
@@ -96,6 +112,9 @@ fn anything_else_is_dropped() {
         r#"{"type":"dismiss","id":2,"extra":1}"#,
         r#"{"type":"open_form","form":{"kind":"edit"}}"#,
         r#"{"passphrase":"x"}"#,
+        r#"{"type":"reveal"}"#,
+        r#"{"type":"reveal","handle":"a","value":"x"}"#,
+        r#"{"type":"forget","id":7}"#,
     ] {
         assert_eq!(FromPage::parse(json), None, "{json}");
     }
@@ -167,4 +186,27 @@ fn agent_text_cannot_end_the_call() {
         .unwrap();
     let back: serde_json::Value = serde_json::from_str(json).unwrap();
     assert_eq!(back["text"], "\"});alert(1);({\"a\":\"\u{2028}</script>");
+}
+
+#[test]
+fn a_revealed_value_reaches_the_page_only_as_json_data() {
+    use kv_core::proto::RevealedField;
+    let revealed = ToPage::Revealed {
+        handle: "openrouter".into(),
+        fields: vec![RevealedField {
+            label: "Token".into(),
+            value: SecretText::new("sk-or-v1-\")</script>"),
+        }],
+    };
+    let script = revealed.script();
+    assert!(script.starts_with("kv.receive({"), "{script}");
+    assert!(script.ends_with("})"), "{script}");
+    let json = &script["kv.receive(".len()..script.len() - 1];
+    let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed["type"], "revealed");
+    assert_eq!(parsed["fields"][0]["value"], "sk-or-v1-\")</script>");
+    assert!(
+        !format!("{revealed:?}").contains("sk-or-v1"),
+        "{revealed:?}"
+    );
 }

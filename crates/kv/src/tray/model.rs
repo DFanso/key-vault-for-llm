@@ -51,6 +51,7 @@ impl Action {
             Action::Unlock => "unlock".into(),
             Action::Open(Tab::Approvals) => "open:approvals".into(),
             Action::Open(Tab::Handles) => "open:handles".into(),
+            Action::Open(Tab::Shares) => "open:shares".into(),
             Action::Open(Tab::Audit) => "open:audit".into(),
             // `from_id` reads neither, so no menu item can stand for them.
             Action::Window(_) => "window".into(),
@@ -68,6 +69,7 @@ impl Action {
             "unlock" => Action::Unlock,
             "open:approvals" => Action::Open(Tab::Approvals),
             "open:handles" => Action::Open(Tab::Handles),
+            "open:shares" => Action::Open(Tab::Shares),
             "open:audit" => Action::Open(Tab::Audit),
             "lock" => Action::Lock,
             "login:on" => Action::Login(true),
