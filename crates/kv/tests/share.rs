@@ -228,6 +228,26 @@ fn a_share_never_replaces_a_handle_and_a_refused_name_keeps_the_request() {
 }
 
 #[test]
+fn a_received_handle_never_takes_plain_http_from_the_sender() {
+    // Anyone who sees a request code can seal to it, so the receiving user
+    // turns plain http on themselves if they want it.
+    let mut alice = Fixture::new();
+    let mut plain = openrouter(Mode::Auto);
+    plain.policy.allow_plain_http = true;
+    alice.add(plain);
+    let mut bob = Fixture::new();
+    let (code, _) = request(&mut bob, "");
+    let share = send(&mut alice, &code, "openrouter");
+    match receive(&mut bob, &share, None) {
+        AgentResponse::ShareReceived { handle, .. } => {
+            assert_eq!(handle.allowed_hosts, ["openrouter.ai"]);
+            assert!(!handle.allow_plain_http);
+        }
+        other => panic!("expected a saved share, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_received_server_handle_keeps_no_program() {
     let mut alice = Fixture::new();
     let mut ssh = run_secret(
