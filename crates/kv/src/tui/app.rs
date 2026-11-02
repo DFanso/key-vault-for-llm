@@ -2,10 +2,14 @@
 //! become effects for the driver to carry out, and the driver's outcomes
 //! update what is shown.
 
-use kv_core::proto::{Overview, PolicyPatch, RevealedField, Verdict};
+use kv_core::proto::{
+    Overview, PolicyPatch, ReceiveShareCall, RevealedField, SendShareCall, ShareRequestCall,
+    Verdict,
+};
+use serde::Serialize;
 
 use crate::audit::Entry;
-use kv_core::secret::{Secret, SecretText, SecretValue};
+use kv_core::secret::{Secret, SecretKind, SecretText, SecretValue};
 use kv_core::vault::DeviceKind;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use zeroize::Zeroizing;
@@ -53,6 +57,13 @@ pub enum Effect {
     Reveal(String),
     /// Cancels a share request, or drops a received or sent record.
     Forget(String),
+    /// Makes a share request for the user to send. Only kv's window asks.
+    RequestShare(ShareRequestCall),
+    /// Seals a handle to a request code the user pasted. Only kv's window
+    /// asks.
+    SendShare(SendShareCall),
+    /// Saves a share the user pasted as a handle. Only kv's window asks.
+    ReceiveShare(ReceiveShareCall),
     Lock,
     Quit,
 }
@@ -74,6 +85,34 @@ pub enum Outcome {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// What a share step from kv's window came to.
+    Share(ShareDone),
+}
+
+/// A share step the user took in kv's window. Nothing in it is secret: a
+/// request code holds a public key, and a share opens only in the vault
+/// that asked for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum ShareDone {
+    /// A request code to send to whoever has the secret.
+    Requested { code: String, safety_code: String },
+    /// A share to send back to whoever made the request.
+    Sealed {
+        share: String,
+        safety_code: String,
+        /// Who made the request and what they asked for, as they said.
+        to: String,
+        asked_for: String,
+    },
+    /// A share saved as a handle.
+    Received {
+        handle: String,
+        kind: SecretKind,
+        /// Who the sender said they were. Not verified.
+        from: String,
+        safety_code: String,
     },
 }
 
@@ -267,6 +306,8 @@ impl App {
             // `kv tui` never asks: a value drawn in a terminal stays in its
             // scrollback.
             Outcome::Revealed { .. } => {}
+            // Only kv's window shares by hand.
+            Outcome::Share(_) => {}
             Outcome::Ended(reason) => {
                 self.screen = Screen::Unlock;
                 self.overview = None;
