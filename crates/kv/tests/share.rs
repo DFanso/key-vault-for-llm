@@ -159,6 +159,11 @@ fn a_handle_goes_from_one_vault_to_another_without_showing_its_value() {
         }
         other => panic!("expected a saved share, got {other:?}"),
     };
+    // Bob hears about it, since his agent did it.
+    assert_eq!(
+        bob.daemon.take_share_notice().as_deref(),
+        Some("A secret shared by alice was saved as openrouter.")
+    );
     assert_eq!(handle.name, "openrouter");
     assert_eq!(handle.kind, SecretKind::Http);
     assert_eq!(handle.mode, Mode::Ask);
@@ -465,5 +470,241 @@ fn shares_survive_a_restart_of_the_daemon() {
     assert!(matches!(
         receive(&mut bob, &share, None),
         AgentResponse::ShareReceived { .. }
+    ));
+}
+
+/// What kv's window sends for the user, with their session token.
+fn by_hand(f: &mut Fixture, token: &SecretText, command: ControlCommand) -> ControlResponse {
+    f.send(None, Some(token), command)
+}
+
+fn refused_by_hand(response: ControlResponse) -> (ControlErrorCode, String) {
+    match response {
+        ControlResponse::Error { code, message } => (code, message),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[test]
+fn two_people_share_a_handle_from_their_windows_without_an_agent() {
+    let mut alice = Fixture::new();
+    alice.add(openrouter(Mode::Ask));
+    let alice_token = alice.token();
+    let mut bob = Fixture::new();
+    let bob_token = bob.token();
+
+    // Bob makes a request in his window and sends the code himself.
+    let (code, safety_code) = match by_hand(
+        &mut bob,
+        &bob_token,
+        ControlCommand::RequestShare(ShareRequestCall {
+            note: "the OpenRouter key".into(),
+            from: "bob".into(),
+        }),
+    ) {
+        ControlResponse::ShareRequested {
+            code,
+            safety_code,
+            expires_in_secs,
+        } => {
+            assert_eq!(expires_in_secs, 7 * 24 * 60 * 60);
+            (code, safety_code)
+        }
+        other => panic!("expected a request code, got {other:?}"),
+    };
+    let requests = bob.overview(&bob_token).shares.requests;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].code, code);
+
+    // Alice pastes it into her window. She is the one asking, so the share
+    // is sealed at once, without an approval, even in ask mode.
+    let share = match by_hand(
+        &mut alice,
+        &alice_token,
+        ControlCommand::SendShare(SendShareCall {
+            request: format!("Hi Alice, can you share it?\n{code}"),
+            handle: "openrouter".into(),
+            name: None,
+            from: "alice".into(),
+            note: "for the eval script".into(),
+        }),
+    ) {
+        ControlResponse::ShareSealed {
+            share,
+            safety_code: sealed_to,
+            to,
+            asked_for,
+        } => {
+            assert_eq!(sealed_to, safety_code);
+            assert_eq!(to, "bob");
+            assert_eq!(asked_for, "the OpenRouter key");
+            share
+        }
+        other => panic!("expected sealed text, got {other:?}"),
+    };
+    assert!(share.starts_with("kv-share:v1:"));
+    assert!(!share.contains(TOKEN));
+    assert_eq!(alice.status().pending_approvals, 0);
+    let sent = alice.overview(&alice_token).shares.sent;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].handle, "openrouter");
+    assert_eq!(sent[0].to, "bob");
+    assert_eq!(sent[0].safety_code, safety_code);
+
+    // Bob pastes the share into his window and it is saved as a handle.
+    match by_hand(
+        &mut bob,
+        &bob_token,
+        ControlCommand::ReceiveShare(ReceiveShareCall {
+            share: share.clone(),
+            name: Some("openrouter-alice".into()),
+        }),
+    ) {
+        ControlResponse::ShareReceived {
+            handle,
+            from,
+            note,
+            safety_code: opened_with,
+        } => {
+            assert_eq!(handle.name, "openrouter-alice");
+            assert_eq!(handle.kind, SecretKind::Http);
+            assert_eq!(handle.mode, Mode::Ask);
+            assert_eq!(from, "alice");
+            assert_eq!(note, "for the eval script");
+            assert_eq!(opened_with, safety_code);
+        }
+        other => panic!("expected a saved handle, got {other:?}"),
+    }
+    // Bob did it himself: there is nothing to tell him.
+    assert_eq!(bob.daemon.take_share_notice(), None);
+    let overview = bob.overview(&bob_token);
+    assert!(overview.shares.requests.is_empty());
+    assert_eq!(overview.shares.received.len(), 1);
+    assert!(overview.shares.received[0].viewable);
+    match reveal(&mut bob, &bob_token, "openrouter-alice") {
+        ControlResponse::Revealed { fields, .. } => assert_eq!(fields[0].value.expose(), TOKEN),
+        other => panic!("expected the value, got {other:?}"),
+    }
+
+    // Each step is in the audit log, with no secret in it.
+    let actions: Vec<(String, Option<String>, String)> = bob
+        .audit_lines()
+        .into_iter()
+        .chain(alice.audit_lines())
+        .map(|line| {
+            (
+                line["action"].as_str().unwrap().to_owned(),
+                line["handle"].as_str().map(str::to_owned),
+                line["outcome"].as_str().unwrap().to_owned(),
+            )
+        })
+        .filter(|(action, ..)| action.ends_with("_share") && action != "reveal_share")
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("request_share".to_owned(), None, "done".to_owned()),
+            (
+                "receive_share".to_owned(),
+                Some("openrouter-alice".to_owned()),
+                "done".to_owned()
+            ),
+            (
+                "send_share".to_owned(),
+                Some("openrouter".to_owned()),
+                "done".to_owned()
+            ),
+        ]
+    );
+    for lines in [bob.audit_lines(), alice.audit_lines()] {
+        assert!(!serde_json::to_string(&lines).unwrap().contains(TOKEN));
+    }
+}
+
+#[test]
+fn the_window_refuses_what_an_agent_would_be_refused() {
+    let mut alice = Fixture::new();
+    alice.add(openrouter(Mode::Deny));
+    alice.add(env_secret(
+        "aws",
+        &[("AWS_KEY", AWS_KEY)],
+        &["aws"],
+        Mode::Ask,
+    ));
+    let token = alice.token();
+    let mut bob = Fixture::new();
+    let (code, _) = request(&mut bob, "");
+    let send = |handle: &str, request: &str| {
+        ControlCommand::SendShare(SendShareCall {
+            request: request.into(),
+            handle: handle.into(),
+            name: None,
+            from: String::new(),
+            note: String::new(),
+        })
+    };
+
+    let (kind, message) = refused_by_hand(by_hand(&mut alice, &token, send("openrouter", &code)));
+    assert_eq!(kind, ControlErrorCode::Invalid);
+    assert!(message.contains("deny"), "{message}");
+    let (kind, message) = refused_by_hand(by_hand(
+        &mut alice,
+        &token,
+        send("aws", "kv-request:v1:nope"),
+    ));
+    assert_eq!(kind, ControlErrorCode::Invalid);
+    assert!(message.contains("request code"), "{message}");
+    let (kind, _) = refused_by_hand(by_hand(&mut alice, &token, send("missing", &code)));
+    assert_eq!(kind, ControlErrorCode::UnknownHandle);
+    let (kind, message) = refused_by_hand(by_hand(
+        &mut alice,
+        &token,
+        ControlCommand::ReceiveShare(ReceiveShareCall {
+            share: code.clone(),
+            name: None,
+        }),
+    ));
+    assert_eq!(kind, ControlErrorCode::Invalid);
+    assert!(message.contains("not a kv share"), "{message}");
+    assert!(alice.overview(&token).shares.sent.is_empty());
+
+    // Without a session or the passphrase, nothing happens.
+    let (kind, _) = refused_by_hand(alice.send(None, None, send("aws", &code)));
+    assert_eq!(kind, ControlErrorCode::PassphraseRequired);
+    let (kind, _) = refused_by_hand(alice.send(
+        None,
+        None,
+        ControlCommand::RequestShare(ShareRequestCall {
+            note: String::new(),
+            from: String::new(),
+        }),
+    ));
+    assert_eq!(kind, ControlErrorCode::PassphraseRequired);
+}
+
+#[test]
+fn a_taken_name_in_the_window_keeps_the_request_for_another_try() {
+    let mut alice = Fixture::new();
+    alice.add(openrouter(Mode::Ask));
+    let mut bob = Fixture::new();
+    bob.add(openrouter(Mode::Auto));
+    let bob_token = bob.token();
+    let (code, _) = request(&mut bob, "");
+    let share = send(&mut alice, &code, "openrouter");
+    let receive = |name: Option<&str>| {
+        ControlCommand::ReceiveShare(ReceiveShareCall {
+            share: share.clone(),
+            name: name.map(str::to_owned),
+        })
+    };
+
+    let (kind, message) = refused_by_hand(by_hand(&mut bob, &bob_token, receive(None)));
+    assert_eq!(kind, ControlErrorCode::Invalid);
+    assert!(message.contains("exists already"), "{message}");
+    assert!(!message.contains("pass name"), "{message}");
+    assert_eq!(bob.overview(&bob_token).shares.requests.len(), 1);
+    assert!(matches!(
+        by_hand(&mut bob, &bob_token, receive(Some("openrouter-2"))),
+        ControlResponse::ShareReceived { .. }
     ));
 }

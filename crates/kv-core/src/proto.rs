@@ -492,6 +492,16 @@ pub enum ControlCommand {
     ForgetShare {
         id: String,
     },
+    /// Makes a share request from kv's window, for the user to send by
+    /// hand.
+    RequestShare(ShareRequestCall),
+    /// Seals a handle to a request code the user pasted into kv's window.
+    /// The user asking is the approval, so nothing waits on the Approvals
+    /// tab.
+    SendShare(SendShareCall),
+    /// Opens a share the user pasted into kv's window and saves it as a
+    /// handle.
+    ReceiveShare(ReceiveShareCall),
 }
 
 /// The user's answer to a request waiting for approval.
@@ -524,6 +534,31 @@ pub enum ControlResponse {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// A request code to send to whoever has the secret.
+    ShareRequested {
+        code: String,
+        safety_code: String,
+        expires_in_secs: u64,
+    },
+    /// A handle sealed to someone's request: text to send back to them.
+    /// Only their vault can open it.
+    ShareSealed {
+        share: String,
+        /// The safety code of the request it was sealed to.
+        safety_code: String,
+        /// Who made the request, as they said. Not verified.
+        to: String,
+        /// What they asked for.
+        asked_for: String,
+    },
+    /// A share opened and saved as a handle.
+    ShareReceived {
+        handle: Box<HandleInfo>,
+        /// Who the sender said they were. Not verified.
+        from: String,
+        note: String,
+        safety_code: String,
     },
     Error {
         code: ControlErrorCode,
