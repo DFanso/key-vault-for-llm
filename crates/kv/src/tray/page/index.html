@@ -9,6 +9,30 @@
 <script src="app.js" defer></script>
 </head>
 <body>
+<!-- A click on the tray icon: a small menu first; Open kv grows the window. -->
+<main id="menu" class="menu" hidden>
+  <div class="menu-head">
+    <span class="logo" aria-hidden="true"></span>
+    <div class="grow">
+      <strong>kv</strong>
+      <span id="menu-status" class="status-line"><span class="dot" aria-hidden="true"></span><span id="menu-status-text"></span></span>
+    </div>
+    <button type="button" id="menu-hide" class="icon-button small" aria-label="Hide kv (Esc)" title="Hide (Esc)"><span class="i i-x" aria-hidden="true"></span></button>
+  </div>
+  <button type="button" id="menu-waiting" class="menu-banner">
+    <span id="menu-waiting-icon" class="stat-icon"><span class="i i-bell" aria-hidden="true"></span></span>
+    <span class="grow"><strong id="menu-waiting-title"></strong><span id="menu-waiting-note" class="muted small"></span></span>
+    <span id="menu-waiting-go" class="i i-chevron-right" aria-hidden="true"></span>
+  </button>
+  <div class="menu-list" role="menu" aria-label="kv">
+    <button type="button" role="menuitem" id="menu-open"><span class="i i-app-window" aria-hidden="true"></span><span class="label">Open kv</span></button>
+    <button type="button" role="menuitem" id="menu-lock"><span id="menu-lock-icon" class="i i-lock" aria-hidden="true"></span><span class="label" id="menu-lock-text">Lock kv</span></button>
+    <button type="button" role="menuitemcheckbox" id="menu-login" aria-checked="false"><span class="i i-power" aria-hidden="true"></span><span class="label">Start at login</span><span class="switch small" aria-hidden="true"><span class="knob"></span></span></button>
+    <div class="menu-sep" role="separator"></div>
+    <button type="button" role="menuitem" id="menu-quit" class="danger"><span class="i i-log-out" aria-hidden="true"></span><span class="label">Quit kv tray</span></button>
+  </div>
+</main>
+
 <!-- Locked: the whole popup is the unlock screen. -->
 <main id="unlock" class="unlock" hidden>
   <div class="unlock-card">

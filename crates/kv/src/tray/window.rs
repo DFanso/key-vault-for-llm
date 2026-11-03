@@ -175,6 +175,9 @@ pub enum FromPage {
     /// Hide the window (Esc, or its close button). The window side takes
     /// this one itself.
     Hide,
+    /// Grow the small menu into the full window (its Open kv). The window
+    /// side takes this one itself.
+    Expand,
     Theme {
         theme: Theme,
     },
@@ -214,6 +217,11 @@ pub enum ToPage {
     },
     /// The window went out of sight: the page puts away a value on show.
     Hidden,
+    /// The window shows the small menu a click on the tray icon opens
+    /// (`on`), or the full page.
+    Menu {
+        on: bool,
+    },
     /// A form to draw, with no secret text in it.
     Form {
         view: FormView,

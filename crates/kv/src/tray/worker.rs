@@ -184,18 +184,15 @@ impl<D: Desktop> Worker<D> {
             }
             Action::Lock => self.lock(Asker::Menu).await,
             Action::Open(tab) => {
-                let opening = self.window.is_none();
-                match &mut self.window {
-                    Some(window) => window.tab = tab,
-                    None => self.window = Some(Window { tab, form: None }),
-                }
-                self.desktop.show_window(tab);
-                self.desktop.page(ToPage::Show { tab });
-                self.send_state();
+                let opening = self.open_window(tab);
                 // The window opens on its unlock screen, asking at once.
                 if opening && !self.driver.has_session() && self.driver.device().is_some() {
                     return Next::Prompt(Asker::Window);
                 }
+            }
+            // The menu offers Unlock; it does not ask by itself.
+            Action::Menu => {
+                self.open_window(Tab::Home);
             }
             Action::Window(message) => return self.on_page(message).await,
             Action::WindowClosed => self.window = None,
@@ -208,6 +205,19 @@ impl<D: Desktop> Worker<D> {
             Action::Quit => return Next::Quit,
         }
         Next::Done
+    }
+
+    /// Opens kv's window on `tab`, or moves it there; whether it was closed.
+    fn open_window(&mut self, tab: Tab) -> bool {
+        let opening = self.window.is_none();
+        match &mut self.window {
+            Some(window) => window.tab = tab,
+            None => self.window = Some(Window { tab, form: None }),
+        }
+        self.desktop.show_window(tab);
+        self.desktop.page(ToPage::Show { tab });
+        self.send_state();
+        opening
     }
 
     /// Does what the page asks for. A page that has just loaded means the
@@ -310,8 +320,8 @@ impl<D: Desktop> Worker<D> {
                     self.send_audit().await;
                 }
             }
-            // The window takes it before it gets here.
-            FromPage::Hide => {}
+            // The window takes these before they get here.
+            FromPage::Hide | FromPage::Expand => {}
             FromPage::Theme { theme } => {
                 self.theme = theme;
                 if let Err(e) = theme.save(&self.paths.tray_theme_file()) {

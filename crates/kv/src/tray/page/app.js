@@ -7,6 +7,9 @@
   const $ = (id) => document.getElementById(id);
 
   const page = {
+    // A click on the tray icon shows the small menu first; Open kv grows
+    // the window into the full page.
+    menu: location.hash === "#menu",
     locked: true,
     device: null,
     waiting: false,
@@ -237,6 +240,10 @@
         page.screen = message.tab;
         draw();
         break;
+      case "menu":
+        page.menu = Boolean(message.on);
+        draw();
+        break;
       case "hidden":
         // The window went out of sight: values on show go first.
         closeReveal();
@@ -329,13 +336,82 @@
   // Drawing.
 
   function draw() {
-    show($("unlock"), page.locked);
-    show($("app"), !page.locked);
-    if (page.locked) {
+    show($("menu"), page.menu);
+    show($("unlock"), !page.menu && page.locked);
+    show($("app"), !page.menu && !page.locked);
+    if (page.menu) {
+      drawMenu();
+    } else if (page.locked) {
       drawUnlock();
     } else {
       drawApp();
     }
+  }
+
+  // The small menu: what the tray's own menu offers, in the page's style.
+  function drawMenu() {
+    const overview = page.locked ? null : page.overview;
+    const prompting = Boolean(page.waiting && page.device);
+    const secs = overview && overview.status.locks_in_secs;
+    let status = "Unlocked";
+    if (prompting) status = `Waiting for ${page.device}…`;
+    else if (page.locked) status = "Locked";
+    else if (typeof secs === "number") status = `Unlocked · locks in ${duration(secs)}`;
+    $("menu-status-text").textContent = status;
+    $("menu-status").classList.toggle("off", page.locked);
+
+    const approvals = overview ? overview.approvals.length : 0;
+    const asked = overview ? overview.handle_requests.length : 0;
+    let banner;
+    if (page.locked) {
+      banner = { tone: "tone-grey", icon: "lock", title: "kv is locked", note: "Unlock to see what agents ask for.", to: null };
+    } else if (approvals > 0) {
+      const what = approvals === 1 ? "1 request waiting" : `${approvals} requests waiting`;
+      banner = { tone: "tone-amber", icon: "bell", title: what, note: "Review them in kv", to: "approvals" };
+    } else if (asked > 0) {
+      const what = asked === 1 ? "1 handle asked for" : `${asked} handles asked for`;
+      banner = { tone: "tone-amber", icon: "bell", title: what, note: "Fill them in in kv", to: "handles" };
+    } else {
+      banner = { tone: "tone-green", icon: "circle-check", title: "Nothing waiting", note: "No agent needs you right now.", to: null };
+    }
+    const row = $("menu-waiting");
+    row.dataset.to = banner.to || "";
+    row.classList.toggle("static", !banner.to);
+    row.tabIndex = banner.to ? 0 : -1;
+    $("menu-waiting-icon").className = `stat-icon ${banner.tone}`;
+    $("menu-waiting-icon").replaceChildren(icon(banner.icon));
+    $("menu-waiting-title").textContent = banner.title;
+    $("menu-waiting-note").textContent = banner.note;
+    show($("menu-waiting-go"), Boolean(banner.to));
+
+    const lock = $("menu-lock");
+    let lockIcon = "lock";
+    let lockText = "Lock kv";
+    if (page.locked && page.device) {
+      lockIcon = "fingerprint";
+      lockText = `Unlock with ${page.device}`;
+    } else if (page.locked) {
+      lockIcon = "lock-open";
+      lockText = "Unlock kv…";
+    }
+    $("menu-lock-icon").className = `i i-${lockIcon}`;
+    $("menu-lock-text").textContent = lockText;
+    lock.disabled = prompting;
+    $("menu-login").setAttribute("aria-checked", String(page.login));
+  }
+
+  // From the menu to the full window, on `screen` once unlocked.
+  function expand(screen) {
+    page.menu = false;
+    send({ type: "expand" });
+    if (screen && !page.locked) go(screen);
+    else draw();
+  }
+
+  function menuLock() {
+    if (!page.locked) send({ type: "lock" });
+    else if (page.device) send({ type: "device_unlock" });
+    else expand(null);
   }
 
   function drawUnlock() {
@@ -1221,6 +1297,17 @@
   }
 
   function onKey(event) {
+    if (page.menu) {
+      if (event.key === "Escape") send({ type: "hide" });
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const items = [...document.querySelectorAll("#menu-waiting:not(.static), .menu-list button:not(:disabled)")];
+        const at = items.indexOf(document.activeElement);
+        const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+        items[(next + items.length) % items.length].focus();
+      }
+      return;
+    }
     if (page.locked) {
       if (event.key === "Escape") send({ type: "hide" });
       return;
@@ -1300,6 +1387,19 @@
     for (const link of document.querySelectorAll("[data-goto]")) {
       link.addEventListener("click", () => go(link.dataset.goto));
     }
+    $("menu-open").addEventListener("click", () => expand(null));
+    $("menu-waiting").addEventListener("click", () => {
+      const to = $("menu-waiting").dataset.to;
+      if (to) expand(to);
+    });
+    $("menu-lock").addEventListener("click", menuLock);
+    $("menu-login").addEventListener("click", () => {
+      page.login = !page.login;
+      $("menu-login").setAttribute("aria-checked", String(page.login));
+      send({ type: "login", on: page.login });
+    });
+    $("menu-quit").addEventListener("click", () => send({ type: "quit" }));
+    $("menu-hide").addEventListener("click", () => send({ type: "hide" }));
     const quick = {
       add: () => openRequest({ kind: "new" }),
       request: () => openShare("request"),

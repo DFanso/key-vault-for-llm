@@ -303,6 +303,8 @@ fn ids_are_unique_and_lead_back_to_the_same_action() {
     assert_eq!(Action::Open(Tab::Handles).id(), "open:handles");
     assert_eq!(Action::Open(Tab::Home).id(), "open:home");
     assert_eq!(Action::from_id("open:home"), Some(Action::Open(Tab::Home)));
+    // The icon's own menu is never a system menu item.
+    assert_eq!(Action::from_id(&Action::Menu.id()), None);
     assert_eq!(
         Action::from_id("open:audit"),
         Some(Action::Open(Tab::Audit))

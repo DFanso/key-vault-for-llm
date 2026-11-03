@@ -4,8 +4,10 @@
 //! each message for the page here through the event loop; menu clicks and
 //! what the page sends go back to it as `Action`s.
 //!
-//! A click on the icon opens kv's window beside it, like a flyout, and a
-//! second click hides it again; the menu is on the other button.
+//! A click on the icon opens a small menu beside it, like a flyout (Open
+//! kv, Lock, Start at login, Quit), and a second click hides it again; its
+//! Open kv grows it into kv's full window. The system menu is on the other
+//! button.
 
 mod webview;
 
@@ -49,6 +51,8 @@ enum Message {
     Clicked(Anchor),
     /// The page asked to hide the window.
     Hide,
+    /// The page's menu asked for the full window.
+    Expand,
     /// The worker has stopped.
     Quit,
 }
@@ -116,6 +120,9 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     let mut shown_at: Option<Instant> = None;
     // A device prompt takes the focus; the window stays up behind it.
     let mut prompting = false;
+    // A click on the icon asked the worker for the window: it opens as the
+    // menu, not the full window.
+    let mut want_menu = false;
     event_loop.run(move |event, target, flow| {
         // Held for as long as the loop runs.
         let _ = &lock;
@@ -143,12 +150,13 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                     }
                     Some(_) if just_hidden => {}
                     Some(open) => {
-                        open.show_at(anchor);
+                        open.show_menu(anchor);
                         shown_at = Some(Instant::now());
                     }
-                    // The worker opens it on Home, asking to unlock first.
+                    // The worker opens it, and the page gets its state.
                     None => {
-                        let _ = actions.send(Action::Open(Tab::Home));
+                        want_menu = true;
+                        let _ = actions.send(Action::Menu);
                     }
                 }
             }
@@ -156,6 +164,12 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 if let Some(open) = &window {
                     open.hide();
                     hidden_at = Some(Instant::now());
+                }
+            }
+            Event::UserEvent(Message::Expand) => {
+                if let Some(open) = &window {
+                    open.expand(anchor);
+                    shown_at = Some(Instant::now());
                 }
             }
             Event::WindowEvent {
@@ -173,10 +187,20 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
             }
             Event::UserEvent(Message::Open) => match &window {
                 Some(open) => {
-                    open.show_at(anchor);
+                    if std::mem::take(&mut want_menu) {
+                        open.show_menu(anchor);
+                    } else {
+                        open.show_full(anchor);
+                    }
                     shown_at = Some(Instant::now());
                 }
-                None => match KvWindow::open(target, actions.clone(), pages.clone(), anchor) {
+                None => match KvWindow::open(
+                    target,
+                    actions.clone(),
+                    pages.clone(),
+                    anchor,
+                    std::mem::take(&mut want_menu),
+                ) {
                     Ok(opened) => {
                         window = Some(opened);
                         shown_at = Some(Instant::now());

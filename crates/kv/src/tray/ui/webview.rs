@@ -1,7 +1,8 @@
 //! kv's window on screen: a tao window holding a wry webview that shows the
 //! page `tray::window` carries, and nothing else. It opens like a flyout:
 //! no frame, next to the tray icon, above the other windows, and it hides
-//! when the user clicks elsewhere or presses Esc.
+//! when the user clicks elsewhere or presses Esc. A click on the icon opens
+//! it small, as a menu; the menu's Open kv grows it into the full window.
 
 use std::borrow::Cow;
 
@@ -18,9 +19,12 @@ use crate::tray::icon;
 use crate::tray::model::Action;
 use crate::tray::window::{CSP, FromPage, PAGE_URL, ToPage, asset, is_page_url};
 
-/// The window's size, in logical pixels.
+/// The full window's size, in logical pixels.
 const WIDTH: f64 = 800.0;
 const HEIGHT: f64 = 600.0;
+/// The menu's size, in logical pixels: it fits the page's menu exactly.
+const MENU_WIDTH: f64 = 300.0;
+const MENU_HEIGHT: f64 = 330.0;
 /// The space between the window and the tray icon or the screen's edge, in
 /// physical pixels.
 const GAP: i32 = 12;
@@ -41,18 +45,20 @@ pub struct KvWindow {
 }
 
 impl KvWindow {
-    /// Opens the window in front, beside `anchor`. What the page sends goes
-    /// to `actions`, but a request to hide goes to the event loop.
+    /// Opens the window in front, beside `anchor`: as the small menu when
+    /// `menu`, else the full window. What the page sends goes to `actions`,
+    /// but a request to hide or grow the window goes to the event loop.
     pub fn open(
         target: &EventLoopWindowTarget<Message>,
         actions: UnboundedSender<Action>,
         proxy: EventLoopProxy<Message>,
         anchor: Option<Anchor>,
+        menu: bool,
     ) -> Result<Self, String> {
         let logo = Icon::from_rgba(icon::logo_rgba(), icon::LOGO_SIZE, icon::LOGO_SIZE).ok();
         let builder = WindowBuilder::new()
             .with_title("kv")
-            .with_inner_size(LogicalSize::new(WIDTH, HEIGHT))
+            .with_inner_size(size(menu))
             .with_resizable(false)
             .with_decorations(false)
             .with_always_on_top(true)
@@ -86,18 +92,23 @@ impl KvWindow {
                 let from_page = is_page_url(&request.uri().to_string());
                 let body = Zeroizing::new(request.into_body());
                 if from_page && let Some(message) = FromPage::parse(&body) {
-                    if message == FromPage::Hide {
-                        let _ = proxy.send_event(Message::Hide);
-                    } else {
-                        let _ = actions.send(Action::Window(message));
-                    }
+                    let _ = match message {
+                        FromPage::Hide => proxy.send_event(Message::Hide).ok(),
+                        FromPage::Expand => proxy.send_event(Message::Expand).ok(),
+                        message => actions.send(Action::Window(message)).ok(),
+                    };
                 }
             })
             .with_navigation_handler(|url| is_page_url(&url))
             .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
             .with_incognito(true)
             .with_devtools(false)
-            .with_url(PAGE_URL)
+            // The page reads the hash before the first message can reach it.
+            .with_url(if menu {
+                format!("{PAGE_URL}#menu")
+            } else {
+                PAGE_URL.to_owned()
+            })
             .build(&window)
             .map_err(|e| e.to_string())?;
         let opened = Self { webview, window };
@@ -144,6 +155,25 @@ impl KvWindow {
         self.raise();
     }
 
+    /// Shows the small menu beside `anchor`.
+    pub fn show_menu(&self, anchor: Option<Anchor>) {
+        self.send(&ToPage::Menu { on: true });
+        self.window.set_inner_size(size(true));
+        self.show_at(anchor);
+    }
+
+    /// Shows the full window beside `anchor`.
+    pub fn show_full(&self, anchor: Option<Anchor>) {
+        self.send(&ToPage::Menu { on: false });
+        self.expand(anchor);
+    }
+
+    /// Grows the menu into the full window; the page has already switched.
+    pub fn expand(&self, anchor: Option<Anchor>) {
+        self.window.set_inner_size(size(false));
+        self.show_at(anchor);
+    }
+
     /// Hides the window; the page puts away whatever it showed of a secret.
     pub fn hide(&self) {
         self.window.set_visible(false);
@@ -184,6 +214,14 @@ impl KvWindow {
 
     pub fn send(&self, message: &ToPage) {
         let _ = self.webview.evaluate_script(&message.script());
+    }
+}
+
+fn size(menu: bool) -> LogicalSize<f64> {
+    if menu {
+        LogicalSize::new(MENU_WIDTH, MENU_HEIGHT)
+    } else {
+        LogicalSize::new(WIDTH, HEIGHT)
     }
 }
 
