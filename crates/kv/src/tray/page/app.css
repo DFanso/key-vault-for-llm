@@ -681,6 +681,98 @@ dialog .message:not(:empty) { margin-top: 10px; }
   .stats, .share-actions, .columns { grid-template-columns: 1fr; }
 }
 
+/* Motion: views and screens come in, controls ease between states. */
+@keyframes view-in { from { opacity: 0; transform: scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes screen-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.enter { animation: view-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.menu.leaving { opacity: 0; transform: scale(0.985); transition: opacity 110ms ease-in, transform 110ms ease-in; }
+section:not([hidden]) { animation: screen-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+dialog[open] { animation: dialog-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+dialog[open]::backdrop { animation: fade-in 200ms ease-out; }
+.toast:not([hidden]) { animation: toast-in 180ms ease-out; }
+button, input, select, .stat, .tile, .menu-banner, .switch.small {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+button:active:not(:disabled) { transform: scale(0.98); }
+.stat:hover, .tile:hover { transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+/* The moment kv unlocks: the mark pops in, the key turns, the shackle
+   swings open, a green ring pulses; then it all fades into the view.
+   Locking runs it backwards: the shackle swings shut, the key turns back,
+   the tile goes grey (as the locked tray icon) and a violet ring pulses. */
+.padlock {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  background: radial-gradient(600px 300px at 50% 35%, var(--bg-glow), transparent 70%), var(--bg);
+}
+.padlock.done { opacity: 0; transition: opacity 220ms ease; }
+.unlock-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 84px;
+  margin-bottom: 10px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #8b6cff, #5b3fd9);
+  box-shadow: 0 14px 34px rgba(91, 63, 217, 0.4);
+}
+.unlock-mark svg { position: relative; z-index: 1; width: 54px; height: 54px; overflow: visible; }
+.unlock-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #9a96b3, #6f6b8a);
+  opacity: 0;
+}
+.unlock-ring { position: absolute; inset: -7px; border-radius: 30px; border: 3px solid var(--green); opacity: 0; }
+.unlock-title { font-size: 18px; font-weight: 700; }
+.shackle { transform-box: view-box; transform-origin: 21px 30px; }
+.keyhole { transform-box: view-box; transform-origin: 32px 43px; }
+.padlock .unlock-title, .padlock .muted { opacity: 0; }
+.play .unlock-mark { animation: mark-pop 320ms cubic-bezier(0.2, 0.8, 0.3, 1.25) both; }
+.play .keyhole { animation: key-turn 260ms 200ms ease-in-out both; }
+.play .shackle { animation: shackle-open 440ms 380ms cubic-bezier(0.3, 0.7, 0.3, 1.25) both; }
+.play .unlock-ring { animation: ring-pulse 620ms 640ms ease-out forwards; }
+.play .unlock-title { animation: text-in 300ms 620ms ease-out both; }
+.play .muted { animation: text-in 300ms 720ms ease-out both; }
+.locking .unlock-ring { border-color: #8b6cff; }
+.locking.play .shackle { animation: shackle-close 440ms 200ms cubic-bezier(0.5, 0, 0.6, 1.3) both; }
+.locking.play .keyhole { animation: key-turn-back 260ms 600ms ease-in-out both; }
+.locking.play .keyhole * { animation: keyhole-grey 360ms 640ms ease both; }
+.locking.play .unlock-mark::after { animation: fade-in 360ms 640ms ease both; }
+@keyframes shackle-close {
+  0% { transform: translateY(-7px) rotate(-32deg); }
+  55% { transform: translateY(-7px); }
+  100% { transform: none; }
+}
+@keyframes key-turn-back { from { transform: rotate(90deg); } to { transform: rotate(0deg); } }
+@keyframes keyhole-grey { from { fill: #5b3fd9; } to { fill: #6f6b8a; } }
+@keyframes mark-pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
+@keyframes key-turn { from { transform: rotate(0deg); } to { transform: rotate(90deg); } }
+@keyframes shackle-open {
+  0% { transform: none; }
+  45% { transform: translateY(-7px); }
+  100% { transform: translateY(-7px) rotate(-32deg); }
+}
+@keyframes ring-pulse { 0% { opacity: 0.9; transform: scale(0.94); } 100% { opacity: 0; transform: scale(1.3); } }
+@keyframes text-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Picking a theme: everything cross-fades for a moment. */
+.theming, .theming *, .theming *::before, .theming *::after {
+  transition: background-color 280ms ease, color 280ms ease, border-color 280ms ease, box-shadow 280ms ease !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
