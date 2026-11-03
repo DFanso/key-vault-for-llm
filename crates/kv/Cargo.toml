@@ -40,6 +40,7 @@ zeroize = "1.9"
 block2 = "0.6"
 libc = "0.2"
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSEvent", "NSScreen"] }
 objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString"] }
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
 security-framework = "3"

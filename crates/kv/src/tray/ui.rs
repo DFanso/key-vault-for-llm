@@ -90,12 +90,19 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
             ..
         } = event
         {
-            let _ = clicked.send_event(Message::Clicked(Anchor {
+            #[cfg(target_os = "macos")]
+            let at = {
+                let _ = rect;
+                webview::pointer()
+            };
+            #[cfg(not(target_os = "macos"))]
+            let at = Anchor {
                 x: rect.position.x,
                 y: rect.position.y,
                 width: rect.size.width.into(),
                 height: rect.size.height.into(),
-            }));
+            };
+            let _ = clicked.send_event(Message::Clicked(at));
         }
     }));
     let pages = proxy.clone();
