@@ -77,15 +77,11 @@
 
     <div class="scroll">
       <section id="home" aria-labelledby="page-title">
-        <div class="hero">
-          <p class="accent-line">What would you like to do?</p>
-          <div class="chips" id="quick-actions">
-            <button type="button" class="chip-button strong" id="quick-review" hidden><span class="i i-shield-check" aria-hidden="true"></span><span id="quick-review-text"></span></button>
+        <div class="chips quick" id="quick-actions" role="group" aria-label="Quick actions">
             <button type="button" class="chip-button" data-go="add"><span class="i i-plus" aria-hidden="true"></span>Add handle</button>
             <button type="button" class="chip-button" data-go="request"><span class="i i-inbox" aria-hidden="true"></span>Request a secret</button>
             <button type="button" class="chip-button" data-go="send"><span class="i i-send" aria-hidden="true"></span>Send a secret</button>
             <button type="button" class="chip-button" data-go="receive"><span class="i i-download" aria-hidden="true"></span>Receive a share</button>
-          </div>
         </div>
         <div class="stats">
           <button type="button" class="stat" data-goto="approvals">
@@ -123,7 +119,7 @@
       </section>
 
       <section id="approvals" aria-labelledby="page-title" hidden>
-        <p class="lede">An agent asked to use a handle that is set to <b>ask</b>. Nothing happens until you answer; unanswered requests expire.</p>
+        <p class="lede">Agents asking to use a handle set to <b>ask</b>. Nothing happens until you answer.</p>
         <div id="no-approvals" class="empty">
           <span class="empty-icon tone-green"><span class="i i-circle-check" aria-hidden="true"></span></span>
           <strong>All clear</strong>
@@ -154,8 +150,7 @@
       </section>
 
       <section id="shares" aria-labelledby="page-title" hidden>
-        <p class="lede">Pass a secret to or from someone else's kv. It travels sealed to the receiver's vault, so any chat can carry it.
-        Agents can do the same with <code>request_share</code>, <code>send_share</code> and <code>receive_share</code>; every share an agent sends waits for you on Approvals.</p>
+        <p class="lede">Pass a secret to or from someone else's kv. It travels sealed to the receiver's vault, so any chat can carry it. Shares that agents send wait for you on Approvals.</p>
         <div class="share-actions">
           <button id="share-request" type="button" class="tile">
             <span class="stat-icon tone-accent"><span class="i i-inbox" aria-hidden="true"></span></span>
