@@ -7,17 +7,31 @@
   const $ = (id) => document.getElementById(id);
 
   const page = {
+    // A click on the tray icon shows the small menu first; Open kv grows
+    // the window into the full page.
+    menu: location.hash === "#menu",
     locked: true,
     device: null,
     waiting: false,
     overview: null,
-    tab: "approvals",
+    // Whether kv tray starts at login, and the chosen appearance.
+    login: false,
+    theme: "system",
+    // The screen on show: one of the tray's tabs, or "settings".
+    screen: "home",
+    // The newest audit entries, for Home and the Audit screen.
+    audit: [],
     // What each list was last drawn from, to redraw only on a change.
-    drawn: { cards: "", requests: "", handles: "", shares: "" },
+    drawn: { cards: "", requests: "", handles: "", shares: "", home: "", audit: "" },
+    // The longest wait each request has shown, to draw how much is left.
+    lifetimes: new Map(),
+    handleFilter: "all",
+    auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
     confirming: null,
     revealTimer: null,
+    toastTimer: null,
     // The share dialog's step, while it is open, and whether the tray is
     // working on it.
     share: null,
@@ -25,15 +39,60 @@
   };
 
   const REVEAL_SECS = 60;
+  const TOAST_SECS = 8;
+
+  // The screens, in sidebar order (Ctrl+1 to Ctrl+6), and their titles.
+  const SCREENS = ["home", "approvals", "handles", "shares", "audit", "settings"];
+  const TITLES = {
+    home: "Home",
+    approvals: "Approvals",
+    handles: "Handles",
+    shares: "Shares",
+    audit: "Audit log",
+    settings: "Settings",
+  };
+  // The screens the tray knows as tabs; Settings is the page's own.
+  const TABS = new Set(["home", "approvals", "handles", "shares", "audit"]);
+
+  const THEMES = [
+    ["system", "System", "monitor"],
+    ["light", "Light", "sun"],
+    ["dark", "Dark", "moon"],
+  ];
 
   // The keys that copy a selection here.
   const COPY_KEYS = /Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+C";
+
+  // What each tool does, in words, and its icon.
+  const TOOLS = {
+    http_request: ["HTTP request", "globe"],
+    exec: ["Run a command", "terminal"],
+    run: ["Run a program", "terminal"],
+    db_query: ["Database query", "database"],
+    db_connect: ["Database lease", "database"],
+  };
+
+  // Each kind of handle's icon and tone.
+  const KINDS = {
+    http: ["globe", "tone-accent"],
+    env: ["terminal", "tone-teal"],
+    postgres: ["database", "tone-amber"],
+    redis: ["layers", "tone-red"],
+  };
+
+  // How each mode reads, with its tone and icon.
+  const MODES = {
+    auto: ["Auto", "tone-green", "check", "Used without asking"],
+    ask: ["Ask", "tone-amber", "shield-check", "Each use waits for you"],
+    deny: ["Deny", "tone-red", "shield-x", "Never used"],
+  };
 
   // The share dialog's three steps. The tray checks what is typed; the page
   // only shows the fields each step needs.
   const SHARE_STEPS = {
     request: {
       title: "Request a secret",
+      icon: ["inbox", "tone-accent"],
       about:
         "kv makes a code for you to send to the person who has the secret. It holds only a public " +
         "key, so any chat can carry it.",
@@ -45,6 +104,7 @@
     },
     send: {
       title: "Send a secret",
+      icon: ["send", "tone-teal"],
       about:
         "Paste the request code they sent you and pick a handle. kv seals its value so that only " +
         "the vault that made the code can open it.",
@@ -55,6 +115,7 @@
     },
     receive: {
       title: "Receive a share",
+      icon: ["download", "tone-amber"],
       about:
         "Paste the share they sent back. kv opens it with the key of your open request and saves it " +
         "as a new handle in ask mode.",
@@ -73,17 +134,39 @@
     const node = document.createElement(tag);
     if (className) node.className = className;
     for (const child of children) {
-      if (child === null || child === undefined) continue;
+      if (child === null || child === undefined || child === false) continue;
       node.append(typeof child === "string" ? document.createTextNode(child) : child);
     }
     return node;
   }
 
-  function button(label, onClick, className) {
-    const node = el("button", className || null, label);
+  function icon(name) {
+    const node = el("span", `i i-${name}`);
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  }
+
+  // A button with an optional icon; its text is in `.text`, so a copy
+  // button can say "Copied" without losing the icon.
+  function button(label, onClick, className, iconName) {
+    const node = el("button", className || null, iconName ? icon(iconName) : null, el("span", "text", label));
     node.type = "button";
     node.addEventListener("click", onClick);
     return node;
+  }
+
+  // A button that is only an icon, named for screen readers.
+  function iconButton(name, label, onClick, className) {
+    const node = el("button", `icon-button${className ? ` ${className}` : ""}`, icon(name));
+    node.type = "button";
+    node.setAttribute("aria-label", label);
+    node.title = label;
+    node.addEventListener("click", onClick);
+    return node;
+  }
+
+  function chip(text, tone, iconName) {
+    return el("span", `chip ${tone}`, iconName ? icon(iconName) : null, text);
   }
 
   function show(node, shown) {
@@ -99,6 +182,38 @@
     return `${secs}s`;
   }
 
+  // "just now", "4 min ago", "2 h ago", "3 days ago".
+  function ago(secs) {
+    const past = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+    if (past < 45) return "just now";
+    if (past < 3600) return `${Math.round(past / 60)} min ago`;
+    if (past < 86400) return `${Math.round(past / 3600)} h ago`;
+    const days = Math.round(past / 86400);
+    return days === 1 ? "yesterday" : `${days} days ago`;
+  }
+
+  // A Unix time as the user's local date and time.
+  function when(secs) {
+    return new Date(secs * 1000).toLocaleString();
+  }
+
+  // An agent's initials, and a tone picked from its name so each agent
+  // keeps its colour.
+  function avatar(name, small) {
+    const words = (name || "agent").split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const letters = words.length > 1 ? words[0][0] + words[1][0] : (words[0] || "?").slice(0, 2);
+    const tones = ["tone-accent", "tone-teal", "tone-amber", "tone-green"];
+    let hash = 0;
+    for (const c of name || "") hash = (hash * 31 + c.charCodeAt(0)) >>> 0;
+    const node = el("span", `avatar ${small ? "sm " : ""}${tones[hash % tones.length]}`, letters.toUpperCase());
+    node.setAttribute("aria-hidden", "true");
+    return node;
+  }
+
+  function tool(name) {
+    return TOOLS[name] || [name.replace(/_/g, " "), "sparkles"];
+  }
+
   // Messages from the tray.
 
   function receive(message) {
@@ -108,20 +223,30 @@
         page.device = message.device;
         page.waiting = message.waiting_for_device;
         page.overview = message.overview;
+        if (typeof message.login === "boolean") page.login = message.login;
+        if (message.theme) setTheme(message.theme);
         if (page.locked) {
           closeForm(false);
           closeConfirm();
           closeReveal();
           closeShare();
           // Whatever it said belonged to the session that just ended.
-          $("app-message").textContent = "";
-          show($("app-message"), false);
+          hideToast();
+          page.audit = [];
         }
         draw();
         break;
       case "show":
-        page.tab = message.tab;
+        page.screen = message.tab;
         draw();
+        break;
+      case "menu":
+        page.menu = Boolean(message.on);
+        draw();
+        break;
+      case "hidden":
+        // The window went out of sight: values on show go first.
+        closeReveal();
         break;
       case "form":
         openForm(message.view);
@@ -133,7 +258,9 @@
         closeForm(false);
         break;
       case "audit":
-        drawAudit(message.entries);
+        page.audit = message.entries;
+        drawAudit();
+        drawHome();
         break;
       case "revealed":
         openReveal(message.handle, message.fields);
@@ -153,35 +280,142 @@
 
   function say(text, request) {
     if (request !== null && request !== undefined) {
-      const card = document.querySelector(`.card[data-id="${Number(request)}"] .message`);
+      const card = document.querySelector(`.card[data-id="${Number(request)}"]`);
       if (card) {
-        card.textContent = text;
+        card.querySelector(".message").textContent = text;
+        for (const b of card.querySelectorAll("button")) b.disabled = false;
         return;
       }
     }
     if (page.locked) {
       $("unlock-message").textContent = text;
     } else {
-      const note = $("app-message");
-      note.textContent = text;
-      show(note, true);
+      $("app-message-text").textContent = text;
+      show($("app-message"), true);
+      clearTimeout(page.toastTimer);
+      page.toastTimer = setTimeout(hideToast, TOAST_SECS * 1000);
     }
+  }
+
+  function hideToast() {
+    clearTimeout(page.toastTimer);
+    $("app-message-text").textContent = "";
+    show($("app-message"), false);
+  }
+
+  // Appearance: the root's data-theme picks the colours; "system" follows
+  // the system's light or dark mode as it changes.
+  function setTheme(theme) {
+    if (!THEMES.some(([name]) => name === theme)) return;
+    page.theme = theme;
+    document.documentElement.dataset.theme = theme;
+    for (const group of document.querySelectorAll(".theme-choice")) {
+      for (const choice of group.children) {
+        choice.setAttribute("aria-checked", String(choice.dataset.theme === theme));
+      }
+    }
+  }
+
+  function buildThemeChoices() {
+    for (const group of document.querySelectorAll(".theme-choice")) {
+      group.replaceChildren(
+        ...THEMES.map(([name, label, iconName]) => {
+          const choice = button(label, () => {
+            setTheme(name);
+            send({ type: "theme", theme: name });
+          }, null, iconName);
+          choice.setAttribute("role", "radio");
+          choice.dataset.theme = name;
+          return choice;
+        }),
+      );
+    }
+    setTheme(page.theme);
   }
 
   // Drawing.
 
   function draw() {
-    show($("unlock"), page.locked);
-    show($("app"), !page.locked);
-    if (page.locked) {
+    show($("menu"), page.menu);
+    show($("unlock"), !page.menu && page.locked);
+    show($("app"), !page.menu && !page.locked);
+    if (page.menu) {
+      drawMenu();
+    } else if (page.locked) {
       drawUnlock();
     } else {
       drawApp();
     }
   }
 
+  // The small menu: what the tray's own menu offers, in the page's style.
+  function drawMenu() {
+    const overview = page.locked ? null : page.overview;
+    const prompting = Boolean(page.waiting && page.device);
+    const secs = overview && overview.status.locks_in_secs;
+    let status = "Unlocked";
+    if (prompting) status = `Waiting for ${page.device}…`;
+    else if (page.locked) status = "Locked";
+    else if (typeof secs === "number") status = `Unlocked · locks in ${duration(secs)}`;
+    $("menu-status-text").textContent = status;
+    $("menu-status").classList.toggle("off", page.locked);
+
+    const approvals = overview ? overview.approvals.length : 0;
+    const asked = overview ? overview.handle_requests.length : 0;
+    let banner;
+    if (page.locked) {
+      banner = { tone: "tone-grey", icon: "lock", title: "kv is locked", note: "Unlock to see what agents ask for.", to: null };
+    } else if (approvals > 0) {
+      const what = approvals === 1 ? "1 request waiting" : `${approvals} requests waiting`;
+      banner = { tone: "tone-amber", icon: "bell", title: what, note: "Review them in kv", to: "approvals" };
+    } else if (asked > 0) {
+      const what = asked === 1 ? "1 handle asked for" : `${asked} handles asked for`;
+      banner = { tone: "tone-amber", icon: "bell", title: what, note: "Fill them in in kv", to: "handles" };
+    } else {
+      banner = { tone: "tone-green", icon: "circle-check", title: "Nothing waiting", note: "No agent needs you right now.", to: null };
+    }
+    const row = $("menu-waiting");
+    row.dataset.to = banner.to || "";
+    row.classList.toggle("static", !banner.to);
+    row.tabIndex = banner.to ? 0 : -1;
+    $("menu-waiting-icon").className = `stat-icon ${banner.tone}`;
+    $("menu-waiting-icon").replaceChildren(icon(banner.icon));
+    $("menu-waiting-title").textContent = banner.title;
+    $("menu-waiting-note").textContent = banner.note;
+    show($("menu-waiting-go"), Boolean(banner.to));
+
+    const lock = $("menu-lock");
+    let lockIcon = "lock";
+    let lockText = "Lock kv";
+    if (page.locked && page.device) {
+      lockIcon = "fingerprint";
+      lockText = `Unlock with ${page.device}`;
+    } else if (page.locked) {
+      lockIcon = "lock-open";
+      lockText = "Unlock kv…";
+    }
+    $("menu-lock-icon").className = `i i-${lockIcon}`;
+    $("menu-lock-text").textContent = lockText;
+    lock.disabled = prompting;
+    $("menu-login").setAttribute("aria-checked", String(page.login));
+  }
+
+  // From the menu to the full window, on `screen` once unlocked.
+  function expand(screen) {
+    page.menu = false;
+    send({ type: "expand" });
+    if (screen && !page.locked) go(screen);
+    else draw();
+  }
+
+  function menuLock() {
+    if (!page.locked) send({ type: "lock" });
+    else if (page.device) send({ type: "device_unlock" });
+    else expand(null);
+  }
+
   function drawUnlock() {
-    const waiting = page.waiting && page.device;
+    const waiting = Boolean(page.waiting && page.device);
     const waitingNote = $("unlock-waiting");
     waitingNote.textContent = waiting ? `Waiting for ${page.device}…` : "";
     show(waitingNote, waiting);
@@ -189,38 +423,192 @@
     const wasHidden = form.hidden;
     show(form, !waiting);
     const useDevice = $("use-device");
-    useDevice.textContent = page.device ? `Use ${page.device}` : "";
-    show(useDevice, Boolean(page.device) && !waiting);
-    if (wasHidden && !waiting) $("passphrase").focus();
-    page.drawn = { cards: "", requests: "", handles: "", shares: "" };
+    useDevice.replaceChildren(icon("fingerprint"), el("span", null, page.device ? `Unlock with ${page.device}` : ""));
+    const offersDevice = Boolean(page.device) && !waiting;
+    show(useDevice, offersDevice);
+    show($("unlock-or"), offersDevice);
+    if (wasHidden && !waiting && !page.device) $("passphrase").focus();
+    page.drawn = { cards: "", requests: "", handles: "", shares: "", home: "", audit: "" };
   }
 
   function drawApp() {
     $("unlock-message").textContent = "";
     const overview = page.overview;
     const secs = overview && overview.status.locks_in_secs;
-    $("locks-in").textContent =
-      secs === null || secs === undefined ? "Unlocked" : `Unlocked · locks in ${duration(secs)}`;
-    const waiting = overview ? overview.approvals.length : 0;
-    for (const tab of document.querySelectorAll("nav button")) {
-      const name = tab.dataset.tab;
-      tab.setAttribute("aria-selected", String(name === page.tab));
-      if (name === "approvals") {
-        tab.textContent = waiting > 0 ? `Approvals (${waiting})` : "Approvals";
-      }
+    const locksIn = secs === null || secs === undefined ? "Stays unlocked until you lock it" : `Locks in ${duration(secs)}`;
+    $("locks-in").textContent = locksIn;
+    $("settings-locks-in").textContent = `Unlocked. ${locksIn}.`;
+    const soon = typeof secs === "number" && secs < 600;
+    $("brand-text").textContent = soon ? `Locks in ${duration(secs)}` : "Unlocked";
+    $("brand-status").classList.toggle("soon", soon);
+
+    const approvals = overview ? overview.approvals : [];
+    const requests = overview ? overview.handle_requests : [];
+    counter("count-approvals", approvals.length, "waiting");
+    counter("count-handles", requests.length, "asked for");
+
+    for (const tab of document.querySelectorAll("nav button[data-tab]")) {
+      if (tab.dataset.tab === page.screen) tab.setAttribute("aria-current", "page");
+      else tab.removeAttribute("aria-current");
     }
-    for (const name of ["approvals", "handles", "shares", "audit"]) {
-      show($(name), name === page.tab);
-    }
+    for (const name of SCREENS) show($(name), name === page.screen);
+    $("page-title").textContent = page.screen === "home" ? greeting() : TITLES[page.screen] || "kv";
+    $("today").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    $("login").setAttribute("aria-checked", String(page.login));
     if (!overview) return;
-    drawCards(overview.approvals);
-    drawRequests(overview.handle_requests);
+    drawHome();
+    drawCards(approvals);
+    drawRequests(requests);
     drawHandles(overview.handles, overview.role_warnings || {});
     drawShares(overview.shares || { requests: [], received: [], sent: [] }, overview.handles);
   }
 
+  function greeting() {
+    const hour = new Date().getHours();
+    return hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  }
+
+  function counter(id, n, what) {
+    const node = $(id);
+    node.textContent = String(n);
+    node.setAttribute("aria-label", `${n} ${what}`);
+    show(node, n > 0);
+  }
+
+  // Home: what needs the user, the numbers, and the latest activity.
+  function drawHome() {
+    const overview = page.overview;
+    if (!overview || page.locked) return;
+    const approvals = overview.approvals;
+    const requests = overview.handle_requests;
+    const waiting = approvals.length + requests.length;
+    $("stat-waiting").textContent = String(waiting);
+    $("stat-waiting-note").textContent =
+      waiting === 0 ? "Nothing waiting" : `${approvals.length} to approve · ${requests.length} asked for`;
+    const handles = overview.handles;
+    const modes = { auto: 0, ask: 0, deny: 0 };
+    for (const h of handles) modes[h.mode] = (modes[h.mode] || 0) + 1;
+    $("stat-handles").textContent = String(handles.length);
+    $("stat-handles-note").textContent = `${modes.ask} ask · ${modes.auto} auto · ${modes.deny} deny`;
+    const shares = overview.shares || { requests: [], received: [], sent: [] };
+    const open = shares.requests.filter((r) => !r.expired).length;
+    $("stat-shares").textContent = String(open);
+    $("stat-shares-note").textContent = `${shares.received.length} received · ${shares.sent.length} sent`;
+
+    const shape = JSON.stringify([approvals.map((a) => a.id), requests.map((r) => r.id), page.audit.slice(0, 5)]);
+    if (shape === page.drawn.home) return;
+    page.drawn.home = shape;
+
+    // Home only says who is waiting: the answer is given on Approvals, which
+    // shows the request in full (the URL, command, query or share).
+    // Three rows at most, requests to approve first; the rest is a count.
+    const NEEDS_ROWS = 3;
+    const shownApprovals = approvals.slice(0, NEEDS_ROWS);
+    const shownRequests = requests.slice(0, NEEDS_ROWS - shownApprovals.length);
+    const rows = shownApprovals.map((approval) => {
+      const handlesText = approval.handles.join(", ");
+      return el(
+        "div",
+        "needs",
+        avatar(approval.client, true),
+        el("div", "grow", el("strong", null, approval.client || "An agent"), el("span", "muted small", `${tool(approval.tool)[0]} · ${handlesText}`)),
+        el("div", "buttons", button("Review", () => go("approvals"), "outline")),
+      );
+    });
+    for (const requested of shownRequests) {
+      rows.push(
+        el(
+          "div",
+          "needs",
+          avatar(requested.client, true),
+          el("div", "grow", el("strong", null, `${requested.client || "An agent"} asked for ${requested.request.name}`), el("span", "muted small", requested.request.reason || requested.request.kind)),
+          el("div", "buttons", button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "outline")),
+        ),
+      );
+    }
+    const more = approvals.length + requests.length - rows.length;
+    if (more > 0) rows.push(el("p", "muted small more", `and ${more} more`));
+    $("home-needs").replaceChildren(...rows);
+    show($("home-clear"), rows.length === 0);
+
+    const recent = page.audit.slice(0, 5).map(activity);
+    $("home-activity").replaceChildren(...recent);
+    show($("home-no-activity"), recent.length === 0);
+  }
+
+  // How an audit entry went: its tone, icon and word.
+  function verdictOf(entry) {
+    switch (entry.decision) {
+      case "approved":
+        return ["tone-green", "check", "Approved"];
+      case "auto":
+        return ["tone-green", "check", "Auto"];
+      case "lease":
+        return ["tone-teal", "clock", "Lease"];
+      case "denied":
+        return ["tone-red", "x", "Denied"];
+      case "timed_out":
+        return ["tone-amber", "hourglass", "Timed out"];
+      default:
+        return ["tone-grey", "info", null];
+    }
+  }
+
+  function actionWords(action) {
+    const words = {
+      http_request: "HTTP request",
+      db_query: "Database query",
+      db_connect: "Database lease",
+      exec: "Command",
+      run: "Program",
+      unlock: "Unlocked",
+      open_session: "Unlocked",
+      lock: "Locked",
+      idle_lock: "Locked when idle",
+      stop: "Stopped kv",
+      init: "Created the vault",
+      add: "Added handle",
+      remove: "Removed handle",
+      set_policy: "Changed policy",
+      update: "Updated handle",
+      change_passphrase: "Changed passphrase",
+      overview: "Opened kv",
+      status: "Checked status",
+      decide: "Answered a request",
+      dismiss_request: "Dismissed a request",
+      enroll_device: "Added a device",
+      remove_device: "Removed a device",
+      reveal_share: "Revealed a share",
+      forget_share: "Forgot a share",
+      request_share: "Asked for a share",
+      send_share: "Sent a share",
+      receive_share: "Received a share",
+      list_handles: "Listed handles",
+      request_handle: "Asked for a handle",
+    };
+    return words[action] || action.replace(/_/g, " ");
+  }
+
+  function entryTime(entry) {
+    return Date.parse(entry.ts) / 1000;
+  }
+
+  function activity(entry) {
+    const [tone, iconName] = verdictOf(entry);
+    const mark = el("span", `mark ${tone}`, icon(iconName));
+    // The handle leads the second line, so a narrow column cuts the
+    // summary rather than the handle's name.
+    const detail = [entry.handle, entry.summary].filter(Boolean).join(" · ");
+    const time = el("span", "muted small", ago(entryTime(entry)));
+    return el("li", null, mark, el("div", "what", el("strong", null, actionWords(entry.action)), detail ? el("span", "muted small code", detail) : null), time);
+  }
+
   function drawCards(approvals) {
     show($("no-approvals"), approvals.length === 0);
+    for (const approval of approvals) {
+      const seen = page.lifetimes.get(approval.id) || 0;
+      page.lifetimes.set(approval.id, Math.max(seen, approval.expires_in_secs));
+    }
     // The countdowns change every second; the cards only when requests come
     // or go, so a button the user is about to press stays put.
     const shape = JSON.stringify(approvals.map((a) => ({ ...a, expires_in_secs: 0 })));
@@ -230,35 +618,56 @@
       for (const card of $("cards").children) kept.set(card.dataset.id, card);
       const cards = approvals.map((approval) => kept.get(String(approval.id)) || card(approval));
       $("cards").replaceChildren(...cards);
+      const ids = new Set(approvals.map((a) => a.id));
+      for (const id of page.lifetimes.keys()) if (!ids.has(id)) page.lifetimes.delete(id);
     }
     for (const approval of approvals) {
-      const expires = document.querySelector(`.card[data-id="${Number(approval.id)}"] .expires`);
-      if (expires) expires.textContent = `Expires in ${approval.expires_in_secs}s`;
+      const timer = document.querySelector(`.card[data-id="${Number(approval.id)}"] .timer`);
+      if (!timer) continue;
+      const left = approval.expires_in_secs;
+      timer.querySelector(".expires").textContent = `Expires in ${left}s`;
+      const bar = timer.querySelector("progress");
+      bar.max = page.lifetimes.get(approval.id) || left || 1;
+      bar.value = left;
+      timer.classList.toggle("soon", left <= 15);
     }
   }
 
   function card(approval) {
     const handles = approval.handles.join(", ");
-    const decide = (verdict) => () => send({ type: "decide", id: approval.id, verdict });
-    const buttons = el(
-      "div",
-      "buttons",
-      button("Allow once", decide("allow_once"), "primary"),
-      approval.can_grant ? button("Allow for this session", decide("allow_session")) : null,
-      button("Deny", decide("deny")),
-      button(`Deny and block ${handles}`, decide("deny_always"), "danger"),
-    );
-    const node = el(
-      "div",
-      "card",
-      el("div", "title", `${approval.client || "agent"} · ${approval.tool} · ${handles}`),
-      el("div", "detail", approval.detail),
-      approval.cwd ? el("div", "muted", `in ${approval.cwd}`) : null,
-      el("div", "muted expires", `Expires in ${approval.expires_in_secs}s`),
-      buttons,
+    const [toolName, toolIcon] = tool(approval.tool);
+    const node = el("article", "card waiting-card");
+    const decide = (verdict) => () => {
+      for (const b of node.querySelectorAll(".buttons button")) b.disabled = true;
+      send({ type: "decide", id: approval.id, verdict });
+    };
+    const bar = el("progress");
+    bar.setAttribute("aria-label", "Time left to answer");
+    const parts = [
+      el(
+        "div",
+        "card-head",
+        avatar(approval.client),
+        el("div", "grow", el("div", "title", approval.client || "An agent"), el("div", "sub", `wants to use ${handles}`)),
+        chip(toolName, "tone-accent", toolIcon),
+      ),
+      el("div", "chips", ...approval.handles.map((h) => chip(h, "tone-grey", "key-round"))),
+      el("div", "code-box", approval.detail),
+      approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
+      el("div", "timer", bar, el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      el(
+        "div",
+        "buttons",
+        button("Allow once", decide("allow_once"), "primary", "check"),
+        approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
+        button("Deny", decide("deny"), "outline danger"),
+        button(`Deny and block ${handles}`, decide("deny_always"), "danger", "shield-x"),
+      ),
       el("p", "message"),
-    );
+    ];
+    node.append(...parts.filter(Boolean));
     node.dataset.id = String(approval.id);
+    node.setAttribute("aria-label", `${approval.client || "An agent"}: ${toolName} with ${handles}`);
     return node;
   }
 
@@ -269,18 +678,24 @@
     const cards = requests.map((requested) => {
       const r = requested.request;
       const allows = r.kind === "env" ? r.env_vars : r.allowed_hosts;
+      const [kindIcon, tone] = KINDS[r.kind] || ["key-round", "tone-accent"];
       return el(
-        "div",
-        "card",
-        el("div", "title", `${requested.client || "An agent"} asked for ${r.name} (${r.kind})`),
-        r.description ? el("div", null, r.description) : null,
-        el("div", "muted", `Why: ${r.reason}`),
-        allows.length > 0 ? el("div", "muted", allows.join(", ")) : null,
+        "article",
+        "card request-card",
+        el(
+          "div",
+          "card-head",
+          avatar(requested.client),
+          el("div", "grow", el("div", "title", `${requested.client || "An agent"} asked for a handle`), el("div", "sub", r.description || r.name)),
+          chip(r.kind, tone, kindIcon),
+        ),
+        el("div", "chips", chip(r.name, "tone-grey", "key-round"), ...allows.map((a) => chip(a, "tone-grey"))),
+        r.reason ? el("div", "meta", icon("info"), `Why: ${r.reason}`) : null,
         el(
           "div",
           "buttons",
-          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary"),
-          button("Dismiss", () => send({ type: "dismiss", id: requested.id })),
+          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary", "pencil"),
+          button("Dismiss", () => send({ type: "dismiss", id: requested.id }), "outline"),
         ),
       );
     });
@@ -288,41 +703,52 @@
   }
 
   function drawHandles(handles, warnings) {
-    const shape = JSON.stringify([handles, warnings]);
+    const query = $("handle-search").value.trim().toLowerCase();
+    const shape = JSON.stringify([handles, warnings, query, page.handleFilter]);
     if (shape === page.drawn.handles) return;
     page.drawn.handles = shape;
     show($("no-handles"), handles.length === 0);
-    show($("handle-table"), handles.length > 0);
-    const rows = handles.map((handle) => {
+    const shown = handles.filter(
+      (h) =>
+        (page.handleFilter === "all" || h.mode === page.handleFilter) &&
+        (!query || `${h.name} ${h.description} ${h.kind}`.toLowerCase().includes(query)),
+    );
+    show($("no-match"), handles.length > 0 && shown.length === 0);
+    show($("handle-rows"), shown.length > 0);
+    const rows = shown.map((handle) => {
       const allows = {
-        http: handle.allowed_hosts,
+        http: [...handle.allowed_hosts, ...handle.allowed_methods],
         env: handle.allowed_cmds,
       }[handle.kind];
-      const name = el("td", null, el("div", "title", handle.name));
-      if (handle.description) name.append(el("div", "muted", handle.description));
-      if (warnings[handle.name]) name.append(el("div", "warning", warnings[handle.name]));
+      const [kindIcon, tone] = KINDS[handle.kind] || ["key-round", "tone-accent"];
+      const [modeText, modeTone, modeIcon, modeHint] = MODES[handle.mode] || [handle.mode, "tone-grey", "info", ""];
+      const mode = chip(modeText, modeTone, modeIcon);
+      mode.title = modeHint;
+      const info = el(
+        "div",
+        "grow",
+        el("div", "chips", el("span", "name", handle.name), chip(handle.kind, "tone-grey"), mode, handle.read_only ? chip("read only", "tone-teal", "eye") : null),
+        handle.description ? el("span", "desc", handle.description) : null,
+        allows && allows.length > 0 ? el("span", "allows", allows.join(" · ")) : null,
+        warnings[handle.name] ? el("div", "warning", icon("triangle-alert"), warnings[handle.name]) : null,
+      );
+      const remove = iconButton("trash-2", `Remove ${handle.name}`, () => confirmRemove(handle.name), "danger");
+      remove.dataset.action = "remove";
       return el(
-        "tr",
-        null,
-        name,
-        el("td", "short", handle.kind),
-        el("td", "short", handle.read_only ? `${handle.mode}, read only` : handle.mode),
-        el("td", "long", allows ? allows.join(", ") : ""),
+        "li",
+        "row-item",
+        el("span", `stat-icon ${tone}`, icon(kindIcon)),
+        info,
         el(
-          "td",
-          "actions",
-          button("Edit", () => openRequest({ kind: "edit", name: handle.name })),
-          button("Policy", () => openRequest({ kind: "policy", name: handle.name })),
-          button("Remove", () => confirmRemove(handle.name), "danger"),
+          "div",
+          "row-actions",
+          iconButton("pencil", `Edit ${handle.name}`, () => openRequest({ kind: "edit", name: handle.name })),
+          iconButton("sliders-horizontal", `Policy for ${handle.name}`, () => openRequest({ kind: "policy", name: handle.name })),
+          remove,
         ),
       );
     });
     $("handle-rows").replaceChildren(...rows);
-  }
-
-  // A Unix time as the user's local date and time.
-  function when(secs) {
-    return new Date(secs * 1000).toLocaleString();
   }
 
   function drawShares(shares, handles) {
@@ -332,23 +758,25 @@
 
     show($("no-share-requests"), shares.requests.length === 0);
     const requests = shares.requests.map((request) => {
-      const title = request.note
-        ? `Request ${request.safety_code} · ${request.note}`
-        : `Request ${request.safety_code}`;
       const status = request.expired
         ? `Expired ${when(request.expires_at)}`
-        : `Opened ${when(request.created_at)} · open until ${when(request.expires_at)}`;
-      const code = el("div", "detail code", request.code);
+        : `Opened ${ago(request.created_at)} · open until ${when(request.expires_at)}`;
+      const code = el("div", "code-box share-output", request.code);
       return el(
-        "div",
+        "article",
         "card",
-        el("div", "title", title),
-        el("div", "muted", status),
-        code,
+        el(
+          "div",
+          "card-head",
+          el("span", "stat-icon tone-accent", icon("inbox")),
+          el("div", "grow", el("div", "title", request.note || "A secret you asked for"), el("div", "sub muted small", status)),
+          chip(request.safety_code, request.expired ? "tone-grey" : "tone-amber", "shield-check"),
+        ),
+        request.expired ? null : code,
         el(
           "div",
           "buttons",
-          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget)),
+          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget.querySelector(".text")), "primary", "copy"),
           button(
             request.expired ? "Remove" : "Cancel request",
             () =>
@@ -357,7 +785,7 @@
                 "Cancel request",
                 { type: "forget", id: request.id },
               ),
-            "danger",
+            "outline danger",
           ),
         ),
       );
@@ -366,34 +794,33 @@
 
     const names = new Set(handles.map((h) => h.name));
     const forget = (id, what) =>
-      button("Forget", () => confirmThen(`Forget ${what}? This only clears the record.`, "Forget", { type: "forget", id }));
+      iconButton("trash-2", `Forget ${what}`, () => confirmThen(`Forget ${what}? This only clears the record.`, "Forget", { type: "forget", id }), "danger");
 
     show($("no-received"), shares.received.length === 0);
-    show($("received-table"), shares.received.length > 0);
     $("received-rows").replaceChildren(
       ...shares.received
         .slice()
         .reverse()
         .map((r) => {
-          const name = el("td", null, el("div", "title", r.handle));
-          if (r.note) name.append(el("div", "muted", r.note));
-          if (!names.has(r.handle)) {
-            name.append(el("div", "muted", "removed since"));
-          } else if (!r.viewable) {
-            name.append(el("div", "muted", "changed since, so kv no longer shows it"));
-          }
+          let state = null;
+          if (!names.has(r.handle)) state = el("span", "desc", "Removed since");
+          else if (!r.viewable) state = el("span", "desc", "Changed since, so kv no longer shows it");
           return el(
-            "tr",
-            null,
-            name,
-            el("td", "short", r.kind),
-            el("td", null, r.from || "not given"),
-            el("td", "short code", r.safety_code),
-            el("td", "short muted", when(r.received_at)),
+            "li",
+            "row-item",
+            el("span", "stat-icon tone-amber", icon("download")),
             el(
-              "td",
-              "actions",
-              r.viewable ? button("View", () => send({ type: "reveal", handle: r.handle })) : null,
+              "div",
+              "grow",
+              el("div", "chips", el("span", "name", r.handle), chip(r.kind, "tone-grey")),
+              el("span", "desc", `from ${r.from || "not given"} · ${ago(r.received_at)}${r.note ? ` · ${r.note}` : ""}`),
+              el("span", "allows", `Safety code ${r.safety_code}`),
+              state,
+            ),
+            el(
+              "div",
+              "row-actions",
+              r.viewable ? iconButton("eye", `View ${r.handle}`, () => send({ type: "reveal", handle: r.handle })) : null,
               forget(r.id, `the record of ${r.handle}`),
             ),
           );
@@ -401,34 +828,34 @@
     );
 
     show($("no-sent"), shares.sent.length === 0);
-    show($("sent-table"), shares.sent.length > 0);
     $("sent-rows").replaceChildren(
       ...shares.sent
         .slice()
         .reverse()
-        .map((s) => {
-          const name = el("td", null, el("div", "title", s.handle));
-          if (s.note) name.append(el("div", "muted", s.note));
-          return el(
-            "tr",
-            null,
-            name,
-            el("td", "short", s.kind),
-            el("td", null, s.to || "not given"),
-            el("td", "short code", s.safety_code),
-            el("td", "short muted", when(s.sent_at)),
-            el("td", "actions", forget(s.id, `the record of sending ${s.handle}`)),
-          );
-        }),
+        .map((s) =>
+          el(
+            "li",
+            "row-item",
+            el("span", "stat-icon tone-teal", icon("send")),
+            el(
+              "div",
+              "grow",
+              el("div", "chips", el("span", "name", s.handle), chip(s.kind, "tone-grey")),
+              el("span", "desc", `to ${s.to || "not given"} · ${ago(s.sent_at)}${s.note ? ` · ${s.note}` : ""}`),
+              el("span", "allows", `Safety code ${s.safety_code}`),
+            ),
+            el("div", "row-actions", forget(s.id, `the record of sending ${s.handle}`)),
+          ),
+        ),
     );
   }
 
   // A received value, drawn as text the user can select, and wiped when the
-  // dialog closes, the timer runs out or the vault locks.
+  // dialog closes, the timer runs out, the window hides or the vault locks.
   function openReveal(handle, fields) {
     $("reveal-title").textContent = handle;
     $("reveal-fields").replaceChildren(
-      ...fields.map((f) => el("div", "field", el("div", "muted", f.label), el("div", "detail code secret-value", f.value))),
+      ...fields.map((f) => el("div", "field", el("label", null, f.label), el("div", "code-box secret-value", f.value))),
     );
     const dialog = $("reveal-dialog");
     if (!dialog.open) dialog.showModal();
@@ -447,7 +874,7 @@
 
   // Copies `node`'s text. The copy command needs the text selected; where
   // it fails, the clipboard API may still work, and failing that the text
-  // stays selected for the user's own keys.
+  // stays selected for the user's own keys. `label` says how it went.
   function copyText(node, label) {
     const text = node.textContent;
     const selection = window.getSelection();
@@ -488,6 +915,8 @@
     page.share = step;
     $("share-form").reset();
     $("share-title").textContent = spec.title;
+    $("share-icon").className = `stat-icon ${spec.icon[1]}`;
+    $("share-icon").replaceChildren(icon(spec.icon[0]));
     $("share-about").textContent = spec.about;
     $("share-submit").textContent = spec.submit;
     for (const node of $("share-ask").querySelectorAll(".field")) {
@@ -541,7 +970,7 @@
         break;
       case "send":
         if (!value("share-handle")) {
-          $("share-error").textContent = "Pick a handle to send; add one on the Handles tab first.";
+          $("share-error").textContent = "Pick a handle to send; add one on the Handles screen first.";
           return;
         }
         message = {
@@ -601,7 +1030,7 @@
           `Saved as ${result.handle} (${result.kind}). ` +
           (result.from ? `It says it is from ${result.from}; nothing checks that. ` : "It gives no sender. ") +
           "It starts in ask mode, so each use waits for you; add what it needs with Policy on the " +
-          "Handles tab.";
+          "Handles screen.";
         safety =
           `Safety code ${result.safety_code}. For anything sensitive, check over a call that the ` +
           "sender saw the same code.";
@@ -638,22 +1067,50 @@
     if (dialog.open) dialog.close();
   }
 
-  function drawAudit(entries) {
+  function drawAudit() {
+    const query = $("audit-search").value.trim().toLowerCase();
+    const shape = JSON.stringify([page.audit, query, page.auditFilter]);
+    if (shape === page.drawn.audit) return;
+    page.drawn.audit = shape;
+    const entries = page.audit;
     show($("no-audit"), entries.length === 0);
-    show($("audit-table"), entries.length > 0);
-    const rows = entries.map((e) =>
-      el(
-        "tr",
-        null,
-        // `2026-10-08T12:03:04.123Z` → `2026-10-08 12:03:04`, as kv tui shows it
-        el("td", "short muted", e.ts.slice(0, 19).replace("T", " ")),
-        el("td", "short", e.action),
-        el("td", null, e.handle || ""),
-        el("td", "short", e.decision || ""),
-        el("td", "short", e.outcome),
-        el("td", "long", e.summary || ""),
-      ),
-    );
+    const allowed = new Set(["approved", "auto", "lease"]);
+    const shown = entries.filter((e) => {
+      if (page.auditFilter === "allowed" && !allowed.has(e.decision)) return false;
+      if (page.auditFilter === "denied" && e.decision !== "denied" && e.decision !== "timed_out") return false;
+      return !query || [e.action, e.handle, e.decision, e.outcome, e.summary].join(" ").toLowerCase().includes(query);
+    });
+    show($("no-audit-match"), entries.length > 0 && shown.length === 0);
+    show($("audit-rows"), shown.length > 0);
+    const rows = shown.map((e) => {
+      const [tone, iconName, word] = verdictOf(e);
+      const at = entryTime(e);
+      const time = el("div", "when", ago(at));
+      // The exact time, and the log's own in UTC, as kv tui shows it.
+      time.title = `${new Date(at * 1000).toLocaleString()} (${e.ts.slice(0, 19).replace("T", " ")} UTC)`;
+      // The outcome only where it says more than the decision does.
+      const said = new Set([e.decision, word && word.toLowerCase(), "ok", "done", "denied", "timeout", "approved"]);
+      const outcome = e.outcome && !said.has(String(e.outcome).toLowerCase()) ? chip(e.outcome, "tone-grey") : null;
+      return el(
+        "li",
+        "row-item",
+        el("span", `mark ${tone}`, icon(iconName)),
+        el(
+          "div",
+          "grow",
+          el(
+            "div",
+            "chips",
+            el("span", "name", actionWords(e.action)),
+            e.handle ? chip(e.handle, "tone-grey", "key-round") : null,
+            word ? chip(word, tone) : null,
+            outcome,
+          ),
+          e.summary ? el("span", "summary", e.summary) : null,
+        ),
+        time,
+      );
+    });
     $("audit-rows").replaceChildren(...rows);
   }
 
@@ -722,7 +1179,7 @@
     const add = button("Add variable", () => {
       rows.insertBefore(pair(null), add);
       rows.querySelector(".pair:last-of-type .pair-name").focus();
-    });
+    }, "outline", "plus");
     rows.append(pair(id), add);
     return rows;
   }
@@ -739,7 +1196,7 @@
     value.placeholder = "value";
     value.autocomplete = "off";
     const row = el("div", "pair", name, value);
-    row.append(button("Remove", () => row.remove()));
+    row.append(iconButton("x", "Remove this variable", () => row.remove(), "danger"));
     return row;
   }
 
@@ -807,12 +1264,14 @@
       `Remove ${name}? Agents lose it at once, and its secret is gone.`,
       "Remove",
       { type: "remove", name },
+      `Remove ${name}?`,
     );
   }
 
   // Asks first, then sends `message` to the tray.
-  function confirmThen(text, label, message) {
+  function confirmThen(text, label, message, title) {
     page.confirming = message;
+    $("confirm-title").textContent = title || `${label}?`;
     $("confirm-text").textContent = text;
     $("confirm-ok").textContent = label;
     $("confirm-dialog").showModal();
@@ -824,9 +1283,81 @@
     if (dialog.open) dialog.close();
   }
 
+  // Moves to a screen; the tray hears about its own tabs.
+  function go(screen) {
+    page.screen = screen;
+    hideToast();
+    if (TABS.has(screen)) send({ type: "tab", tab: screen });
+    draw();
+    $("page-title").focus({ preventScroll: true });
+  }
+
+  function anyDialogOpen() {
+    return [...document.querySelectorAll("dialog")].some((d) => d.open);
+  }
+
+  function onKey(event) {
+    if (page.menu) {
+      if (event.key === "Escape") send({ type: "hide" });
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const items = [...document.querySelectorAll("#menu-waiting:not(.static), .menu-list button:not(:disabled)")];
+        const at = items.indexOf(document.activeElement);
+        const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+        items[(next + items.length) % items.length].focus();
+      }
+      return;
+    }
+    if (page.locked) {
+      if (event.key === "Escape") send({ type: "hide" });
+      return;
+    }
+    const typing = /^(INPUT|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
+    if ((event.ctrlKey || event.metaKey) && /^[1-6]$/.test(event.key)) {
+      event.preventDefault();
+      if (!anyDialogOpen()) go(SCREENS[Number(event.key) - 1]);
+    } else if (event.key === "/" && !typing && !anyDialogOpen()) {
+      const search = page.screen === "audit" ? $("audit-search") : $("handle-search");
+      if (page.screen !== "audit" && page.screen !== "handles") go("handles");
+      event.preventDefault();
+      search.focus();
+    } else if (event.key === "Escape" && !anyDialogOpen()) {
+      // A dialog's own Esc closes it; with none open, Esc hides kv.
+      if (typing && event.target.value) {
+        event.target.value = "";
+        event.target.dispatchEvent(new Event("input"));
+      } else {
+        send({ type: "hide" });
+      }
+    }
+  }
+
+  // A segmented filter: one choice checked at a time.
+  function wireFilter(groupId, onPick) {
+    for (const choice of $(groupId).querySelectorAll("button")) {
+      choice.addEventListener("click", () => {
+        for (const other of $(groupId).querySelectorAll("button")) {
+          other.setAttribute("aria-checked", String(other === choice));
+        }
+        onPick(choice.dataset.filter);
+      });
+    }
+  }
+
+  function askQuit() {
+    confirmThen(
+      "Quit kv tray? Agents' requests then wait for kv tui or time out. Start it again with kv tray.",
+      "Quit",
+      { type: "quit" },
+      "Quit kv tray?",
+    );
+  }
+
   // Wiring.
 
   function start() {
+    buildThemeChoices();
+    $("page-title").tabIndex = -1;
     $("unlock-form").addEventListener("submit", (event) => {
       event.preventDefault();
       const input = $("passphrase");
@@ -840,17 +1371,57 @@
       send({ type: "device_unlock" });
     });
     $("lock").addEventListener("click", () => send({ type: "lock" }));
+    $("settings-lock").addEventListener("click", () => send({ type: "lock" }));
+    $("hide").addEventListener("click", () => send({ type: "hide" }));
+    $("app-message-close").addEventListener("click", hideToast);
+    for (const quit of document.querySelectorAll("[data-quit]")) quit.addEventListener("click", askQuit);
+    $("login").addEventListener("click", () => {
+      page.login = !page.login;
+      $("login").setAttribute("aria-checked", String(page.login));
+      send({ type: "login", on: page.login });
+    });
     $("add").addEventListener("click", () => openRequest({ kind: "new" }));
-    for (const tab of document.querySelectorAll("nav button")) {
-      tab.addEventListener("click", () => {
-        page.tab = tab.dataset.tab;
-        $("app-message").hidden = true;
-        send({ type: "tab", tab: page.tab });
-        draw();
-      });
+    for (const tab of document.querySelectorAll("nav button[data-tab]")) {
+      tab.addEventListener("click", () => go(tab.dataset.tab));
     }
+    for (const link of document.querySelectorAll("[data-goto]")) {
+      link.addEventListener("click", () => go(link.dataset.goto));
+    }
+    $("menu-open").addEventListener("click", () => expand(null));
+    $("menu-waiting").addEventListener("click", () => {
+      const to = $("menu-waiting").dataset.to;
+      if (to) expand(to);
+    });
+    $("menu-lock").addEventListener("click", menuLock);
+    $("menu-login").addEventListener("click", () => {
+      page.login = !page.login;
+      $("menu-login").setAttribute("aria-checked", String(page.login));
+      send({ type: "login", on: page.login });
+    });
+    $("menu-quit").addEventListener("click", () => send({ type: "quit" }));
+    $("menu-hide").addEventListener("click", () => send({ type: "hide" }));
+    const quick = {
+      add: () => openRequest({ kind: "new" }),
+      request: () => openShare("request"),
+      send: () => openShare("send"),
+      receive: () => openShare("receive"),
+    };
+    for (const action of document.querySelectorAll("[data-go]")) {
+      action.addEventListener("click", quick[action.dataset.go]);
+    }
+    $("handle-search").addEventListener("input", () => page.overview && drawHandles(page.overview.handles, page.overview.role_warnings || {}));
+    $("audit-search").addEventListener("input", drawAudit);
+    wireFilter("handle-filter", (filter) => {
+      page.handleFilter = filter;
+      if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
+    });
+    wireFilter("audit-filter", (filter) => {
+      page.auditFilter = filter;
+      drawAudit();
+    });
     $("form").addEventListener("submit", submitForm);
     $("form-cancel").addEventListener("click", () => closeForm(true));
+    $("form-x").addEventListener("click", () => closeForm(true));
     // Esc on an open form.
     $("form-dialog").addEventListener("cancel", (event) => {
       event.preventDefault();
@@ -868,7 +1439,8 @@
     $("share-receive").addEventListener("click", () => openShare("receive"));
     $("share-form").addEventListener("submit", submitShare);
     $("share-cancel").addEventListener("click", closeShare);
-    $("share-copy").addEventListener("click", () => copyText($("share-output"), $("share-copy")));
+    $("share-x").addEventListener("click", closeShare);
+    $("share-copy").addEventListener("click", () => copyText($("share-output"), $("share-copy").querySelector(".copy-label")));
     $("share-dialog").addEventListener("cancel", (event) => {
       event.preventDefault();
       closeShare();
@@ -881,6 +1453,7 @@
       event.preventDefault();
       closeConfirm();
     });
+    document.addEventListener("keydown", onKey);
     draw();
     send({ type: "ready" });
   }

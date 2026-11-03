@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use kv::audit::Entry;
-use kv::tray::window::{FormRequest, FromPage, Tab, ToPage};
+use kv::tray::window::{FormRequest, FromPage, Tab, Theme, ToPage};
 use kv::tui::app::ShareDone;
 use kv_core::proto::Verdict;
 use kv_core::secret::{SecretKind, SecretText};
@@ -83,6 +83,27 @@ fn what_the_page_sends_is_read() {
             FromPage::Tab { tab: Tab::Shares },
         ),
         (
+            r#"{"type":"tab","tab":"home"}"#,
+            FromPage::Tab { tab: Tab::Home },
+        ),
+        (r#"{"type":"hide"}"#, FromPage::Hide),
+        (r#"{"type":"expand"}"#, FromPage::Expand),
+        (
+            r#"{"type":"theme","theme":"dark"}"#,
+            FromPage::Theme { theme: Theme::Dark },
+        ),
+        (
+            r#"{"type":"theme","theme":"system"}"#,
+            FromPage::Theme {
+                theme: Theme::System,
+            },
+        ),
+        (
+            r#"{"type":"login","on":true}"#,
+            FromPage::Login { on: true },
+        ),
+        (r#"{"type":"quit"}"#, FromPage::Quit),
+        (
             r#"{"type":"reveal","handle":"openrouter"}"#,
             FromPage::Reveal {
                 handle: "openrouter".into(),
@@ -134,6 +155,8 @@ fn anything_else_is_dropped() {
         r#"{"type":"decide","id":"7","verdict":"allow_once"}"#,
         r#"{"type":"decide","id":7,"verdict":"allow_forever"}"#,
         r#"{"type":"tab","tab":"settings"}"#,
+        r#"{"type":"theme","theme":"sepia"}"#,
+        r#"{"type":"login","on":"yes"}"#,
         r#"{"type":"dismiss","id":2,"extra":1}"#,
         r#"{"type":"open_form","form":{"kind":"edit"}}"#,
         r#"{"passphrase":"x"}"#,
@@ -193,10 +216,17 @@ fn what_the_tray_sends_is_a_call_to_kv_receive() {
         device: Some("Touch ID".into()),
         waiting_for_device: false,
         overview: None,
+        login: false,
+        theme: Theme::Light,
     };
     assert_eq!(
         locked.script(),
-        r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null})"#
+        r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null,"login":false,"theme":"light"})"#
+    );
+    assert_eq!(ToPage::Hidden.script(), r#"kv.receive({"type":"hidden"})"#);
+    assert_eq!(
+        ToPage::Menu { on: true }.script(),
+        r#"kv.receive({"type":"menu","on":true})"#
     );
 }
 
@@ -279,4 +309,19 @@ fn a_revealed_value_reaches_the_page_only_as_json_data() {
         !format!("{revealed:?}").contains("sk-or-v1"),
         "{revealed:?}"
     );
+}
+
+/// The appearance the user picked is kept in a file of its own; anything
+/// else in it reads as following the system.
+#[test]
+fn the_theme_is_saved_and_read_back() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("tray-theme");
+    assert_eq!(Theme::load(&path), Theme::System, "no file yet");
+    for theme in [Theme::Dark, Theme::Light, Theme::System] {
+        theme.save(&path).unwrap();
+        assert_eq!(Theme::load(&path), theme);
+    }
+    std::fs::write(&path, "sepia").unwrap();
+    assert_eq!(Theme::load(&path), Theme::System);
 }

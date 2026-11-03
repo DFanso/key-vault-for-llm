@@ -29,6 +29,10 @@ pub enum Action {
     Unlock,
     /// kv's window, on this tab once unlocked, or on its unlock screen.
     Open(Tab),
+    /// The small menu a click on the tray icon opens: kv's window on Home,
+    /// without asking to unlock until the user picks Unlock. Never on a
+    /// menu.
+    Menu,
     /// A message from the window's page. Never on a menu.
     Window(FromPage),
     /// The user closed the window. Never on a menu.
@@ -49,11 +53,14 @@ impl Action {
     pub fn id(&self) -> String {
         match self {
             Action::Unlock => "unlock".into(),
+            Action::Open(Tab::Home) => "open:home".into(),
             Action::Open(Tab::Approvals) => "open:approvals".into(),
             Action::Open(Tab::Handles) => "open:handles".into(),
             Action::Open(Tab::Shares) => "open:shares".into(),
             Action::Open(Tab::Audit) => "open:audit".into(),
-            // `from_id` reads neither, so no menu item can stand for them.
+            // `from_id` reads none of these, so no menu item can stand for
+            // them.
+            Action::Menu => "menu".into(),
             Action::Window(_) => "window".into(),
             Action::WindowClosed => "window-closed".into(),
             Action::Lock => "lock".into(),
@@ -67,6 +74,7 @@ impl Action {
     pub fn from_id(id: &str) -> Option<Action> {
         Some(match id {
             "unlock" => Action::Unlock,
+            "open:home" => Action::Open(Tab::Home),
             "open:approvals" => Action::Open(Tab::Approvals),
             "open:handles" => Action::Open(Tab::Handles),
             "open:shares" => Action::Open(Tab::Shares),

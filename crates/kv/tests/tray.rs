@@ -44,6 +44,12 @@ fn locked_is_dimmer_than_unlocked_and_waiting_adds_a_badge() {
         waiting,
         "the count is not drawn"
     );
+    // macOS draws a template image, alpha only, and puts the count in the
+    // title beside the icon, so there is no badge.
+    if cfg!(target_os = "macos") {
+        assert_eq!(waiting, unlocked);
+        return;
+    }
     // The badge sits in the top right corner; the rest is the plain key.
     let badge = pixel(&waiting, SIZE - 7, 6);
     assert_eq!(badge[3], 255);
@@ -64,4 +70,24 @@ fn only_one_tray_runs_at_a_time() {
     assert_eq!(error.to_string(), "kv tray is already running");
     drop(first);
     lock_single(&paths).unwrap();
+}
+
+#[test]
+fn the_window_icon_is_the_mark_in_colour() {
+    use kv::tray::icon::{LOGO_SIZE, logo_rgba};
+    let logo = logo_rgba();
+    assert_eq!(logo.len(), (LOGO_SIZE * LOGO_SIZE * 4) as usize);
+    let at = |x: u32, y: u32| {
+        let i = ((y * LOGO_SIZE + x) * 4) as usize;
+        [logo[i], logo[i + 1], logo[i + 2], logo[i + 3]]
+    };
+    assert_eq!(at(0, 0)[3], 0, "the corners are clear");
+    let tile = at(LOGO_SIZE / 2, LOGO_SIZE - 8);
+    assert_eq!(tile[3], 255);
+    assert!(tile[2] > tile[1], "violet: {tile:?}");
+    assert_eq!(
+        at(LOGO_SIZE / 2 + 10, LOGO_SIZE / 2),
+        [255, 255, 255, 255],
+        "the key's shaft is white"
+    );
 }

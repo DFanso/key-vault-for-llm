@@ -15,7 +15,7 @@ use kv::client;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
-use kv::tray::window::{FormRequest, FromPage, Tab, ToPage};
+use kv::tray::window::{FormRequest, FromPage, Tab, Theme, ToPage};
 use kv::tray::worker::{Desktop, Worker};
 use kv::tui::app::ShareDone;
 use kv_core::proto::{
@@ -413,6 +413,26 @@ async fn the_loop_keeps_showing_while_the_prompt_is_open() {
         .unwrap();
 }
 
+/// The menu a click on the icon opens shows kv on Home without a prompt;
+/// its Unlock asks.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_menu_waits_for_unlock_to_ask_for_touch_id() {
+    let (_daemon, fake, desk, mut worker) = locked().await;
+    assert!(!worker.act(Action::Menu).await);
+    assert!(fake.reasons.lock().unwrap().is_empty(), "no prompt yet");
+    let pages = desk.take();
+    assert!(
+        pages.contains(&ToPage::Show { tab: Tab::Home }),
+        "{pages:?}"
+    );
+
+    assert!(!worker.act(page(FromPage::DeviceUnlock)).await);
+    assert_eq!(fake.reasons.lock().unwrap().len(), 1);
+    worker.model().await;
+    let (locked, _, _) = state(&desk.take());
+    assert!(!locked);
+}
+
 /// Opening the window while locked asks for Touch ID once; a cancelled
 /// prompt says why in the window, not in a notification, and the window can
 /// ask again.
@@ -644,8 +664,9 @@ async fn an_agents_handle_request_is_filled_in_or_dismissed_from_the_window() {
     assert!(overview.handles.iter().any(|h| h.name == "staging"));
 }
 
+/// Home shows the latest activity, so it gets the log too.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_audit_log_goes_to_the_window_only_on_its_tab() {
+async fn the_audit_log_goes_to_the_window_only_on_home_and_its_tab() {
     let (_daemon, _fake, desk, mut worker) = unlocked().await;
     let audits = |pages: &[ToPage]| {
         pages
@@ -660,6 +681,41 @@ async fn the_audit_log_goes_to_the_window_only_on_its_tab() {
     assert_eq!(audits(&desk.take()), 1);
     worker.model().await;
     assert_eq!(audits(&desk.take()), 1);
+    assert!(!worker.act(page(FromPage::Tab { tab: Tab::Home })).await);
+    assert_eq!(audits(&desk.take()), 1);
+}
+
+/// The page's Settings screen: the appearance is saved and comes back with
+/// the state, the login item follows the switch, and Quit quits.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_settings_screen_reaches_the_tray() {
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Home)).await);
+    let theme = |pages: &[ToPage]| {
+        pages.iter().rev().find_map(|page| match page {
+            ToPage::State { theme, login, .. } => Some((*theme, *login)),
+            _ => None,
+        })
+    };
+    assert_eq!(theme(&desk.take()), Some((Theme::System, false)));
+
+    assert!(
+        !worker
+            .act(page(FromPage::Theme { theme: Theme::Dark }))
+            .await
+    );
+    assert_eq!(theme(&desk.take()), Some((Theme::Dark, false)));
+    assert_eq!(Theme::load(&daemon.paths.tray_theme_file()), Theme::Dark);
+
+    assert!(!worker.act(page(FromPage::Login { on: true })).await);
+    assert!(*desk.login.lock().unwrap());
+    assert_eq!(theme(&desk.take()), Some((Theme::Dark, true)));
+
+    assert!(
+        !worker.act(page(FromPage::Hide)).await,
+        "the window side hides"
+    );
+    assert!(worker.act(page(FromPage::Quit)).await);
 }
 
 /// A lock from anywhere sends the locked state and drops the open form with
