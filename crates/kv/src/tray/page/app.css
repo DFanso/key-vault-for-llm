@@ -681,6 +681,28 @@ dialog .message:not(:empty) { margin-top: 10px; }
   .stats, .share-actions, .columns { grid-template-columns: 1fr; }
 }
 
+/* Motion: views and screens come in, controls ease between states. */
+@keyframes view-in { from { opacity: 0; transform: scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes screen-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(10px) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.enter { animation: view-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.menu.leaving { opacity: 0; transform: scale(0.985); transition: opacity 110ms ease-in, transform 110ms ease-in; }
+section:not([hidden]) { animation: screen-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+dialog[open] { animation: dialog-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+dialog[open]::backdrop { animation: fade-in 200ms ease-out; }
+.toast:not([hidden]) { animation: toast-in 180ms ease-out; }
+button, input, select, .stat, .tile, .menu-banner, .switch.small {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+button:active:not(:disabled) { transform: scale(0.98); }
+.stat:hover, .tile:hover { transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+/* Picking a theme: everything cross-fades for a moment. */
+.theming, .theming *, .theming *::before, .theming *::after {
+  transition: background-color 280ms ease, color 280ms ease, border-color 280ms ease, box-shadow 280ms ease !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
