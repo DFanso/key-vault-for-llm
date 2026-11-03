@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
@@ -9,103 +9,266 @@
 <script src="app.js" defer></script>
 </head>
 <body>
+<!-- Locked: the whole popup is the unlock screen. -->
 <main id="unlock" class="unlock" hidden>
-  <h1>kv is locked</h1>
-  <p id="unlock-waiting" class="waiting" hidden></p>
-  <form id="unlock-form" hidden>
-    <label for="passphrase">Passphrase</label>
-    <div class="row">
-      <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
-      <button type="submit" class="primary">Unlock</button>
-    </div>
-  </form>
-  <button id="use-device" type="button" hidden></button>
-  <p id="unlock-message" class="message" role="alert"></p>
+  <div class="unlock-card">
+    <span class="logo logo-lg" aria-hidden="true"></span>
+    <h1>kv is locked</h1>
+    <p class="muted">Unlock to answer agents' requests and manage your handles.</p>
+    <button id="use-device" type="button" class="primary wide" hidden></button>
+    <p id="unlock-waiting" class="waiting" role="status" hidden></p>
+    <div id="unlock-or" class="or" hidden><span>or use your passphrase</span></div>
+    <form id="unlock-form" hidden>
+      <label for="passphrase">Passphrase</label>
+      <div class="row">
+        <input id="passphrase" type="password" autocomplete="off" spellcheck="false">
+        <button type="submit" class="primary">Unlock</button>
+      </div>
+    </form>
+    <p id="unlock-message" class="message" role="alert"></p>
+  </div>
+  <footer class="unlock-footer">
+    <div class="segmented small theme-choice" role="radiogroup" aria-label="Appearance"></div>
+    <button type="button" class="ghost" data-quit><span class="i i-power" aria-hidden="true"></span>Quit kv tray</button>
+  </footer>
 </main>
 
-<div id="app" hidden>
-  <header>
-    <nav role="tablist">
-      <button type="button" role="tab" data-tab="approvals">Approvals</button>
-      <button type="button" role="tab" data-tab="handles">Handles</button>
-      <button type="button" role="tab" data-tab="shares">Shares</button>
-      <button type="button" role="tab" data-tab="audit">Audit</button>
+<div id="app" class="shell" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div>
+        <strong>kv</strong>
+        <span id="brand-status" class="status-line"><span class="dot" aria-hidden="true"></span><span id="brand-text">Unlocked</span></span>
+      </div>
+    </div>
+    <nav aria-label="kv">
+      <button type="button" data-tab="home"><span class="i i-house" aria-hidden="true"></span><span class="label">Home</span></button>
+      <button type="button" data-tab="approvals"><span class="i i-shield-check" aria-hidden="true"></span><span class="label">Approvals</span><span class="count" id="count-approvals" hidden></span></button>
+      <button type="button" data-tab="handles"><span class="i i-key-round" aria-hidden="true"></span><span class="label">Handles</span><span class="count" id="count-handles" hidden></span></button>
+      <button type="button" data-tab="shares"><span class="i i-share-2" aria-hidden="true"></span><span class="label">Shares</span><span class="count" id="count-shares" hidden></span></button>
+      <button type="button" data-tab="audit"><span class="i i-scroll-text" aria-hidden="true"></span><span class="label">Audit</span></button>
     </nav>
-    <span id="locks-in" class="muted"></span>
-    <button id="lock" type="button">Lock</button>
-  </header>
-  <p id="app-message" class="message" role="status" hidden></p>
-
-  <section id="approvals" role="tabpanel">
-    <p id="no-approvals" class="empty">No requests waiting</p>
-    <div id="cards"></div>
-  </section>
-
-  <section id="handles" role="tabpanel" hidden>
-    <div id="requests"></div>
-    <div class="toolbar">
-      <h2>Handles</h2>
-      <button id="add" type="button" class="primary">Add handle</button>
+    <div class="spacer"></div>
+    <nav aria-label="More">
+      <button type="button" data-tab="settings"><span class="i i-settings" aria-hidden="true"></span><span class="label">Settings</span></button>
+    </nav>
+    <div class="session-card">
+      <span class="i i-lock-open" aria-hidden="true"></span>
+      <strong>Vault unlocked</strong>
+      <span id="locks-in" class="small"></span>
+      <button id="lock" type="button" class="on-accent"><span class="i i-lock" aria-hidden="true"></span>Lock now</button>
     </div>
-    <p id="no-handles" class="empty">No handles yet</p>
-    <table id="handle-table">
-      <thead><tr><th>Name</th><th>Kind</th><th>Mode</th><th>Allows</th><th></th></tr></thead>
-      <tbody id="handle-rows"></tbody>
-    </table>
-  </section>
+  </aside>
 
-  <section id="shares" role="tabpanel" hidden>
-    <p class="muted intro">Pass a secret to or from someone else's kv. It travels sealed to the
-    receiver's vault, so any chat can carry it. To get one, request it and send them the code; when
-    their share comes back, receive it. To give one, send it to the code they sent you. Agents can do
-    the same with <code>request_share</code>, <code>send_share</code> and <code>receive_share</code>;
-    every share an agent sends waits for you on the Approvals tab.</p>
-    <div class="share-actions">
-      <button id="share-request" type="button" class="primary">Request a secret</button>
-      <button id="share-send" type="button">Send a secret</button>
-      <button id="share-receive" type="button">Receive a share</button>
+  <div class="content">
+    <header class="topbar">
+      <div>
+        <p id="today" class="eyebrow"></p>
+        <h1 id="page-title">Home</h1>
+      </div>
+      <button id="hide" type="button" class="icon-button" aria-label="Hide kv (Esc)" title="Hide (Esc)"><span class="i i-x" aria-hidden="true"></span></button>
+    </header>
+    <div id="app-message" class="toast" role="status" hidden>
+      <span class="i i-circle-alert" aria-hidden="true"></span>
+      <span id="app-message-text"></span>
+      <button type="button" id="app-message-close" class="icon-button small" aria-label="Dismiss"><span class="i i-x" aria-hidden="true"></span></button>
     </div>
-    <div class="toolbar"><h2>Waiting for a share</h2></div>
-    <p id="no-share-requests" class="empty">No open requests</p>
-    <div id="share-requests"></div>
-    <div class="toolbar"><h2>Received</h2></div>
-    <p id="no-received" class="empty">Nothing received yet</p>
-    <table id="received-table">
-      <thead><tr><th>Handle</th><th>Kind</th><th>From</th><th>Safety code</th><th>Received</th><th></th></tr></thead>
-      <tbody id="received-rows"></tbody>
-    </table>
-    <div class="toolbar"><h2>Sent</h2></div>
-    <p id="no-sent" class="empty">Nothing sent yet</p>
-    <table id="sent-table">
-      <thead><tr><th>Handle</th><th>Kind</th><th>To</th><th>Safety code</th><th>Sent</th><th></th></tr></thead>
-      <tbody id="sent-rows"></tbody>
-    </table>
-  </section>
 
-  <section id="audit" role="tabpanel" hidden>
-    <p id="no-audit" class="empty">Nothing in the audit log yet</p>
-    <table id="audit-table">
-      <thead><tr><th>Time (UTC)</th><th>Action</th><th>Handle</th><th>Decision</th><th>Outcome</th><th>Detail</th></tr></thead>
-      <tbody id="audit-rows"></tbody>
-    </table>
-  </section>
+    <div class="scroll">
+      <section id="home" aria-labelledby="page-title">
+        <div class="hero">
+          <p class="accent-line">What would you like to do?</p>
+          <div class="chips" id="quick-actions">
+            <button type="button" class="chip-button strong" id="quick-review" hidden><span class="i i-shield-check" aria-hidden="true"></span><span id="quick-review-text"></span></button>
+            <button type="button" class="chip-button" data-go="add"><span class="i i-plus" aria-hidden="true"></span>Add handle</button>
+            <button type="button" class="chip-button" data-go="request"><span class="i i-inbox" aria-hidden="true"></span>Request a secret</button>
+            <button type="button" class="chip-button" data-go="send"><span class="i i-send" aria-hidden="true"></span>Send a secret</button>
+            <button type="button" class="chip-button" data-go="receive"><span class="i i-download" aria-hidden="true"></span>Receive a share</button>
+          </div>
+        </div>
+        <div class="stats">
+          <button type="button" class="stat" data-goto="approvals">
+            <span class="stat-head"><span class="stat-icon tone-amber"><span class="i i-hourglass" aria-hidden="true"></span></span><span class="stat-label">Waiting for you</span></span>
+            <span class="stat-value" id="stat-waiting">0</span>
+            <span class="stat-note" id="stat-waiting-note"></span>
+          </button>
+          <button type="button" class="stat" data-goto="handles">
+            <span class="stat-head"><span class="stat-icon tone-accent"><span class="i i-key-round" aria-hidden="true"></span></span><span class="stat-label">Handles</span></span>
+            <span class="stat-value" id="stat-handles">0</span>
+            <span class="stat-note" id="stat-handles-note"></span>
+          </button>
+          <button type="button" class="stat" data-goto="shares">
+            <span class="stat-head"><span class="stat-icon tone-teal"><span class="i i-share-2" aria-hidden="true"></span></span><span class="stat-label">Shares</span></span>
+            <span class="stat-value" id="stat-shares">0</span>
+            <span class="stat-note" id="stat-shares-note"></span>
+          </button>
+        </div>
+        <div class="columns">
+          <div class="panel">
+            <div class="panel-head"><h3><span class="i i-shield-check" aria-hidden="true"></span>Needs you</h3><button type="button" class="link" data-goto="approvals">See all<span class="i i-chevron-right" aria-hidden="true"></span></button></div>
+            <div id="home-needs"></div>
+            <div id="home-clear" class="empty compact" hidden>
+              <span class="empty-icon tone-green"><span class="i i-circle-check" aria-hidden="true"></span></span>
+              <strong>All clear</strong>
+              <span class="muted">No agent is waiting on you.</span>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3><span class="i i-scroll-text" aria-hidden="true"></span>Recent activity</h3><button type="button" class="link" data-goto="audit">Audit log<span class="i i-chevron-right" aria-hidden="true"></span></button></div>
+            <ol id="home-activity" class="activity"></ol>
+            <p id="home-no-activity" class="muted small center" hidden>Nothing has happened yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="approvals" aria-labelledby="page-title" hidden>
+        <p class="lede">An agent asked to use a handle that is set to <b>ask</b>. Nothing happens until you answer; unanswered requests expire.</p>
+        <div id="no-approvals" class="empty">
+          <span class="empty-icon tone-green"><span class="i i-circle-check" aria-hidden="true"></span></span>
+          <strong>All clear</strong>
+          <span class="muted">When an agent asks to use a handle in ask mode, it waits here for you.</span>
+        </div>
+        <div id="cards" class="stack"></div>
+      </section>
+
+      <section id="handles" aria-labelledby="page-title" hidden>
+        <div id="requests" class="stack"></div>
+        <div class="toolbar">
+          <label class="search"><span class="i i-search" aria-hidden="true"></span><span class="sr-only">Find a handle</span><input id="handle-search" type="search" placeholder="Find a handle" autocomplete="off" spellcheck="false"></label>
+          <div class="segmented" role="radiogroup" aria-label="Show" id="handle-filter">
+            <button type="button" role="radio" data-filter="all" aria-checked="true">All</button>
+            <button type="button" role="radio" data-filter="ask" aria-checked="false">Ask</button>
+            <button type="button" role="radio" data-filter="auto" aria-checked="false">Auto</button>
+            <button type="button" role="radio" data-filter="deny" aria-checked="false">Deny</button>
+          </div>
+          <button id="add" type="button" class="primary"><span class="i i-plus" aria-hidden="true"></span>Add handle</button>
+        </div>
+        <div id="no-handles" class="empty">
+          <span class="empty-icon tone-accent"><span class="i i-key-round" aria-hidden="true"></span></span>
+          <strong>No handles yet</strong>
+          <span class="muted">A handle is a name agents use for a secret they never see. Add one, or wait for an agent to ask.</span>
+        </div>
+        <p id="no-match" class="muted center" hidden>No handle matches.</p>
+        <ul id="handle-rows" class="list panel flush"></ul>
+      </section>
+
+      <section id="shares" aria-labelledby="page-title" hidden>
+        <p class="lede">Pass a secret to or from someone else's kv. It travels sealed to the receiver's vault, so any chat can carry it.
+        Agents can do the same with <code>request_share</code>, <code>send_share</code> and <code>receive_share</code>; every share an agent sends waits for you on Approvals.</p>
+        <div class="share-actions">
+          <button id="share-request" type="button" class="tile">
+            <span class="stat-icon tone-accent"><span class="i i-inbox" aria-hidden="true"></span></span>
+            <strong>Request a secret</strong>
+            <span class="muted small">Get a code to send to whoever has it.</span>
+          </button>
+          <button id="share-send" type="button" class="tile">
+            <span class="stat-icon tone-teal"><span class="i i-send" aria-hidden="true"></span></span>
+            <strong>Send a secret</strong>
+            <span class="muted small">Seal a handle to the code they sent you.</span>
+          </button>
+          <button id="share-receive" type="button" class="tile">
+            <span class="stat-icon tone-amber"><span class="i i-download" aria-hidden="true"></span></span>
+            <strong>Receive a share</strong>
+            <span class="muted small">Save what came back as a new handle.</span>
+          </button>
+        </div>
+        <h2 class="section-title">Waiting for a share</h2>
+        <p id="no-share-requests" class="muted small">No open requests. Request a secret to start one.</p>
+        <div id="share-requests" class="stack"></div>
+        <div class="columns">
+          <div class="panel">
+            <div class="panel-head"><h3><span class="i i-download" aria-hidden="true"></span>Received</h3></div>
+            <p id="no-received" class="muted small">Nothing received yet.</p>
+            <ul id="received-rows" class="list"></ul>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3><span class="i i-send" aria-hidden="true"></span>Sent</h3></div>
+            <p id="no-sent" class="muted small">Nothing sent yet.</p>
+            <ul id="sent-rows" class="list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section id="audit" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <label class="search"><span class="i i-search" aria-hidden="true"></span><span class="sr-only">Search the log</span><input id="audit-search" type="search" placeholder="Search the log" autocomplete="off" spellcheck="false"></label>
+          <div class="segmented" role="radiogroup" aria-label="Show" id="audit-filter">
+            <button type="button" role="radio" data-filter="all" aria-checked="true">All</button>
+            <button type="button" role="radio" data-filter="allowed" aria-checked="false">Allowed</button>
+            <button type="button" role="radio" data-filter="denied" aria-checked="false">Denied</button>
+          </div>
+        </div>
+        <div id="no-audit" class="empty">
+          <span class="empty-icon tone-accent"><span class="i i-scroll-text" aria-hidden="true"></span></span>
+          <strong>Nothing in the audit log yet</strong>
+          <span class="muted">Every use of a handle, and every answer you give, is written here.</span>
+        </div>
+        <p id="no-audit-match" class="muted center" hidden>No entry matches.</p>
+        <ol id="audit-rows" class="list panel flush timeline"></ol>
+      </section>
+
+      <section id="settings" aria-labelledby="page-title" hidden>
+        <div class="panel setting">
+          <span class="stat-icon tone-accent"><span class="i i-sun" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong>Appearance</strong><span class="muted small">System follows your light or dark mode as it changes.</span></div>
+          <div class="segmented theme-choice" role="radiogroup" aria-label="Appearance"></div>
+        </div>
+        <div class="panel setting">
+          <span class="stat-icon tone-teal"><span class="i i-power" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong id="login-label">Start kv tray at login</strong><span class="muted small">The key waits in the tray, so requests reach you.</span></div>
+          <button type="button" id="login" class="switch" role="switch" aria-checked="false" aria-labelledby="login-label"><span class="knob"></span></button>
+        </div>
+        <div class="panel setting">
+          <span class="stat-icon tone-amber"><span class="i i-lock" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong>Session</strong><span class="muted small" id="settings-locks-in"></span></div>
+          <button type="button" id="settings-lock" class="outline"><span class="i i-lock" aria-hidden="true"></span>Lock vault</button>
+        </div>
+        <div class="panel setting">
+          <span class="stat-icon tone-red"><span class="i i-power" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong>Quit kv tray</strong><span class="muted small">Agents' requests then wait for <code>kv tui</code> or time out.</span></div>
+          <button type="button" class="outline danger" data-quit>Quit</button>
+        </div>
+        <div class="panel note">
+          <span class="i i-info" aria-hidden="true"></span>
+          <p>kv only opens from its icon in the tray. Treat a kv window that appears on its own, asking for your passphrase, as fake.</p>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3><span class="i i-keyboard" aria-hidden="true"></span>Keyboard</h3></div>
+          <dl class="keys">
+            <dt><kbd>Ctrl</kbd> <kbd>1</kbd>–<kbd>6</kbd></dt><dd>Go to Home, Approvals, Handles, Shares, Audit, Settings</dd>
+            <dt><kbd>/</kbd></dt><dd>Find a handle or search the log</dd>
+            <dt><kbd>Esc</kbd></dt><dd>Close a dialog, or hide kv</dd>
+          </dl>
+        </div>
+      </section>
+    </div>
+  </div>
 </div>
 
-<dialog id="form-dialog">
+<dialog id="form-dialog" aria-labelledby="form-title">
   <form id="form">
-    <h2 id="form-title"></h2>
+    <div class="dialog-head">
+      <span class="stat-icon tone-accent"><span class="i i-key-round" aria-hidden="true"></span></span>
+      <h2 id="form-title"></h2>
+      <button type="button" class="icon-button" id="form-x" aria-label="Cancel"><span class="i i-x" aria-hidden="true"></span></button>
+    </div>
     <div id="form-fields"></div>
     <p id="form-error" class="message" role="alert"></p>
     <div class="actions">
-      <button type="button" id="form-cancel">Cancel</button>
-      <button type="submit" class="primary">Save</button>
+      <button type="button" id="form-cancel" class="outline">Cancel</button>
+      <button type="submit" class="primary"><span class="i i-check" aria-hidden="true"></span>Save</button>
     </div>
   </form>
 </dialog>
 
-<dialog id="share-dialog">
+<dialog id="share-dialog" aria-labelledby="share-title">
   <form id="share-form">
-    <h2 id="share-title"></h2>
+    <div class="dialog-head">
+      <span class="stat-icon tone-teal" id="share-icon"><span class="i i-share-2" aria-hidden="true"></span></span>
+      <h2 id="share-title"></h2>
+      <button type="button" class="icon-button" id="share-x" aria-label="Close"><span class="i i-x" aria-hidden="true"></span></button>
+    </div>
     <p id="share-about" class="muted"></p>
     <div id="share-ask">
       <div class="field" data-for="send receive">
@@ -134,34 +297,47 @@
     </div>
     <div id="share-result" hidden>
       <p id="share-result-about"></p>
-      <div id="share-output" class="detail code share-output"></div>
-      <p id="share-safety" class="safety"></p>
+      <div id="share-output" class="code-box share-output"></div>
+      <div class="callout tone-amber">
+        <span class="i i-shield-check" aria-hidden="true"></span>
+        <p id="share-safety"></p>
+      </div>
     </div>
     <p id="share-error" class="message" role="alert"></p>
     <div class="actions">
-      <button type="button" id="share-copy" hidden>Copy</button>
-      <button type="button" id="share-cancel">Cancel</button>
+      <button type="button" id="share-cancel" class="outline">Cancel</button>
+      <button type="button" id="share-copy" class="primary" hidden><span class="i i-copy" aria-hidden="true"></span><span class="copy-label">Copy</span></button>
       <button type="submit" id="share-submit" class="primary"></button>
     </div>
   </form>
 </dialog>
 
-<dialog id="confirm-dialog">
+<dialog id="confirm-dialog" aria-labelledby="confirm-text">
   <form id="confirm">
+    <div class="dialog-head">
+      <span class="stat-icon tone-red"><span class="i i-triangle-alert" aria-hidden="true"></span></span>
+      <h2 id="confirm-title">Are you sure?</h2>
+    </div>
     <p id="confirm-text"></p>
     <div class="actions">
-      <button type="button" id="confirm-cancel">Cancel</button>
-      <button type="submit" id="confirm-ok" class="danger">Remove</button>
+      <button type="button" id="confirm-cancel" class="outline">Cancel</button>
+      <button type="submit" id="confirm-ok" class="danger-fill">Remove</button>
     </div>
   </form>
 </dialog>
 
-<dialog id="reveal-dialog">
-  <h2 id="reveal-title"></h2>
-  <p class="muted">Anyone who can see your screen can read these. They hide again after a minute.</p>
+<dialog id="reveal-dialog" aria-labelledby="reveal-title">
+  <div class="dialog-head">
+    <span class="stat-icon tone-amber"><span class="i i-eye" aria-hidden="true"></span></span>
+    <h2 id="reveal-title"></h2>
+  </div>
+  <div class="callout tone-amber">
+    <span class="i i-triangle-alert" aria-hidden="true"></span>
+    <p>Anyone who can see your screen can read these. They hide again after a minute.</p>
+  </div>
   <div id="reveal-fields"></div>
   <div class="actions">
-    <button type="button" id="reveal-close" class="primary">Hide</button>
+    <button type="button" id="reveal-close" class="primary"><span class="i i-eye" aria-hidden="true"></span>Hide</button>
   </div>
 </dialog>
 </body>
