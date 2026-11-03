@@ -15,7 +15,7 @@ use kv_core::secret::SecretText;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::model::{Action, Model, View};
-use super::window::{FormRequest, FromPage, Tab, ToPage};
+use super::window::{FormRequest, FromPage, Tab, Theme, ToPage};
 use crate::client;
 use crate::device::Device;
 use crate::forms::{self, Form, Purpose};
@@ -71,12 +71,15 @@ pub struct Worker<D> {
     overview: Option<Overview>,
     /// Who is waiting on the device prompt `run` holds beside its loop.
     prompting: Option<Asker>,
+    /// How the window looks, as the user last picked it.
+    theme: Theme,
 }
 
 impl<D: Desktop> Worker<D> {
     pub fn new(paths: Paths, device: Option<Arc<dyn Device>>, desktop: D) -> Self {
         Self {
             driver: Driver::with_device(paths.clone(), device).with_reason(REASON),
+            theme: Theme::load(&paths.tray_theme_file()),
             paths,
             desktop,
             window: None,
@@ -110,7 +113,7 @@ impl<D: Desktop> Worker<D> {
         if let Some(message) = ended {
             self.say(Asker::Window, &message, None);
         }
-        if self.window.as_ref().is_some_and(|w| w.tab == Tab::Audit) {
+        if self.window.as_ref().is_some_and(|w| shows_audit(w.tab)) {
             self.send_audit().await;
         }
         Model::new(View {
@@ -230,7 +233,7 @@ impl<D: Desktop> Worker<D> {
                     let view = forms::describe(form);
                     self.desktop.page(ToPage::Form { view });
                 }
-                if tab == Tab::Audit {
+                if shows_audit(tab) {
                     self.send_audit().await;
                 }
             }
@@ -303,10 +306,34 @@ impl<D: Desktop> Worker<D> {
                 if let Some(window) = &mut self.window {
                     window.tab = tab;
                 }
-                if tab == Tab::Audit {
+                if shows_audit(tab) {
                     self.send_audit().await;
                 }
             }
+            // The window takes it before it gets here.
+            FromPage::Hide => {}
+            FromPage::Theme { theme } => {
+                self.theme = theme;
+                if let Err(e) = theme.save(&self.paths.tray_theme_file()) {
+                    self.say(
+                        Asker::Window,
+                        &format!("could not save the appearance: {e}"),
+                        None,
+                    );
+                }
+                self.send_state();
+            }
+            FromPage::Login { on } => {
+                if let Err(e) = self.desktop.set_login(on) {
+                    self.say(
+                        Asker::Window,
+                        &format!("could not change the login item: {e}"),
+                        None,
+                    );
+                }
+                self.send_state();
+            }
+            FromPage::Quit => return Next::Quit,
         }
         Next::Done
     }
@@ -445,6 +472,8 @@ impl<D: Desktop> Worker<D> {
             device: self.driver.device().map(|kind| kind.label().to_owned()),
             waiting_for_device: self.prompting.is_some(),
             overview: self.overview.clone(),
+            login: self.desktop.login_is_on(),
+            theme: self.theme,
         });
     }
 
@@ -454,6 +483,12 @@ impl<D: Desktop> Worker<D> {
             other => self.report(Asker::Window, other, None),
         }
     }
+}
+
+/// Whether the window's `tab` shows audit entries: Home's latest
+/// activity, or the Audit tab.
+fn shows_audit(tab: Tab) -> bool {
+    matches!(tab, Tab::Home | Tab::Audit)
 }
 
 /// The daemon's messages start in lower case, to follow other text; a

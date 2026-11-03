@@ -56,6 +56,12 @@ impl Paths {
         self.runtime.join("tray.lock")
     }
 
+    /// The window's appearance, as the user last picked it in kv tray. Kept
+    /// beside the vault; it holds no secret.
+    pub fn tray_theme_file(&self) -> PathBuf {
+        self.vault.with_file_name("tray-theme")
+    }
+
     pub fn agent_endpoint(&self) -> Endpoint {
         Endpoint::new(&self.runtime, "agent")
     }
