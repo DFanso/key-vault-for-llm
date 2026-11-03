@@ -14,6 +14,9 @@
     // only when it changes; and whether the menu is on its way out.
     view: null,
     expanding: false,
+    // Whether a state has come yet: the first one, on load, is not an unlock.
+    seenState: false,
+    unlockTimer: null,
     locked: true,
     device: null,
     waiting: false,
@@ -46,6 +49,10 @@
   // How long the menu takes to fade out before the window grows; as in
   // app.css.
   const LEAVE_MS = 110;
+  // How long the unlock animation shows before it fades into the app; as in
+  // app.css.
+  const UNLOCK_MS = 1150;
+  const UNLOCK_FADE_MS = 220;
   const TOAST_SECS = 8;
 
   // The screens, in sidebar order (Ctrl+1 to Ctrl+6), and their titles.
@@ -180,6 +187,28 @@
     node.hidden = !shown;
   }
 
+  // The unlock animation over whatever view is on show, then that view
+  // comes in. Skipped when the system asks for less motion.
+  function playUnlock(overview) {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const node = $("unlocking");
+    const secs = overview && overview.status.locks_in_secs;
+    $("unlocking-note").textContent = typeof secs === "number" ? `Locks in ${duration(secs)}` : "Welcome back";
+    clearTimeout(page.unlockTimer);
+    node.classList.remove("play", "done");
+    show(node, true);
+    void node.offsetWidth;
+    node.classList.add("play");
+    page.unlockTimer = setTimeout(() => {
+      node.classList.add("done");
+      if (page.view) enter($(page.view));
+      page.unlockTimer = setTimeout(() => {
+        show(node, false);
+        node.classList.remove("play", "done");
+      }, UNLOCK_FADE_MS);
+    }, UNLOCK_MS);
+  }
+
   // Plays a view's entrance again, as when the window shows once more.
   function enter(node) {
     node.classList.remove("enter");
@@ -233,6 +262,9 @@
   function receive(message) {
     switch (message.type) {
       case "state":
+        // Locked a moment ago, unlocked now: the padlock opens.
+        if (page.seenState && page.locked && !message.locked) playUnlock(message.overview);
+        page.seenState = true;
         page.locked = message.locked;
         page.device = message.device;
         page.waiting = message.waiting_for_device;
