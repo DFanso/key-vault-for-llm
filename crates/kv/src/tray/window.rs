@@ -51,14 +51,48 @@ pub fn asset(path: &str) -> Option<Asset> {
     Some(Asset { mime, body })
 }
 
-/// The window's tabs.
+/// The window's tabs. The page has a Settings screen of its own besides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tab {
+    /// What needs the user, the numbers and the latest activity.
+    Home,
     Approvals,
     Handles,
     Shares,
     Audit,
+}
+
+/// How the window looks: as the system's light or dark mode, or always
+/// one of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    /// The theme saved in `path`; the default if there is none or it does
+    /// not read as one.
+    pub fn load(path: &std::path::Path) -> Theme {
+        match std::fs::read_to_string(path).as_deref().map(str::trim) {
+            Ok("light") => Theme::Light,
+            Ok("dark") => Theme::Dark,
+            _ => Theme::System,
+        }
+    }
+
+    pub fn save(self, path: &std::path::Path) -> std::io::Result<()> {
+        let name = match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        };
+        std::fs::write(path, name)
+    }
 }
 
 /// The form the page asks to open.
@@ -138,6 +172,20 @@ pub enum FromPage {
     Tab {
         tab: Tab,
     },
+    /// Hide the window (Esc, or its close button). The window side takes
+    /// this one itself.
+    Hide,
+    /// Grow the small menu into the full window (its Open kv). The window
+    /// side takes this one itself.
+    Expand,
+    Theme {
+        theme: Theme,
+    },
+    /// Turn the login item on or off.
+    Login {
+        on: bool,
+    },
+    Quit,
 }
 
 impl FromPage {
@@ -160,9 +208,19 @@ pub enum ToPage {
         waiting_for_device: bool,
         /// `Some` while the tray holds a session.
         overview: Option<Overview>,
+        /// Whether kv tray starts at login.
+        login: bool,
+        theme: Theme,
     },
     Show {
         tab: Tab,
+    },
+    /// The window went out of sight: the page puts away a value on show.
+    Hidden,
+    /// The window shows the small menu a click on the tray icon opens
+    /// (`on`), or the full page.
+    Menu {
+        on: bool,
     },
     /// A form to draw, with no secret text in it.
     Form {
