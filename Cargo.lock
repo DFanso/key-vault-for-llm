@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "kv"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "block2",
  "clap",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "kv-core"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "aho-corasick",
  "argon2",
