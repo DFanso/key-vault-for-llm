@@ -406,9 +406,6 @@
     const approvals = overview.approvals;
     const requests = overview.handle_requests;
     const waiting = approvals.length + requests.length;
-    show($("quick-review"), waiting > 0);
-    $("quick-review-text").textContent = waiting === 1 ? "Review 1 request" : `Review ${waiting} requests`;
-
     $("stat-waiting").textContent = String(waiting);
     $("stat-waiting-note").textContent =
       waiting === 0 ? "Nothing waiting" : `${approvals.length} to approve · ${requests.length} asked for`;
@@ -422,39 +419,43 @@
     $("stat-shares").textContent = String(open);
     $("stat-shares-note").textContent = `${shares.received.length} received · ${shares.sent.length} sent`;
 
-    const shape = JSON.stringify([approvals.map((a) => a.id), requests.map((r) => r.id), page.audit.slice(0, 6)]);
+    const shape = JSON.stringify([approvals.map((a) => a.id), requests.map((r) => r.id), page.audit.slice(0, 5)]);
     if (shape === page.drawn.home) return;
     page.drawn.home = shape;
 
     // Home only says who is waiting: the answer is given on Approvals, which
     // shows the request in full (the URL, command, query or share).
-    const rows = approvals.slice(0, 3).map((approval) => {
+    // Three rows at most, requests to approve first; the rest is a count.
+    const NEEDS_ROWS = 3;
+    const shownApprovals = approvals.slice(0, NEEDS_ROWS);
+    const shownRequests = requests.slice(0, NEEDS_ROWS - shownApprovals.length);
+    const rows = shownApprovals.map((approval) => {
       const handlesText = approval.handles.join(", ");
       return el(
         "div",
         "needs",
         avatar(approval.client, true),
         el("div", "grow", el("strong", null, approval.client || "An agent"), el("span", "muted small", `${tool(approval.tool)[0]} · ${handlesText}`)),
-        el("div", "buttons", button("Review", () => go("approvals"), "primary", "arrow-right")),
+        el("div", "buttons", button("Review", () => go("approvals"), "outline")),
       );
     });
-    for (const requested of requests.slice(0, 2)) {
+    for (const requested of shownRequests) {
       rows.push(
         el(
           "div",
           "needs",
           avatar(requested.client, true),
           el("div", "grow", el("strong", null, `${requested.client || "An agent"} asked for ${requested.request.name}`), el("span", "muted small", requested.request.reason || requested.request.kind)),
-          el("div", "buttons", button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary")),
+          el("div", "buttons", button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "outline")),
         ),
       );
     }
-    const more = approvals.length - 3 + Math.max(0, requests.length - 2);
-    if (more > 0) rows.push(el("p", "muted small", `and ${more} more`));
+    const more = approvals.length + requests.length - rows.length;
+    if (more > 0) rows.push(el("p", "muted small more", `and ${more} more`));
     $("home-needs").replaceChildren(...rows);
     show($("home-clear"), rows.length === 0);
 
-    const recent = page.audit.slice(0, 6).map(activity);
+    const recent = page.audit.slice(0, 5).map(activity);
     $("home-activity").replaceChildren(...recent);
     show($("home-no-activity"), recent.length === 0);
   }
@@ -1008,9 +1009,12 @@
     const rows = shown.map((e) => {
       const [tone, iconName, word] = verdictOf(e);
       const at = entryTime(e);
-      const time = el("div", "when", el("div", null, ago(at)), el("div", null, new Date(at * 1000).toLocaleTimeString()));
-      // The log's own time, in UTC, as kv tui shows it.
-      time.title = e.ts.slice(0, 19).replace("T", " ") + " UTC";
+      const time = el("div", "when", ago(at));
+      // The exact time, and the log's own in UTC, as kv tui shows it.
+      time.title = `${new Date(at * 1000).toLocaleString()} (${e.ts.slice(0, 19).replace("T", " ")} UTC)`;
+      // The outcome only where it says more than the decision does.
+      const said = new Set([e.decision, word && word.toLowerCase(), "ok", "done", "denied", "timeout", "approved"]);
+      const outcome = e.outcome && !said.has(String(e.outcome).toLowerCase()) ? chip(e.outcome, "tone-grey") : null;
       return el(
         "li",
         "row-item",
@@ -1024,7 +1028,7 @@
             el("span", "name", actionWords(e.action)),
             e.handle ? chip(e.handle, "tone-grey", "key-round") : null,
             word ? chip(word, tone) : null,
-            chip(e.outcome, "tone-grey"),
+            outcome,
           ),
           e.summary ? el("span", "summary", e.summary) : null,
         ),
@@ -1296,10 +1300,6 @@
     for (const link of document.querySelectorAll("[data-goto]")) {
       link.addEventListener("click", () => go(link.dataset.goto));
     }
-    $("quick-review").addEventListener("click", () => {
-      const overview = page.overview;
-      go(overview && overview.approvals.length === 0 ? "handles" : "approvals");
-    });
     const quick = {
       add: () => openRequest({ kind: "new" }),
       request: () => openShare("request"),
