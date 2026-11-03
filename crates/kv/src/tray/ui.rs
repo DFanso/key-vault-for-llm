@@ -3,19 +3,23 @@
 //! runs on a thread of its own (`worker`) and sends each new `Model` and
 //! each message for the page here through the event loop; menu clicks and
 //! what the page sends go back to it as `Action`s.
+//!
+//! A click on the icon opens kv's window beside it, like a flyout, and a
+//! second click hides it again; the menu is on the other button.
 
 mod webview;
 
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use super::model::{Action, Edit, IconState, Item, Model, edits};
 use super::window::{Tab, ToPage};
@@ -24,7 +28,16 @@ use super::{icon, login};
 use crate::device;
 use crate::notify;
 use crate::paths::Paths;
-use webview::KvWindow;
+use webview::{Anchor, KvWindow};
+
+/// How soon after the window hid a click on the icon is the same click:
+/// the click that took the focus away hid it, so it stays hidden.
+const RECLICK: Duration = Duration::from_millis(400);
+
+/// How long after the window shows a loss of focus does not hide it:
+/// Windows may refuse the window the focus as it appears, and the user has
+/// not clicked elsewhere yet.
+const SETTLE: Duration = Duration::from_millis(600);
 
 enum Message {
     Show(Model),
@@ -32,6 +45,10 @@ enum Message {
     /// to the page itself.
     Open,
     Page(ToPage),
+    /// The tray icon was clicked; it is here.
+    Clicked(Anchor),
+    /// The page asked to hide the window.
+    Hide,
     /// The worker has stopped.
     Quit,
 }
@@ -60,6 +77,24 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
         }
     }));
     let proxy = event_loop.create_proxy();
+    let clicked = proxy.clone();
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            rect,
+            ..
+        } = event
+        {
+            let _ = clicked.send_event(Message::Clicked(Anchor {
+                x: rect.position.x,
+                y: rect.position.y,
+                width: rect.size.width.into(),
+                height: rect.size.height.into(),
+            }));
+        }
+    }));
+    let pages = proxy.clone();
     let system = System {
         proxy: proxy.clone(),
     };
@@ -74,6 +109,13 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
 
     let mut tray: Option<Tray> = None;
     let mut window: Option<KvWindow> = None;
+    // Where the icon was last clicked, which the window opens beside.
+    let mut anchor: Option<Anchor> = None;
+    // When the window last hid, and last showed.
+    let mut hidden_at: Option<Instant> = None;
+    let mut shown_at: Option<Instant> = None;
+    // A device prompt takes the focus; the window stays up behind it.
+    let mut prompting = false;
     event_loop.run(move |event, target, flow| {
         // Held for as long as the loop runs.
         let _ = &lock;
@@ -91,10 +133,54 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                     tray.show(model);
                 }
             }
+            Event::UserEvent(Message::Clicked(at)) => {
+                anchor = Some(at);
+                let just_hidden = hidden_at.is_some_and(|t| t.elapsed() < RECLICK);
+                match &window {
+                    Some(open) if open.is_visible() => {
+                        open.hide();
+                        hidden_at = Some(Instant::now());
+                    }
+                    Some(_) if just_hidden => {}
+                    Some(open) => {
+                        open.show_at(anchor);
+                        shown_at = Some(Instant::now());
+                    }
+                    // The worker opens it on Home, asking to unlock first.
+                    None => {
+                        let _ = actions.send(Action::Open(Tab::Home));
+                    }
+                }
+            }
+            Event::UserEvent(Message::Hide) => {
+                if let Some(open) = &window {
+                    open.hide();
+                    hidden_at = Some(Instant::now());
+                }
+            }
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::Focused(false),
+                ..
+            } if !prompting && window.as_ref().is_some_and(|open| open.id() == window_id) => {
+                let settling = shown_at.is_some_and(|t| t.elapsed() < SETTLE);
+                if let Some(open) = window.as_ref().filter(|open| open.is_visible())
+                    && !settling
+                {
+                    open.hide();
+                    hidden_at = Some(Instant::now());
+                }
+            }
             Event::UserEvent(Message::Open) => match &window {
-                Some(open) => open.raise(),
-                None => match KvWindow::open(target, actions.clone()) {
-                    Ok(opened) => window = Some(opened),
+                Some(open) => {
+                    open.show_at(anchor);
+                    shown_at = Some(Instant::now());
+                }
+                None => match KvWindow::open(target, actions.clone(), pages.clone(), anchor) {
+                    Ok(opened) => {
+                        window = Some(opened);
+                        shown_at = Some(Instant::now());
+                    }
                     Err(e) => {
                         eprintln!("kv: cannot open kv's window: {e}");
                         notify::tray(no_window(&e));
@@ -103,6 +189,20 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 },
             },
             Event::UserEvent(Message::Page(message)) => {
+                if let ToPage::State {
+                    waiting_for_device, ..
+                } = &message
+                {
+                    // The prompt is over: the window takes the focus back,
+                    // so a click elsewhere hides it again.
+                    if prompting
+                        && !waiting_for_device
+                        && let Some(open) = window.as_ref().filter(|open| open.is_visible())
+                    {
+                        open.raise();
+                    }
+                    prompting = *waiting_for_device;
+                }
                 if let Some(open) = &window {
                     open.send(&message);
                 }
@@ -144,6 +244,8 @@ impl Tray {
         let menu = Menu::new();
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
+            // A click opens kv's window; the menu is on the other button.
+            .with_menu_on_left_click(false)
             .with_tooltip("kv");
         let image = image(IconState::Off);
         #[cfg(target_os = "macos")]
