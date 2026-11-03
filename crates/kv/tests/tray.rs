@@ -44,6 +44,12 @@ fn locked_is_dimmer_than_unlocked_and_waiting_adds_a_badge() {
         waiting,
         "the count is not drawn"
     );
+    // macOS draws a template image, alpha only, and puts the count in the
+    // title beside the icon, so there is no badge.
+    if cfg!(target_os = "macos") {
+        assert_eq!(waiting, unlocked);
+        return;
+    }
     // The badge sits in the top right corner; the rest is the plain key.
     let badge = pixel(&waiting, SIZE - 7, 6);
     assert_eq!(badge[3], 255);
