@@ -10,6 +10,14 @@
     // A click on the tray icon shows the small menu first; Open kv grows
     // the window into the full page.
     menu: location.hash === "#menu",
+    // The view on show ("menu", "unlock" or "app"), to play its entrance
+    // only when it changes; and whether the menu is on its way out.
+    view: null,
+    expanding: false,
+    // Whether a state has come yet: the first one, on load, is not a lock
+    // or an unlock.
+    seenState: false,
+    padlockTimer: null,
     locked: true,
     device: null,
     waiting: false,
@@ -39,6 +47,13 @@
   };
 
   const REVEAL_SECS = 60;
+  // How long the menu takes to fade out before the window grows; as in
+  // app.css.
+  const LEAVE_MS = 110;
+  // How long the lock and unlock animations show before they fade into the
+  // view; as in app.css.
+  const PADLOCK_MS = 1150;
+  const PADLOCK_FADE_MS = 220;
   const TOAST_SECS = 8;
 
   // The screens, in sidebar order (Ctrl+1 to Ctrl+6), and their titles.
@@ -173,6 +188,45 @@
     node.hidden = !shown;
   }
 
+  // The padlock opens (unlock) or closes (lock) over whatever view is on
+  // show, then that view comes in. Skipped when the system asks for less
+  // motion.
+  function playPadlock(message) {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const node = $("padlock");
+    const locking = message.locked;
+    let note;
+    if (locking) {
+      note = "Agents wait until you unlock";
+    } else {
+      const secs = message.overview && message.overview.status.locks_in_secs;
+      note = typeof secs === "number" ? `Locks in ${duration(secs)}` : "Welcome back";
+    }
+    $("padlock-title").textContent = locking ? "Locked" : "Unlocked";
+    $("padlock-note").textContent = note;
+    clearTimeout(page.padlockTimer);
+    node.classList.remove("play", "done", "locking");
+    node.classList.toggle("locking", locking);
+    show(node, true);
+    void node.offsetWidth;
+    node.classList.add("play");
+    page.padlockTimer = setTimeout(() => {
+      node.classList.add("done");
+      if (page.view) enter($(page.view));
+      page.padlockTimer = setTimeout(() => {
+        show(node, false);
+        node.classList.remove("play", "done", "locking");
+      }, PADLOCK_FADE_MS);
+    }, PADLOCK_MS);
+  }
+
+  // Plays a view's entrance again, as when the window shows once more.
+  function enter(node) {
+    node.classList.remove("enter");
+    void node.offsetWidth;
+    node.classList.add("enter");
+  }
+
   // "7h 52m", "3m", "40s".
   function duration(secs) {
     const h = Math.floor(secs / 3600);
@@ -219,6 +273,10 @@
   function receive(message) {
     switch (message.type) {
       case "state":
+        // Locked a moment ago, unlocked now, or the other way: the padlock
+        // opens or closes.
+        if (page.seenState && page.locked !== message.locked) playPadlock(message);
+        page.seenState = true;
         page.locked = message.locked;
         page.device = message.device;
         page.waiting = message.waiting_for_device;
@@ -241,8 +299,10 @@
         draw();
         break;
       case "menu":
+        // Sent each time the window shows: the view comes in again.
         page.menu = Boolean(message.on);
         draw();
+        enter($(page.view));
         break;
       case "hidden":
         // The window went out of sight: values on show go first.
@@ -321,7 +381,12 @@
       group.replaceChildren(
         ...THEMES.map(([name, label, iconName]) => {
           const choice = button(label, () => {
+            // The colours cross-fade into the new theme.
+            const root = document.documentElement;
+            root.classList.add("theming");
+            void root.offsetWidth;
             setTheme(name);
+            setTimeout(() => root.classList.remove("theming"), 320);
             send({ type: "theme", theme: name });
           }, null, iconName);
           choice.setAttribute("role", "radio");
@@ -336,6 +401,11 @@
   // Drawing.
 
   function draw() {
+    const view = page.menu ? "menu" : page.locked ? "unlock" : "app";
+    if (view !== page.view) {
+      page.view = view;
+      enter($(view));
+    }
     show($("menu"), page.menu);
     show($("unlock"), !page.menu && page.locked);
     show($("app"), !page.menu && !page.locked);
@@ -401,11 +471,20 @@
   }
 
   // From the menu to the full window, on `screen` once unlocked.
+  // The menu fades out first, so the window grows behind nothing; the full
+  // view then comes in.
   function expand(screen) {
-    page.menu = false;
-    send({ type: "expand" });
-    if (screen && !page.locked) go(screen);
-    else draw();
+    if (page.expanding) return;
+    page.expanding = true;
+    $("menu").classList.add("leaving");
+    setTimeout(() => {
+      page.expanding = false;
+      $("menu").classList.remove("leaving");
+      page.menu = false;
+      send({ type: "expand" });
+      if (screen && !page.locked) go(screen);
+      else draw();
+    }, LEAVE_MS);
   }
 
   function menuLock() {
@@ -1285,6 +1364,8 @@
 
   // Moves to a screen; the tray hears about its own tabs.
   function go(screen) {
+    // A new screen starts at its top.
+    if (screen !== page.screen) document.querySelector(".scroll").scrollTop = 0;
     page.screen = screen;
     hideToast();
     if (TABS.has(screen)) send({ type: "tab", tab: screen });
