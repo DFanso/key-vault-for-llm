@@ -214,15 +214,20 @@ TUI: Allow once, Allow for this session, Deny, and Deny and block. "Lock
 vault" locks the vault for every client. Anything the menu cannot do, such as
 answering a request that has already timed out, shows up as a notification.
 
-"Open kv…" opens kv's window, which does everything `kv tui` does without a
-terminal: an Approvals tab with each waiting request in full, a Handles tab
-where you fill in agents' handle requests and add, edit, re-police or remove
-handles, a Shares tab (see sharing, below), and an Audit tab. The menu and
-the window share one session; closing the window keeps it, and Lock (in
-either) ends it. kv's window only opens
-when you pick one of these menu items. Treat a kv window that appears on its
-own, asking for your passphrase, as fake. On Windows the window needs the
-Microsoft Edge WebView2 Runtime, which Windows 10 and 11 normally have.
+Clicking the icon opens kv's window beside it, like a flyout (the menu is on
+the other button); a second click, Esc, or clicking elsewhere hides it again.
+"Open kv…" in the menu opens it too. The window does everything `kv tui`
+does without a terminal: Home shows what is waiting, your handles and shares,
+and the latest activity, with quick actions; Approvals has each waiting
+request in full; Handles is where you fill in agents' handle requests and
+add, edit, re-police or remove handles; then Shares (see sharing, below),
+Audit, and Settings, which picks a light or dark look (or follows the
+system), turns the login item on or off, locks the vault and quits the tray.
+The menu and the window share one session; hiding the window keeps it, and
+Lock (in either) ends it. kv's window only opens from the tray icon or its
+menu. Treat a kv window that appears on its own, asking for your passphrase,
+as fake. On Windows the window needs the Microsoft Edge WebView2 Runtime,
+which Windows 10 and 11 normally have.
 
 The login item takes effect at your next login. On Windows a console window
 may flash as it starts.
