@@ -6,7 +6,9 @@
 
 use std::borrow::Cow;
 
-use tao::dpi::{LogicalSize, PhysicalPosition};
+use tao::dpi::LogicalSize;
+#[cfg(not(target_os = "macos"))]
+use tao::dpi::PhysicalPosition;
 use tao::event_loop::{EventLoopProxy, EventLoopWindowTarget};
 use tao::window::{Icon, Window, WindowBuilder, WindowId};
 use tokio::sync::mpsc::UnboundedSender;
@@ -30,11 +32,16 @@ const MENU_HEIGHT: f64 = 330.0;
 const GAP: i32 = 12;
 
 /// Where the tray icon is, in physical pixels: the window opens beside it.
+/// On macOS it is the pointer, in points (see `pointer`): the icon's own
+/// rectangle comes in a mix of scales that does not match the monitors on a
+/// Mac with screens of different scales.
 #[derive(Clone, Copy, Debug)]
 pub struct Anchor {
     pub x: f64,
     pub y: f64,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub width: f64,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub height: f64,
 }
 
@@ -112,7 +119,7 @@ impl KvWindow {
             .build(&window)
             .map_err(|e| e.to_string())?;
         let opened = Self { webview, window };
-        opened.show_at(anchor);
+        opened.show_at(anchor, menu);
         Ok(opened)
     }
 
@@ -133,7 +140,14 @@ impl KvWindow {
 
     /// Moves the window beside `anchor` (or the pointer, without one) and
     /// brings it to the front.
-    pub fn show_at(&self, anchor: Option<Anchor>) {
+    #[cfg(target_os = "macos")]
+    pub fn show_at(&self, anchor: Option<Anchor>, menu: bool) {
+        self.place_on_mac(anchor.unwrap_or_else(pointer), menu);
+        self.raise();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn show_at(&self, anchor: Option<Anchor>, _menu: bool) {
         let anchor = anchor.or_else(|| {
             let at = self.window.cursor_position().ok()?;
             Some(Anchor {
@@ -159,7 +173,7 @@ impl KvWindow {
     pub fn show_menu(&self, anchor: Option<Anchor>) {
         self.send(&ToPage::Menu { on: true });
         self.window.set_inner_size(size(true));
-        self.show_at(anchor);
+        self.show_at(anchor, true);
     }
 
     /// Shows the full window beside `anchor`.
@@ -171,7 +185,7 @@ impl KvWindow {
     /// Grows the menu into the full window; the page has already switched.
     pub fn expand(&self, anchor: Option<Anchor>) {
         self.window.set_inner_size(size(false));
-        self.show_at(anchor);
+        self.show_at(anchor, false);
     }
 
     /// Hides the window; the page puts away whatever it showed of a secret.
@@ -180,10 +194,64 @@ impl KvWindow {
         self.send(&ToPage::Hidden);
     }
 
+    /// Puts the window under the menu bar of the screen `at` is on, centred
+    /// on `at` and kept inside that screen's visible area, all in points.
+    /// A window larger than the area shrinks to fit it. macOS has one
+    /// coordinate space in points for every screen; the physical pixels
+    /// `place` works in differ screen to screen, so it cannot place a window
+    /// when the screens have different scales.
+    #[cfg(target_os = "macos")]
+    fn place_on_mac(&self, at: Anchor, menu: bool) {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSScreen;
+        use tao::dpi::LogicalPosition;
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let screens = NSScreen::screens(mtm);
+        let on = |screen: &NSScreen| {
+            let f = screen.frame();
+            (f.origin.x..=f.origin.x + f.size.width).contains(&at.x)
+                && (f.origin.y..=f.origin.y + f.size.height).contains(&at.y)
+        };
+        let Some(screen) = screens
+            .iter()
+            .find(|screen| on(screen))
+            .or_else(|| NSScreen::mainScreen(mtm))
+        else {
+            return;
+        };
+        let area = screen.visibleFrame();
+        let gap = f64::from(GAP) / 2.0;
+        // The size the window is about to have, not the one it reports: it
+        // takes the new size a moment after being asked, so reading it back
+        // here would place a window of the old size.
+        let wanted = size(menu);
+        let (w, h) = (
+            wanted.width.min(area.size.width - 2.0 * gap),
+            wanted.height.min(area.size.height - 2.0 * gap),
+        );
+        self.window.set_inner_size(LogicalSize::new(w, h));
+        let left = (at.x - w / 2.0).clamp(
+            area.origin.x + gap,
+            (area.origin.x + area.size.width - w - gap).max(area.origin.x + gap),
+        );
+        let top = area.origin.y + area.size.height - gap;
+        // tao counts from the top of the main screen, which has the menu bar.
+        let Some(main) = screens.iter().next() else {
+            return;
+        };
+        let from_top = main.frame().size.height - top;
+        self.window
+            .set_outer_position(LogicalPosition::new(left, from_top));
+    }
+
     /// Where the window's top left goes to sit beside `anchor`: above it
     /// when the icon is in the lower half of its screen (a taskbar at the
     /// bottom), below it otherwise (a menu bar or a taskbar at the top), and
     /// always on that screen.
+    #[cfg(not(target_os = "macos"))]
     fn place(&self, anchor: Anchor) -> Option<PhysicalPosition<i32>> {
         let (cx, cy) = (
             anchor.x + anchor.width / 2.0,
@@ -222,6 +290,19 @@ fn size(menu: bool) -> LogicalSize<f64> {
         LogicalSize::new(MENU_WIDTH, MENU_HEIGHT)
     } else {
         LogicalSize::new(WIDTH, HEIGHT)
+    }
+}
+
+/// Where the pointer is now, in points from the bottom left of the main
+/// screen: where the user clicked the tray icon.
+#[cfg(target_os = "macos")]
+pub fn pointer() -> Anchor {
+    let at = objc2_app_kit::NSEvent::mouseLocation();
+    Anchor {
+        x: at.x,
+        y: at.y,
+        width: 0.0,
+        height: 0.0,
     }
 }
 
