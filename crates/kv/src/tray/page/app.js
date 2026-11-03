@@ -426,18 +426,16 @@
     if (shape === page.drawn.home) return;
     page.drawn.home = shape;
 
+    // Home only says who is waiting: the answer is given on Approvals, which
+    // shows the request in full (the URL, command, query or share).
     const rows = approvals.slice(0, 3).map((approval) => {
       const handlesText = approval.handles.join(", ");
-      const decide = (verdict) => (event) => {
-        event.currentTarget.disabled = true;
-        send({ type: "decide", id: approval.id, verdict });
-      };
       return el(
         "div",
         "needs",
         avatar(approval.client, true),
         el("div", "grow", el("strong", null, approval.client || "An agent"), el("span", "muted small", `${tool(approval.tool)[0]} · ${handlesText}`)),
-        el("div", "buttons", button("Allow once", decide("allow_once"), "primary"), button("Deny", decide("deny"), "outline danger")),
+        el("div", "buttons", button("Review", () => go("approvals"), "primary", "arrow-right")),
       );
     });
     for (const requested of requests.slice(0, 2)) {
