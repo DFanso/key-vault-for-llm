@@ -87,6 +87,7 @@ fn what_the_page_sends_is_read() {
             FromPage::Tab { tab: Tab::Home },
         ),
         (r#"{"type":"hide"}"#, FromPage::Hide),
+        (r#"{"type":"expand"}"#, FromPage::Expand),
         (
             r#"{"type":"theme","theme":"dark"}"#,
             FromPage::Theme { theme: Theme::Dark },
@@ -223,6 +224,10 @@ fn what_the_tray_sends_is_a_call_to_kv_receive() {
         r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null,"login":false,"theme":"light"})"#
     );
     assert_eq!(ToPage::Hidden.script(), r#"kv.receive({"type":"hidden"})"#);
+    assert_eq!(
+        ToPage::Menu { on: true }.script(),
+        r#"kv.receive({"type":"menu","on":true})"#
+    );
 }
 
 /// The share dialog reads each step's result by `step`.

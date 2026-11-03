@@ -214,9 +214,11 @@ TUI: Allow once, Allow for this session, Deny, and Deny and block. "Lock
 vault" locks the vault for every client. Anything the menu cannot do, such as
 answering a request that has already timed out, shows up as a notification.
 
-Clicking the icon opens kv's window beside it, like a flyout (the menu is on
-the other button); a second click, Esc, or clicking elsewhere hides it again.
-"Open kv…" in the menu opens it too. The window does everything `kv tui`
+Clicking the icon opens a small menu beside it, like a flyout: what is
+waiting, then Open kv, Lock kv (or Unlock), Start at login and Quit kv tray.
+The system menu is on the other button. A second click, Esc, or clicking
+elsewhere hides it again. Open kv, or "Open kv…" in the system menu, opens
+kv's window. The window does everything `kv tui`
 does without a terminal: Home shows what is waiting, your handles and shares,
 and the latest activity, with quick actions; Approvals has each waiting
 request in full; Handles is where you fill in agents' handle requests and

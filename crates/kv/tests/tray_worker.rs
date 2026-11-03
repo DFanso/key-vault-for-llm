@@ -413,6 +413,26 @@ async fn the_loop_keeps_showing_while_the_prompt_is_open() {
         .unwrap();
 }
 
+/// The menu a click on the icon opens shows kv on Home without a prompt;
+/// its Unlock asks.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_menu_waits_for_unlock_to_ask_for_touch_id() {
+    let (_daemon, fake, desk, mut worker) = locked().await;
+    assert!(!worker.act(Action::Menu).await);
+    assert!(fake.reasons.lock().unwrap().is_empty(), "no prompt yet");
+    let pages = desk.take();
+    assert!(
+        pages.contains(&ToPage::Show { tab: Tab::Home }),
+        "{pages:?}"
+    );
+
+    assert!(!worker.act(page(FromPage::DeviceUnlock)).await);
+    assert_eq!(fake.reasons.lock().unwrap().len(), 1);
+    worker.model().await;
+    let (locked, _, _) = state(&desk.take());
+    assert!(!locked);
+}
+
 /// Opening the window while locked asks for Touch ID once; a cancelled
 /// prompt says why in the window, not in a notification, and the window can
 /// ask again.

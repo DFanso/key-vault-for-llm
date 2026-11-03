@@ -27,9 +27,12 @@ pub enum IconState {
 pub enum Action {
     /// Touch ID or Windows Hello, then a session.
     Unlock,
-    /// kv's window, on this tab once unlocked, or on its unlock screen. A
-    /// click on the tray icon opens it on Home.
+    /// kv's window, on this tab once unlocked, or on its unlock screen.
     Open(Tab),
+    /// The small menu a click on the tray icon opens: kv's window on Home,
+    /// without asking to unlock until the user picks Unlock. Never on a
+    /// menu.
+    Menu,
     /// A message from the window's page. Never on a menu.
     Window(FromPage),
     /// The user closed the window. Never on a menu.
@@ -55,7 +58,9 @@ impl Action {
             Action::Open(Tab::Handles) => "open:handles".into(),
             Action::Open(Tab::Shares) => "open:shares".into(),
             Action::Open(Tab::Audit) => "open:audit".into(),
-            // `from_id` reads neither, so no menu item can stand for them.
+            // `from_id` reads none of these, so no menu item can stand for
+            // them.
+            Action::Menu => "menu".into(),
             Action::Window(_) => "window".into(),
             Action::WindowClosed => "window-closed".into(),
             Action::Lock => "lock".into(),
