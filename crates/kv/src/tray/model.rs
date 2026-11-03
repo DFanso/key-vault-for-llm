@@ -27,7 +27,8 @@ pub enum IconState {
 pub enum Action {
     /// Touch ID or Windows Hello, then a session.
     Unlock,
-    /// kv's window, on this tab once unlocked, or on its unlock screen.
+    /// kv's window, on this tab once unlocked, or on its unlock screen. A
+    /// click on the tray icon opens it on Home.
     Open(Tab),
     /// A message from the window's page. Never on a menu.
     Window(FromPage),
@@ -49,6 +50,7 @@ impl Action {
     pub fn id(&self) -> String {
         match self {
             Action::Unlock => "unlock".into(),
+            Action::Open(Tab::Home) => "open:home".into(),
             Action::Open(Tab::Approvals) => "open:approvals".into(),
             Action::Open(Tab::Handles) => "open:handles".into(),
             Action::Open(Tab::Shares) => "open:shares".into(),
@@ -67,6 +69,7 @@ impl Action {
     pub fn from_id(id: &str) -> Option<Action> {
         Some(match id {
             "unlock" => Action::Unlock,
+            "open:home" => Action::Open(Tab::Home),
             "open:approvals" => Action::Open(Tab::Approvals),
             "open:handles" => Action::Open(Tab::Handles),
             "open:shares" => Action::Open(Tab::Shares),

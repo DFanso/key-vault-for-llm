@@ -301,6 +301,8 @@ fn ids_are_unique_and_lead_back_to_the_same_action() {
     assert_eq!(Action::from_id("decide:9:sideways"), None);
     assert_eq!(Action::from_id("request:7"), None);
     assert_eq!(Action::Open(Tab::Handles).id(), "open:handles");
+    assert_eq!(Action::Open(Tab::Home).id(), "open:home");
+    assert_eq!(Action::from_id("open:home"), Some(Action::Open(Tab::Home)));
     assert_eq!(
         Action::from_id("open:audit"),
         Some(Action::Open(Tab::Audit))
