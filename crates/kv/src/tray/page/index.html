@@ -33,8 +33,9 @@
   </div>
 </main>
 
-<!-- The moment kv unlocks: the padlock opens, then the app comes in. -->
-<div id="unlocking" class="unlocking" role="status" aria-live="polite" hidden>
+<!-- The moment kv unlocks or locks: the padlock opens or closes, then the
+     view comes in. -->
+<div id="padlock" class="padlock" role="status" aria-live="polite" hidden>
   <div class="unlock-mark" aria-hidden="true">
     <span class="unlock-ring"></span>
     <svg viewBox="0 0 64 64" focusable="false">
@@ -43,8 +44,8 @@
       <g class="keyhole"><circle cx="32" cy="40" r="4.5" fill="#5b3fd9"/><rect x="30.25" y="41" width="3.5" height="8" rx="1.75" fill="#5b3fd9"/></g>
     </svg>
   </div>
-  <strong class="unlock-title">Unlocked</strong>
-  <span id="unlocking-note" class="muted small"></span>
+  <strong id="padlock-title" class="unlock-title"></strong>
+  <span id="padlock-note" class="muted small"></span>
 </div>
 
 <!-- Locked: the whole popup is the unlock screen. -->

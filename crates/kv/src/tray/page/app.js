@@ -14,9 +14,10 @@
     // only when it changes; and whether the menu is on its way out.
     view: null,
     expanding: false,
-    // Whether a state has come yet: the first one, on load, is not an unlock.
+    // Whether a state has come yet: the first one, on load, is not a lock
+    // or an unlock.
     seenState: false,
-    unlockTimer: null,
+    padlockTimer: null,
     locked: true,
     device: null,
     waiting: false,
@@ -49,10 +50,10 @@
   // How long the menu takes to fade out before the window grows; as in
   // app.css.
   const LEAVE_MS = 110;
-  // How long the unlock animation shows before it fades into the app; as in
-  // app.css.
-  const UNLOCK_MS = 1150;
-  const UNLOCK_FADE_MS = 220;
+  // How long the lock and unlock animations show before they fade into the
+  // view; as in app.css.
+  const PADLOCK_MS = 1150;
+  const PADLOCK_FADE_MS = 220;
   const TOAST_SECS = 8;
 
   // The screens, in sidebar order (Ctrl+1 to Ctrl+6), and their titles.
@@ -187,26 +188,36 @@
     node.hidden = !shown;
   }
 
-  // The unlock animation over whatever view is on show, then that view
-  // comes in. Skipped when the system asks for less motion.
-  function playUnlock(overview) {
+  // The padlock opens (unlock) or closes (lock) over whatever view is on
+  // show, then that view comes in. Skipped when the system asks for less
+  // motion.
+  function playPadlock(message) {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const node = $("unlocking");
-    const secs = overview && overview.status.locks_in_secs;
-    $("unlocking-note").textContent = typeof secs === "number" ? `Locks in ${duration(secs)}` : "Welcome back";
-    clearTimeout(page.unlockTimer);
-    node.classList.remove("play", "done");
+    const node = $("padlock");
+    const locking = message.locked;
+    let note;
+    if (locking) {
+      note = "Agents wait until you unlock";
+    } else {
+      const secs = message.overview && message.overview.status.locks_in_secs;
+      note = typeof secs === "number" ? `Locks in ${duration(secs)}` : "Welcome back";
+    }
+    $("padlock-title").textContent = locking ? "Locked" : "Unlocked";
+    $("padlock-note").textContent = note;
+    clearTimeout(page.padlockTimer);
+    node.classList.remove("play", "done", "locking");
+    node.classList.toggle("locking", locking);
     show(node, true);
     void node.offsetWidth;
     node.classList.add("play");
-    page.unlockTimer = setTimeout(() => {
+    page.padlockTimer = setTimeout(() => {
       node.classList.add("done");
       if (page.view) enter($(page.view));
-      page.unlockTimer = setTimeout(() => {
+      page.padlockTimer = setTimeout(() => {
         show(node, false);
-        node.classList.remove("play", "done");
-      }, UNLOCK_FADE_MS);
-    }, UNLOCK_MS);
+        node.classList.remove("play", "done", "locking");
+      }, PADLOCK_FADE_MS);
+    }, PADLOCK_MS);
   }
 
   // Plays a view's entrance again, as when the window shows once more.
@@ -262,8 +273,9 @@
   function receive(message) {
     switch (message.type) {
       case "state":
-        // Locked a moment ago, unlocked now: the padlock opens.
-        if (page.seenState && page.locked && !message.locked) playUnlock(message.overview);
+        // Locked a moment ago, unlocked now, or the other way: the padlock
+        // opens or closes.
+        if (page.seenState && page.locked !== message.locked) playPadlock(message);
         page.seenState = true;
         page.locked = message.locked;
         page.device = message.device;
