@@ -32,6 +32,7 @@ fn handle(placement: AuthPlacement, hosts: Vec<String>, base_url: Option<String>
         },
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 

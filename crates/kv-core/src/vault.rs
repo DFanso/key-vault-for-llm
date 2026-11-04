@@ -221,8 +221,16 @@ impl Vault {
     ) -> Result<Self, VaultError> {
         let plaintext =
             crypto::open(&key, &header.payload_nonce, aad, payload).ok_or(VaultError::Corrupted)?;
-        let data: VaultData =
+        let mut data: VaultData =
             serde_json::from_slice(&plaintext).map_err(|_| VaultError::Corrupted)?;
+        // A handle saved before kv marked shares came from one if a
+        // received record names it. Settled here, before a forgotten or
+        // evicted record could lose that, and saved with the next change.
+        for secret in &mut data.secrets {
+            if secret.from_share.is_none() {
+                secret.from_share = Some(data.shares.names_received(&secret.name));
+            }
+        }
         Ok(Self {
             path: path.to_owned(),
             key,
@@ -337,8 +345,13 @@ impl Vault {
 
     /// Inserts or replaces by name and sets the timestamps. Call `save` to
     /// persist.
+    /// Saves `secret` under its name. A secret with no `from_share` gets
+    /// the one a vault from an older kv would get when it opens.
     pub fn upsert(&mut self, mut secret: Secret) -> Result<(), VaultError> {
         validate_handle(&secret.name)?;
+        if secret.from_share.is_none() {
+            secret.from_share = Some(self.data.shares.names_received(&secret.name));
+        }
         let now = unix_now();
         secret.updated_at = now;
         match self.data.secrets.iter_mut().find(|s| s.name == secret.name) {
@@ -725,5 +738,62 @@ mod tests {
             Vault::unlock(&path, "correct horse battery"),
             Err(VaultError::Corrupted)
         ));
+    }
+}
+
+#[cfg(test)]
+mod older_vaults {
+    use super::*;
+    use crate::policy::Policy;
+    use crate::secret::{SecretKind, SecretText, SecretValue};
+    use crate::share::Received;
+
+    fn env(name: &str) -> Secret {
+        Secret {
+            name: name.into(),
+            description: String::new(),
+            value: SecretValue::Env {
+                vars: [("API_KEY".to_owned(), SecretText::new("sk-test-0123456789"))].into(),
+            },
+            policy: Policy::default(),
+            created_at: 0,
+            updated_at: 0,
+            from_share: None,
+        }
+    }
+
+    /// A vault saved by a kv from before handles were marked: secrets with
+    /// no `from_share`, and a record of the share one of them came from.
+    #[test]
+    fn a_vault_from_an_older_kv_marks_the_handles_its_shares_saved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("vault.kv");
+        let fast = KdfParams {
+            m_kib: 8,
+            t: 1,
+            p: 1,
+        };
+        let mut vault = Vault::create(&path, "correct horse battery", fast).unwrap();
+        vault.data.secrets = vec![env("shared"), env("own")];
+        vault.data.shares.received.push(Received {
+            id: "r1".into(),
+            handle: "shared".into(),
+            kind: SecretKind::Env,
+            from: String::new(),
+            note: String::new(),
+            safety_code: "AAAA-AAAA".into(),
+            received_at: 0,
+            value_digest: String::new(),
+        });
+        vault.save().unwrap();
+
+        let mut opened = Vault::unlock(&path, "correct horse battery").unwrap();
+        assert_eq!(opened.get("shared").unwrap().from_share, Some(true));
+        assert_eq!(opened.get("own").unwrap().from_share, Some(false));
+        // The mark outlives the record once anything is saved.
+        opened.shares_mut().received.clear();
+        opened.save().unwrap();
+        let again = Vault::unlock(&path, "correct horse battery").unwrap();
+        assert_eq!(again.get("shared").unwrap().from_share, Some(true));
     }
 }

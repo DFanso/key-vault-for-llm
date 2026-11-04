@@ -31,6 +31,7 @@ fn redis(name: &str, url: &str) -> Secret {
         policy: Policy::default(),
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 

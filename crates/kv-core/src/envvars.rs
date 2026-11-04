@@ -14,32 +14,64 @@
 /// fit.
 pub const MAX_VALUE_LEN: usize = 4096;
 
+/// Most bytes of values in one `env` handle. The scrubber's cost grows with
+/// the square of each value's length, so this keeps one handle to two values
+/// of `MAX_VALUE_LEN` or many short ones: eight of 4096 bytes measured
+/// 1.26 GB. To be lifted once the scrubber no longer keeps every prefix.
+pub const MAX_VALUES_LEN: usize = 8 * 1024;
+
 /// Most variables in one `env` handle.
 pub const MAX_ENV_VARS: usize = 256;
 
 /// Longest variable name, in bytes.
 pub const MAX_ENV_NAME_LEN: usize = 128;
 
-/// Most bytes of names and values in one `env` handle.
-pub const MAX_ENV_TOTAL_LEN: usize = 32 * 1024;
-
 /// Why `name` cannot be an environment variable's name, if it cannot: it
-/// starts with a letter or `_` and holds letters, digits and `_`.
-pub fn name_problem(name: &str) -> Option<&'static str> {
+/// starts with a letter or `_` and holds letters, digits and `_`. The
+/// message names it, made safe to show.
+pub fn name_problem(name: &str) -> Option<String> {
     if name.is_empty() {
-        return Some("variable names cannot be empty");
+        return Some("variable names cannot be empty".into());
     }
     if name.len() > MAX_ENV_NAME_LEN {
-        return Some("a variable name is longer than 128 characters");
+        return Some(format!(
+            "the variable name {} is longer than 128 characters",
+            shown(name)
+        ));
     }
     let mut chars = name.chars();
     let first = chars.next().unwrap_or('_');
     if !(first.is_ascii_alphabetic() || first == '_')
         || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Some("variable names start with a letter or _ and hold only letters, digits and _");
+        return Some(format!(
+            "{} is not a variable name: names start with a letter or _ and hold only \
+             letters, digits and _",
+            shown(name)
+        ));
     }
     None
+}
+
+/// A variable name as a message may show it: someone else may have picked
+/// it, so anything but letters, digits and `_` becomes `?`, and it is cut
+/// at 64 characters.
+pub fn shown(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if name.chars().count() > 64 {
+        out.push_str("...");
+    }
+    out
 }
 
 /// Names that change how a program runs or where it connects.
@@ -53,7 +85,6 @@ const RISKY: &[&str] = &[
     "SHELLOPTS",
     "BASHOPTS",
     "BASH_ENV",
-    "ENV",
     "PROMPT_COMMAND",
     "PS4",
     "ZDOTDIR",
@@ -65,7 +96,11 @@ const RISKY: &[&str] = &[
     "BROWSER",
     "MANPAGER",
     "LESSOPEN",
-    // Language runtimes that load code or flags from the environment.
+    // Windows: what runs a command, and which extensions run.
+    "COMSPEC",
+    "PATHEXT",
+    // Language runtimes and build tools that load code or flags from the
+    // environment, or fetch from where it says.
     "NODE_OPTIONS",
     "NODE_PATH",
     "NODE_EXTRA_CA_CERTS",
@@ -81,11 +116,26 @@ const RISKY: &[&str] = &[
     "PERL5LIB",
     "RUBYOPT",
     "RUBYLIB",
+    "JAVA_HOME",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
     "CLASSPATH",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+    "DOTNET_STARTUP_HOOKS",
+    "CORECLR_ENABLE_PROFILING",
+    "COR_ENABLE_PROFILING",
+    "COR_PROFILER",
+    "COR_PROFILER_PATH",
     "GOFLAGS",
+    "GOPROXY",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GONOSUMCHECK",
+    "GOINSECURE",
+    "GOPRIVATE",
+    "GONOPROXY",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
     "RUSTFLAGS",
@@ -112,16 +162,20 @@ const RISKY: &[&str] = &[
 ];
 
 /// Families of names, by prefix: dynamic loaders, package managers' settings
-/// (an index or registry to install from), git's config, exported shell
-/// functions.
+/// (an index, registry or mirror to install from), git's config, exported
+/// shell functions, .NET profilers, AWS endpoints.
 const RISKY_PREFIXES: &[&str] = &[
     "LD_",
     "DYLD_",
     "NPM_CONFIG_",
+    "YARN_",
+    "BUNDLE_",
     "PIP_",
     "UV_",
     "GIT_CONFIG",
     "BASH_FUNC_",
+    "CORECLR_PROFILER",
+    "AWS_ENDPOINT_URL",
 ];
 
 /// Whether `name` is one kv does not let a share set. Case does not matter:
@@ -131,6 +185,8 @@ pub fn is_risky(name: &str) -> bool {
     RISKY.contains(&upper.as_str())
         || RISKY_PREFIXES.iter().any(|p| upper.starts_with(p))
         || upper.ends_with("_PROXY")
+        // A program cargo runs each target binary through.
+        || (upper.starts_with("CARGO_TARGET_") && upper.ends_with("_RUNNER"))
 }
 
 /// The names in `names` that are risky, in order.
@@ -142,13 +198,14 @@ pub fn risky<'a>(names: impl IntoIterator<Item = &'a String>) -> Vec<&'a str> {
         .collect()
 }
 
-/// Names for a message: the first few, then how many more.
+/// Names for a message, each made safe to show: the first few, then how
+/// many more.
 pub fn list(names: &[&str]) -> String {
     const SHOWN: usize = 8;
     let mut text = names
         .iter()
         .take(SHOWN)
-        .copied()
+        .map(|name| shown(name))
         .collect::<Vec<_>>()
         .join(", ");
     if names.len() > SHOWN {
@@ -195,6 +252,22 @@ mod tests {
             "KUBECONFIG",
             "PYTHONSTARTUP",
             "BASH_FUNC_x%%",
+            "AWS_ENDPOINT_URL",
+            "AWS_ENDPOINT_URL_S3",
+            "YARN_NPM_REGISTRY_SERVER",
+            "BUNDLE_MIRROR__ALL",
+            "GOPROXY",
+            "DOTNET_STARTUP_HOOKS",
+            "CORECLR_PROFILER_PATH",
+            "COR_PROFILER",
+            "MAVEN_OPTS",
+            "GRADLE_OPTS",
+            "JAVA_HOME",
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+            "PATHEXT",
+            "ComSpec",
+            "HOME",
+            "EDITOR",
         ] {
             assert!(is_risky(name), "{name}");
         }
@@ -210,11 +283,23 @@ mod tests {
             "PYTHONUNBUFFERED",
             "LOG_LEVEL",
             "AWS_SECRET_ACCESS_KEY",
+            "AWS_REGION",
             "CARGO_REGISTRY_TOKEN",
+            "CARGO_TARGET_DIR",
             "PORT",
+            "ENV",
         ] {
             assert!(!is_risky(name), "{name}");
         }
+    }
+
+    #[test]
+    fn names_from_someone_else_are_shown_safely() {
+        assert_eq!(shown("NODE_OPTIONS"), "NODE_OPTIONS");
+        assert_eq!(shown("A\u{1b}[31mB"), "A??31mB");
+        assert!(shown(&"A".repeat(100)).ends_with("..."));
+        assert!(name_problem("A\nB").unwrap().starts_with("A?B is not"));
+        assert_eq!(list(&["X\nY"]), "X?Y");
     }
 
     #[test]
