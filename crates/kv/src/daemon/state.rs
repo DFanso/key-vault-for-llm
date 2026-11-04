@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use kv_core::VaultError;
 use kv_core::crypto::{KdfParams, SymmetricKey, fill_random};
 use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
+use kv_core::envvars::{self, MAX_ENV_TOTAL_LEN, MAX_ENV_VARS, MAX_VALUE_LEN};
 use kv_core::policy::{
     Decision, DenyReason, Mode, Operation, Policy, evaluate, http_target, is_host_entry,
     program_name, validate_run,
@@ -524,6 +525,22 @@ impl Daemon {
             let message = format!("{} is set to deny, so it cannot be shared", call.handle);
             return Err(("policy", agent_error(AgentErrorCode::PolicyDenied, message)));
         }
+        // What the other vault would refuse is refused here, before it goes.
+        if let Err(failure) = validate_value(&secret.value) {
+            return Err(bad(format!(
+                "{} cannot be shared: {}",
+                call.handle, failure.message
+            )));
+        }
+        let risky = risky_vars(&secret.value);
+        if !risky.is_empty() {
+            return Err(bad(format!(
+                "{} sets {}, which change how a program runs or where it connects, so kv does \
+                 not share it; remove them from the handle to share the rest",
+                call.handle,
+                envvars::list(&risky)
+            )));
+        }
         let name = call
             .name
             .as_deref()
@@ -648,6 +665,16 @@ impl Daemon {
         if let Err(failure) = validate_value(&secret.value).and_then(|()| validate_secret(&secret))
         {
             return bad(format!("the share holds {}", failure.message));
+        }
+        // A program kv starts with this handle gets its variables, so the
+        // sender must not pick ones that load code or redirect traffic.
+        let risky = risky_vars(&secret.value);
+        if !risky.is_empty() {
+            return bad(format!(
+                "the share sets {}, which change how a program runs or where it connects, so kv \
+                 does not take it; ask the sender to leave them out",
+                envvars::list(&risky)
+            ));
         }
         let kind = secret.kind();
         if let Err(e) = vault.upsert(secret) {
@@ -958,6 +985,13 @@ impl Daemon {
             let Some(secret) = vault.get(name) else {
                 return refuse(self, "invalid", unknown_handle(vault, name));
             };
+            if let Some(message) = received_risky(vault, secret) {
+                return refuse(
+                    self,
+                    "policy",
+                    agent_error(AgentErrorCode::PolicyDenied, message),
+                );
+            }
             match evaluate(secret, &Operation::Exec { program }) {
                 Decision::Allow => {}
                 Decision::Ask => {
@@ -1228,6 +1262,14 @@ impl Daemon {
         let Some(secret) = vault.get(&handle).cloned() else {
             return refuse(self, "", "invalid", unknown_handle(vault, &handle));
         };
+        if let Some(message) = received_risky(vault, &secret) {
+            return refuse(
+                self,
+                "",
+                "policy",
+                agent_error(AgentErrorCode::PolicyDenied, message),
+            );
+        }
         let program = secret
             .policy
             .run
@@ -2138,6 +2180,42 @@ fn unknown(name: &str) -> Failure {
     )
 }
 
+/// Why a program may not start with `secret`, if it may not: it still holds
+/// what a share delivered, and that sets variables kv refuses in a share
+/// now. Covers handles received before kv refused them. A handle the user
+/// has since changed holds their value, and only warned them.
+fn received_risky(vault: &Vault, secret: &Secret) -> Option<String> {
+    let risky = risky_vars(&secret.value);
+    if risky.is_empty()
+        || !vault
+            .shares()
+            .holds_received(&secret.name, &share::value_digest(&secret.value))
+    {
+        return None;
+    }
+    Some(format!(
+        "{} came from a share and sets {}, which change how a program runs or where it \
+         connects, so kv does not start programs with it; ask the user to remove those \
+         variables from it in kv's window",
+        secret.name,
+        envvars::list(&risky)
+    ))
+}
+
+/// Why a value is refused for its length. kv's output scrubber keeps every
+/// prefix of every value, so a long one costs memory with the square of its
+/// length.
+const TOO_LONG: &str = "a value is longer than 4096 bytes, which kv does not take";
+
+/// The variables of an `env` value that change how a program runs or where
+/// it connects; none for other kinds.
+fn risky_vars(value: &SecretValue) -> Vec<&str> {
+    match value {
+        SecretValue::Env { vars } => envvars::risky(vars.keys()),
+        _ => Vec::new(),
+    }
+}
+
 fn validate_value(value: &SecretValue) -> Result<(), Failure> {
     let invalid = |message: &str| Err(fail(ControlErrorCode::Invalid, message));
     match value {
@@ -2148,6 +2226,15 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
         } => {
             if token.expose().is_empty() {
                 return invalid("the token is empty");
+            }
+            if token.expose().len() > MAX_VALUE_LEN {
+                return invalid(TOO_LONG);
+            }
+            if base_url
+                .as_ref()
+                .is_some_and(|base| base.len() > MAX_VALUE_LEN)
+            {
+                return invalid("the base URL is longer than 4096 bytes");
             }
             if let Some(base) = base_url {
                 let Ok(parsed) = url::Url::parse(base) else {
@@ -2182,6 +2269,11 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
                 }
             }
         }
+        SecretValue::Postgres { url } | SecretValue::Redis { url }
+            if url.expose().len() > MAX_VALUE_LEN =>
+        {
+            return invalid(TOO_LONG);
+        }
         SecretValue::Postgres { url } => {
             let scheme = url::Url::parse(url.expose()).map(|u| u.scheme().to_owned());
             if !matches!(scheme.as_deref(), Ok("postgres" | "postgresql")) {
@@ -2195,8 +2287,18 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
             }
         }
         SecretValue::Env { vars } => {
-            if vars.keys().any(|k| k.is_empty() || k.contains(['=', '\0'])) {
-                return invalid("variable names must be non-empty and contain no '=' or NUL");
+            if vars.len() > MAX_ENV_VARS {
+                return invalid("an env handle holds at most 256 variables");
+            }
+            if let Some(problem) = vars.keys().find_map(|k| envvars::name_problem(k)) {
+                return invalid(problem);
+            }
+            if vars.values().any(|v| v.expose().len() > MAX_VALUE_LEN) {
+                return invalid(TOO_LONG);
+            }
+            let total: usize = vars.iter().map(|(k, v)| k.len() + v.expose().len()).sum();
+            if total > MAX_ENV_TOTAL_LEN {
+                return invalid("an env handle holds at most 32 KiB of names and values");
             }
         }
     }
@@ -2241,6 +2343,14 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
                 .map(|(k, _)| k.clone()),
         ),
         _ => {}
+    }
+    let risky = risky_vars(&secret.value);
+    if !risky.is_empty() {
+        warnings.push(format!(
+            "{name} sets {}, which change how a program runs or where it connects; every program \
+             kv starts with {name} gets them, and kv will not send or take them in a share",
+            envvars::list(&risky)
+        ));
     }
     for value_name in short_values {
         warnings.push(format!(
