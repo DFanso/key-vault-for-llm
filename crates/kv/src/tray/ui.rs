@@ -216,14 +216,19 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 window_id,
                 event: WindowEvent::Focused(false),
                 ..
-            } if !stays.any() && window.as_ref().is_some_and(|open| open.id() == window_id) => {
+            } if window.as_ref().is_some_and(|open| open.id() == window_id) => {
                 let settling = shown_at.is_some_and(|t| t.elapsed() < SETTLE);
-                if let Some(open) = window.as_ref().filter(|open| open.is_visible())
-                    && !settling
-                {
-                    open.hide();
-                    hidden_at = Some(Instant::now());
-                    stays.hidden();
+                if let Some(open) = window.as_ref().filter(|open| open.is_visible()) {
+                    if stays.any() {
+                        // It stays up, but a secret it shows does not: the
+                        // user has gone to something else, and anyone looking
+                        // at their screen sees this window over it.
+                        open.send(&ToPage::Blurred);
+                    } else if !settling {
+                        open.hide();
+                        hidden_at = Some(Instant::now());
+                        stays.hidden();
+                    }
                 }
             }
             Event::UserEvent(Message::Open) => match &window {

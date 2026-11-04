@@ -365,6 +365,9 @@ pub enum ToPage {
     },
     /// The window went out of sight: the page puts away a value on show.
     Hidden,
+    /// The window lost the focus but stays up (a form is open, or the user
+    /// moved it): the page puts away a value on show, as when it hides.
+    Blurred,
     /// The window shows the small menu a click on the tray icon opens
     /// (`on`), or the full page.
     Menu {

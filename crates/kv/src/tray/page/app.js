@@ -332,6 +332,10 @@
         // The window went out of sight: values on show go first.
         closeReveal();
         break;
+      case "blurred":
+        // The window stays up, but the user has left it: so does no value.
+        closeReveal();
+        break;
       case "form":
         openForm(message.view);
         break;
@@ -1717,10 +1721,17 @@
     }
   }
 
+  // Whether a dialog the user may be in the middle of is open. The reveal
+  // dialog is not one: it shows a secret, which goes as soon as the window
+  // loses the focus, so it must never keep the window up.
+  function busyDialogOpen() {
+    return [...document.querySelectorAll("dialog")].some((d) => d.open && d.id !== "reveal-dialog");
+  }
+
   // While a form or any other dialog is open the user is in the middle of
   // something, so the tray keeps the window up when they click elsewhere.
   function syncBusy() {
-    const busy = anyDialogOpen();
+    const busy = busyDialogOpen();
     if (busy === page.busy) return;
     page.busy = busy;
     send({ type: "busy", on: busy });
@@ -1799,6 +1810,9 @@
     buildThemeChoices();
     wireDrag(document.querySelector(".topbar"));
     wireDrag($("unlock"));
+    // A value on show is put away whenever the window loses the focus, also
+    // where the tray keeps the window up.
+    window.addEventListener("blur", closeReveal);
     // The system's file panel takes the focus: tell the tray first, so it
     // does not take that for the user going away and hide the window.
     document.addEventListener(

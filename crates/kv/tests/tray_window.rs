@@ -486,3 +486,10 @@ fn hiding_or_showing_the_menu_takes_the_window_back_to_a_flyout() {
     moved.shown_as_menu();
     assert!(!moved.any(), "the small menu is a flyout again");
 }
+
+#[test]
+fn a_window_that_stays_up_still_tells_the_page_the_user_left() {
+    let script = ToPage::Blurred.script();
+    assert_eq!(script, r#"kv.receive({"type":"blurred"})"#);
+    assert_eq!(ToPage::Hidden.script(), r#"kv.receive({"type":"hidden"})"#);
+}
