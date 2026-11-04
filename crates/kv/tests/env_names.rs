@@ -401,3 +401,111 @@ fn the_users_own_handle_with_such_a_variable_still_runs() {
     let cwd = f.dir.path().to_path_buf();
     assert!(f.exec(run(&["pip"], &["pip", "install", "x"], cwd)).is_ok());
 }
+
+fn edit_vars(
+    f: &mut Fixture,
+    name: &str,
+    set: &[(&str, &str)],
+    remove: &[&str],
+) -> ControlResponse {
+    f.send(
+        Some(PASS),
+        None,
+        ControlCommand::EditVars {
+            name: name.into(),
+            description: None,
+            set: set
+                .iter()
+                .map(|(k, v)| (k.to_string(), SecretText::new(*v)))
+                .collect(),
+            remove: remove.iter().map(|r| r.to_string()).collect(),
+        },
+    )
+}
+
+#[test]
+fn a_blocked_handle_is_repaired_by_removing_the_variable_without_seeing_the_rest() {
+    let mut bob = Fixture::new();
+    received_before_the_fix(&mut bob);
+    // After Forget kv will not show the values, and need not.
+    forget_the_record(&mut bob);
+    exec_refused(&mut bob);
+    let response = edit_vars(&mut bob, "app-env", &[], &["NODE_OPTIONS"]);
+    assert!(
+        matches!(response, ControlResponse::Done { .. }),
+        "{response:?}"
+    );
+    let cwd = bob.dir.path().to_path_buf();
+    let job = bob
+        .exec(run(&["app-env"], &["node", "app.js"], cwd))
+        .unwrap();
+    // The other variable kept its value.
+    assert_eq!(job.env.len(), 1);
+    assert_eq!(job.env[0].0, "API_KEY");
+    assert_eq!(job.env[0].1.expose(), API_KEY);
+}
+
+#[test]
+fn editing_variables_sets_some_keeps_the_rest_and_refuses_what_add_refuses() {
+    let mut f = Fixture::new();
+    f.add(env_secret(
+        "app",
+        &[("API_KEY", API_KEY), ("REGION", "eu-west-1-zone")],
+        &["node"],
+        Mode::Auto,
+    ));
+    let done = |r: ControlResponse| assert!(matches!(r, ControlResponse::Done { .. }), "{r:?}");
+    done(edit_vars(
+        &mut f,
+        "app",
+        &[("REGION", "us-east-1-zone")],
+        &[],
+    ));
+    let cwd = f.dir.path().to_path_buf();
+    let job = f.exec(run(&["app"], &["node"], cwd)).unwrap();
+    let env: Vec<(String, String)> = job
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.expose().to_owned()))
+        .collect();
+    assert!(env.contains(&("API_KEY".into(), API_KEY.into())));
+    assert!(env.contains(&("REGION".into(), "us-east-1-zone".into())));
+
+    let invalid = |r: ControlResponse| -> String {
+        match r {
+            ControlResponse::Error { code, message } => {
+                assert_eq!(code, ControlErrorCode::Invalid);
+                message
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    };
+    assert!(invalid(edit_vars(&mut f, "app", &[], &["NOPE"])).contains("no variable NOPE"));
+    assert!(
+        invalid(edit_vars(&mut f, "app", &[], &["API_KEY", "REGION"]))
+            .contains("no variables left")
+    );
+    assert!(
+        invalid(edit_vars(&mut f, "app", &[("BAD-NAME", API_KEY)], &[]))
+            .contains("not a variable name")
+    );
+    let long = "x".repeat(4097);
+    assert!(invalid(edit_vars(&mut f, "app", &[("BLOB", long.as_str())], &[])).contains("4096"));
+    f.add(openrouter(Mode::Ask));
+    assert!(invalid(edit_vars(&mut f, "openrouter", &[], &["X"])).contains("not an env handle"));
+    // A risky variable on the user's own handle is allowed, with a warning.
+    match edit_vars(
+        &mut f,
+        "app",
+        &[("PIP_INDEX_URL", "https://pypi.example.com/simple")],
+        &[],
+    ) {
+        ControlResponse::Done { warnings } => {
+            assert!(
+                warnings.iter().any(|w| w.contains("PIP_INDEX_URL")),
+                "{warnings:?}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}

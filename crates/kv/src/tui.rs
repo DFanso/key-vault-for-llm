@@ -139,6 +139,20 @@ impl Driver {
                 })
                 .await
             }
+            Effect::EditVars {
+                name,
+                description,
+                set,
+                remove,
+            } => {
+                self.send(ControlCommand::EditVars {
+                    name,
+                    description,
+                    set,
+                    remove,
+                })
+                .await
+            }
             Effect::SetPolicy { name, patch } => {
                 self.send(ControlCommand::SetPolicy { name, patch }).await
             }

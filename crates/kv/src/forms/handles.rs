@@ -99,6 +99,12 @@ pub fn edit_handle(handle: &HandleInfo) -> Form {
         };
         fields.push(prefill(field, handle));
     }
+    if handle.kind == SecretKind::Env {
+        fields.push(Field::text("remove", "Remove variables").hint(format!(
+            "comma-separated; has {}",
+            handle.env_vars.join(", ")
+        )));
+    }
     Form::new(format!("Edit {}", handle.name), fields)
 }
 
@@ -171,10 +177,7 @@ fn prefill(field: Field, handle: &HandleInfo) -> Field {
         ("token", _) => field.hint("blank keeps the current token"),
         ("url", _) => field.hint("blank keeps the current URL"),
         ("base_url", _) => field.hint("blank keeps the current one"),
-        ("vars", _) => field.hint(format!(
-            "NAME=value, Enter adds; replaces all; blank keeps {}",
-            handle.env_vars.join(", ")
-        )),
+        ("vars", _) => field.hint("NAME=value, Enter adds or changes one; the others stay"),
         ("placement", Some(AuthPlacement::Query { .. })) => field.with_choice("query"),
         ("header", Some(AuthPlacement::Header { name, .. })) => field.with_text(name),
         ("template", Some(AuthPlacement::Header { template, .. })) => field.with_text(template),
@@ -214,6 +217,9 @@ fn add(form: &Form) -> Result<Effect, String> {
 fn update(handle: &HandleInfo, form: &Form) -> Result<Effect, String> {
     let description = form.text("description");
     let description = (description != handle.description).then(|| description.to_owned());
+    if handle.kind == SecretKind::Env {
+        return edit_vars(handle, form, description);
+    }
     let value = value(form, kind_name(handle.kind))?;
     if value.is_none() && handle.kind == SecretKind::Http {
         if !form.text("base_url").is_empty() {
@@ -230,6 +236,41 @@ fn update(handle: &HandleInfo, form: &Form) -> Result<Effect, String> {
         name: handle.name.clone(),
         description,
         value,
+    })
+}
+
+/// An `env` handle's edit: the variables typed are set over the ones it
+/// has, the ones named under Remove go, and the rest keep their values
+/// without being typed again.
+fn edit_vars(
+    handle: &HandleInfo,
+    form: &Form,
+    description: Option<String>,
+) -> Result<Effect, String> {
+    let field = form.field("vars");
+    if !field.text.is_empty() {
+        return Err("press Enter to add the variable you typed".into());
+    }
+    let set: BTreeMap<String, SecretText> = field.pairs.iter().cloned().collect();
+    let remove = list(form.text("remove"));
+    if let Some(unknown) = remove.iter().find(|name| !handle.env_vars.contains(name)) {
+        return Err(format!("{} has no variable {unknown}", handle.name));
+    }
+    if set.is_empty() && remove.is_empty() {
+        return match description {
+            Some(description) => Ok(Effect::Update {
+                name: handle.name.clone(),
+                description: Some(description),
+                value: None,
+            }),
+            None => Err("nothing changed".into()),
+        };
+    }
+    Ok(Effect::EditVars {
+        name: handle.name.clone(),
+        description,
+        set,
+        remove,
     })
 }
 

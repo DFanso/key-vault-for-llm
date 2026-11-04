@@ -2056,6 +2056,12 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
             description,
             value,
         } => update(vault, &name, description, value),
+        ControlCommand::EditVars {
+            name,
+            description,
+            set,
+            remove,
+        } => edit_vars(vault, &name, description, set, &remove),
         ControlCommand::ChangePassphrase { new_passphrase } => {
             match vault.change_passphrase(new_passphrase.expose(), KdfParams::RECOMMENDED) {
                 Ok(()) => Ok(Vec::new()),
@@ -2177,6 +2183,54 @@ fn update(
         validate_value(&value)?;
         updated.value = value;
     }
+    validate_secret(&updated)?;
+    check_scrub_budget(vault, &updated)?;
+    let warnings = warnings_for(&updated);
+    vault
+        .upsert(updated)
+        .map_err(|e| fail(ControlErrorCode::Invalid, e.to_string()))?;
+    save_or_restore(vault, name, Some(previous))?;
+    Ok(warnings)
+}
+
+/// Sets and takes out some of an `env` handle's variables and keeps the
+/// rest, so a handle can be repaired without typing every value again,
+/// even one whose values kv will not show.
+fn edit_vars(
+    vault: &mut Vault,
+    name: &str,
+    description: Option<String>,
+    set: BTreeMap<String, SecretText>,
+    remove: &[String],
+) -> Result<Vec<String>, Failure> {
+    let invalid = |message: String| Err(fail(ControlErrorCode::Invalid, message));
+    let previous = vault.get(name).cloned().ok_or_else(|| unknown(name))?;
+    let SecretValue::Env { vars } = &previous.value else {
+        return invalid(format!(
+            "{name} is not an env handle, so it has no variables"
+        ));
+    };
+    if set.is_empty() && remove.is_empty() && description.is_none() {
+        return invalid("nothing changed".into());
+    }
+    let mut vars = vars.clone();
+    for var in remove {
+        if vars.remove(var).is_none() {
+            return invalid(format!("{name} has no variable {}", envvars::shown(var)));
+        }
+    }
+    vars.extend(set);
+    if vars.is_empty() {
+        return invalid(format!(
+            "{name} would have no variables left; remove the handle instead"
+        ));
+    }
+    let mut updated = previous.clone();
+    if let Some(description) = description {
+        updated.description = description;
+    }
+    updated.value = SecretValue::Env { vars };
+    validate_value(&updated.value)?;
     validate_secret(&updated)?;
     check_scrub_budget(vault, &updated)?;
     let warnings = warnings_for(&updated);
@@ -2476,7 +2530,9 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::Add { secret, .. } => ("add", Some(secret.name.clone())),
         ControlCommand::Remove { name } => ("remove", Some(name.clone())),
         ControlCommand::SetPolicy { name, .. } => ("set_policy", Some(name.clone())),
-        ControlCommand::Update { name, .. } => ("update", Some(name.clone())),
+        ControlCommand::Update { name, .. } | ControlCommand::EditVars { name, .. } => {
+            ("update", Some(name.clone()))
+        }
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
         ControlCommand::Overview => ("overview", None),
