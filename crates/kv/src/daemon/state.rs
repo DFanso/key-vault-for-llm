@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use kv_core::VaultError;
 use kv_core::crypto::{KdfParams, SymmetricKey, fill_random};
 use kv_core::db::{RedisRefusal, check_redis, pg_read_only_violation, split_command};
-use kv_core::envvars::{self, MAX_ENV_TOTAL_LEN, MAX_ENV_VARS, MAX_VALUE_LEN};
+use kv_core::envvars::{self, MAX_ENV_VARS, MAX_VALUE_LEN, MAX_VALUES_LEN};
 use kv_core::policy::{
     Decision, DenyReason, Mode, Operation, Policy, evaluate, http_target, is_host_entry,
     program_name, validate_run,
@@ -661,6 +661,7 @@ impl Daemon {
             policy,
             created_at: 0,
             updated_at: 0,
+            from_share: Some(true),
         };
         if let Err(failure) = validate_value(&secret.value).and_then(|()| validate_secret(&secret))
         {
@@ -2060,7 +2061,9 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
     }
 }
 
-fn add(vault: &mut Vault, secret: Secret, replace: bool) -> Result<Vec<String>, Failure> {
+fn add(vault: &mut Vault, mut secret: Secret, replace: bool) -> Result<Vec<String>, Failure> {
+    // The user typed or pasted it, even over a handle a share delivered.
+    secret.from_share = Some(false);
     validate_value(&secret.value)?;
     validate_secret(&secret)?;
     let previous = vault.get(&secret.name).cloned();
@@ -2180,23 +2183,23 @@ fn unknown(name: &str) -> Failure {
     )
 }
 
-/// Why a program may not start with `secret`, if it may not: it still holds
-/// what a share delivered, and that sets variables kv refuses in a share
-/// now. Covers handles received before kv refused them. A handle the user
-/// has since changed holds their value, and only warned them.
+/// Why a program may not start with `secret`, if it may not: kv saved it
+/// from a share, and it sets variables kv refuses in a share now. Covers
+/// handles received before kv refused them. Only taking the variables out
+/// lifts it; forgetting the share's record does not, nor does an edit that
+/// keeps them. A handle the user adds themselves is only warned about.
 fn received_risky(vault: &Vault, secret: &Secret) -> Option<String> {
     let risky = risky_vars(&secret.value);
-    if risky.is_empty()
-        || !vault
-            .shares()
-            .holds_received(&secret.name, &share::value_digest(&secret.value))
-    {
+    let from_share = secret
+        .from_share
+        .unwrap_or_else(|| vault.shares().names_received(&secret.name));
+    if risky.is_empty() || !from_share {
         return None;
     }
     Some(format!(
         "{} came from a share and sets {}, which change how a program runs or where it \
          connects, so kv does not start programs with it; ask the user to remove those \
-         variables from it in kv's window",
+         variables from it in kv's window, or to add the handle again as their own",
         secret.name,
         envvars::list(&risky)
     ))
@@ -2291,14 +2294,17 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
                 return invalid("an env handle holds at most 256 variables");
             }
             if let Some(problem) = vars.keys().find_map(|k| envvars::name_problem(k)) {
-                return invalid(problem);
+                return invalid(&problem);
             }
-            if vars.values().any(|v| v.expose().len() > MAX_VALUE_LEN) {
-                return invalid(TOO_LONG);
+            if let Some((name, _)) = vars.iter().find(|(_, v)| v.expose().len() > MAX_VALUE_LEN) {
+                return invalid(&format!(
+                    "the value of {} is longer than 4096 bytes, which kv does not take",
+                    envvars::shown(name)
+                ));
             }
-            let total: usize = vars.iter().map(|(k, v)| k.len() + v.expose().len()).sum();
-            if total > MAX_ENV_TOTAL_LEN {
-                return invalid("an env handle holds at most 32 KiB of names and values");
+            let total: usize = vars.values().map(|v| v.expose().len()).sum();
+            if total > MAX_VALUES_LEN {
+                return invalid("an env handle holds at most 8 KiB of values");
             }
         }
     }

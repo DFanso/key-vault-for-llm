@@ -124,6 +124,7 @@ fn http_secret(name: &str) -> Secret {
         },
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 

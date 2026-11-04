@@ -219,7 +219,8 @@ fn values_too_long_to_scrub_and_bad_names_are_refused_on_add() {
 }
 
 /// A handle received before kv refused such shares: Bob's vault is edited on
-/// disk the way an older kv would have saved it.
+/// disk the way an older kv would have saved it. (How a vault with no marks
+/// at all opens is tested in kv-core's vault module.)
 fn received_before_the_fix(bob: &mut Fixture) {
     let code = request(bob);
     let share = hostile_share(&code, vars(&[("API_KEY", API_KEY)]));
@@ -231,6 +232,7 @@ fn received_before_the_fix(bob: &mut Fixture) {
     let path = bob.dir.path().join("vault.kv");
     let mut vault = Vault::unlock(&path, PASS).unwrap();
     let mut held = vault.get("app-env").cloned().unwrap();
+    assert_eq!(held.from_share, Some(true));
     held.value = vars(&[
         ("API_KEY", API_KEY),
         ("NODE_OPTIONS", "--require /tmp/x.js"),
@@ -246,32 +248,145 @@ fn received_before_the_fix(bob: &mut Fixture) {
     bob.control(ControlCommand::Unlock);
 }
 
-#[test]
-fn a_handle_received_before_the_fix_starts_no_program_until_the_user_changes_it() {
-    let mut bob = Fixture::new();
-    received_before_the_fix(&mut bob);
+fn exec_refused(bob: &mut Fixture) -> String {
     let cwd = bob.dir.path().to_path_buf();
-
     let (kind, message) = bob
-        .exec(run(&["app-env"], &["node", "app.js"], cwd.clone()))
+        .exec(run(&["app-env"], &["node", "app.js"], cwd))
         .unwrap_err();
     assert_eq!(kind, AgentErrorCode::PolicyDenied);
     assert!(message.contains("NODE_OPTIONS"), "{message}");
-    assert!(message.contains("came from a share"), "{message}");
-    let (kind, message) = bob.run_job(launch("app-env")).unwrap_err();
-    assert_eq!(kind, AgentErrorCode::PolicyDenied);
-    assert!(message.contains("NODE_OPTIONS"), "{message}");
+    message
+}
 
-    // The user takes the variable out; the handle is theirs now and works.
-    bob.control(ControlCommand::Update {
-        name: "app-env".into(),
-        description: None,
-        value: Some(vars(&[("API_KEY", API_KEY)])),
+fn forget_the_record(bob: &mut Fixture) {
+    let token = bob.token();
+    let id = bob.overview(&token).shares.received[0].id.clone();
+    let response = bob.send(None, Some(&token), ControlCommand::ForgetShare { id });
+    assert!(
+        matches!(response, ControlResponse::Done { .. }),
+        "{response:?}"
+    );
+    assert!(bob.overview(&token).shares.received.is_empty());
+}
+
+#[test]
+fn a_handle_received_before_the_fix_starts_no_program_until_its_variables_go() {
+    {
+        let mut bob = Fixture::new();
+        received_before_the_fix(&mut bob);
+        let cwd = bob.dir.path().to_path_buf();
+
+        assert!(exec_refused(&mut bob).contains("came from a share"));
+        let (kind, message) = bob.run_job(launch("app-env")).unwrap_err();
+        assert_eq!(kind, AgentErrorCode::PolicyDenied);
+        assert!(message.contains("NODE_OPTIONS"), "{message}");
+
+        // Forgetting the share's record does not lift it, nor does an edit
+        // that keeps the variable.
+        forget_the_record(&mut bob);
+        exec_refused(&mut bob);
+        bob.control(ControlCommand::Update {
+            name: "app-env".into(),
+            description: None,
+            value: Some(vars(&[
+                ("API_KEY", "sk-test-rotated-0123456789"),
+                ("NODE_OPTIONS", "--require /tmp/x.js"),
+            ])),
+        });
+        exec_refused(&mut bob);
+        // Through a restart too.
+        bob.send(None, None, ControlCommand::Lock);
+        bob.control(ControlCommand::Unlock);
+        exec_refused(&mut bob);
+
+        // Taking the variable out does.
+        bob.control(ControlCommand::Update {
+            name: "app-env".into(),
+            description: None,
+            value: Some(vars(&[("API_KEY", API_KEY)])),
+        });
+        let job = bob
+            .exec(run(&["app-env"], &["node", "app.js"], cwd))
+            .unwrap();
+        assert_eq!(job.env.len(), 1);
+    }
+}
+
+#[test]
+fn adding_the_handle_again_as_your_own_lifts_it() {
+    let mut bob = Fixture::new();
+    received_before_the_fix(&mut bob);
+    let mut own = env_secret(
+        "app-env",
+        &[
+            ("API_KEY", API_KEY),
+            ("NODE_OPTIONS", "--max-old-space-size=4096"),
+        ],
+        &["node"],
+        Mode::Auto,
+    );
+    own.from_share = Some(true); // what the client says does not count
+    bob.control(ControlCommand::Add {
+        secret: own,
+        replace: true,
     });
-    let job = bob
-        .exec(run(&["app-env"], &["node", "app.js"], cwd))
-        .unwrap();
-    assert_eq!(job.env.len(), 1);
+    let cwd = bob.dir.path().to_path_buf();
+    assert!(
+        bob.exec(run(&["app-env"], &["node", "app.js"], cwd))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_handle_holds_at_most_8_kib_of_values() {
+    let mut f = Fixture::new();
+    let full = "v".repeat(4096);
+    assert!(matches!(
+        add(
+            &mut f,
+            "two",
+            vars(&[("A", full.as_str()), ("B", full.as_str())])
+        ),
+        ControlResponse::Done { .. }
+    ));
+    let third = "w".repeat(3000);
+    match add(
+        &mut f,
+        "three",
+        vars(&[
+            ("A", third.as_str()),
+            ("B", third.as_str()),
+            ("C", third.as_str()),
+        ]),
+    ) {
+        ControlResponse::Error { code, message } => {
+            assert_eq!(code, ControlErrorCode::Invalid);
+            assert!(message.contains("8 KiB"), "{message}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let mut bob = Fixture::new();
+    let code = request(&mut bob);
+    let share = hostile_share(
+        &code,
+        vars(&[
+            ("A", third.as_str()),
+            ("B", third.as_str()),
+            ("C", third.as_str()),
+        ]),
+    );
+    let (_, message) = refused(receive(&mut bob, &share));
+    assert!(message.contains("8 KiB"), "{message}");
+}
+
+#[test]
+fn messages_show_names_someone_else_picked_safely() {
+    let mut bob = Fixture::new();
+    let code = request(&mut bob);
+    let share = hostile_share(&code, vars(&[("BAD\u{1b}[2J", API_KEY)]));
+    let (_, message) = refused(receive(&mut bob, &share));
+    assert!(!message.contains('\u{1b}'), "{message:?}");
+    assert!(message.contains("BAD??2J"), "{message}");
 }
 
 #[test]

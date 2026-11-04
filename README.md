@@ -278,10 +278,17 @@ runs or where it connects, such as `PATH`, `LD_PRELOAD`, `DYLD_*`,
 `NODE_OPTIONS`, `GIT_SSH_COMMAND`, package-manager settings (`npm_config_*`,
 `PIP_*`, `UV_*`) or `*_PROXY`: every program kv starts with the handle would
 get them. It won't send a handle that sets them either. A handle you add
-yourself may set them, with a warning. A handle received from an older kv
-that sets one starts no program until you change it. Values longer than 4096
-bytes are refused everywhere, since kv's output scrubber would need too much
-memory for them.
+yourself may set them, with a warning. A handle kv saved from a share that
+sets one, such as one received by an older kv, starts no program until you
+take those variables out of it or add it again as your own; forgetting the
+share on the Shares tab doesn't change that.
+
+kv also refuses a value, token or URL longer than 4096 bytes, and an env
+handle with more than 8 KiB of values, since kv's output scrubber would need
+too much memory and time for them. These limits are checked whenever a value
+is saved (add, update, a share sent or received), not when a vault is opened
+or a program starts, so a handle saved by an older kv keeps working; you can
+only change its value to one within them.
 
 You don't need an agent for any of it. The same three steps are buttons on the
 Shares tab of kv's window, and each shows its code or share with a Copy

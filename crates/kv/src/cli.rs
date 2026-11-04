@@ -415,6 +415,7 @@ async fn run(cli: Cli) -> Result<()> {
                 policy,
                 created_at: 0,
                 updated_at: 0,
+                from_share: None,
             };
             let command = ControlCommand::Add {
                 secret,
