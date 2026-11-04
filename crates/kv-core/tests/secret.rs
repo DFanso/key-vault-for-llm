@@ -386,3 +386,79 @@ fn handle_info_shows_only_the_program_a_handle_runs() {
     assert!(!json.contains("10.0.0.5"), "{json}");
     assert!(!json.contains("ssh-mcp"), "{json}");
 }
+
+#[test]
+fn a_file_name_is_made_safe_to_create_on_windows_and_everywhere_else() {
+    use kv_core::secret::{file_base_name, windows_safe_name};
+
+    for (given, kept) in [
+        ("passwords.txt", "passwords.txt"),
+        ("C:\\Users\\leo\\con:words.bin", "con_words.bin"),
+        ("a:b.txt", "a_b.txt"),
+        ("what?*.txt", "what__.txt"),
+        ("a<b>c\"d|e.txt", "a_b_c_d_e.txt"),
+        ("bad.txt. . ", "bad.txt"),
+        ("CON", "_CON"),
+        ("con.txt", "_con.txt"),
+        ("Nul.tar.gz", "_Nul.tar.gz"),
+        ("AUX ", "_AUX"),
+        ("com1.log", "_com1.log"),
+        ("LPT9", "_LPT9"),
+        ("COM0", "_COM0"),
+        ("COM\u{b9}.txt", "_COM\u{b9}.txt"),
+        ("CONIN$", "_CONIN$"),
+        // Not device names.
+        ("console.txt", "console.txt"),
+        ("com10", "com10"),
+        ("COM", "COM"),
+        ("lpt", "lpt"),
+        ("con-1.txt", "con-1.txt"),
+        ("xcon", "xcon"),
+        // Whatever is not ASCII is kept as it is.
+        ("\u{e9}\u{e9}", "\u{e9}\u{e9}"),
+        (
+            "\u{65e5}\u{672c}\u{8a9e}.txt",
+            "\u{65e5}\u{672c}\u{8a9e}.txt",
+        ),
+    ] {
+        assert_eq!(file_base_name(given).as_deref(), Ok(kept), "{given:?}");
+        assert_eq!(
+            SecretValue::file(given, b"x")
+                .unwrap()
+                .file_parts()
+                .unwrap()
+                .0,
+            kept,
+            "{given:?}"
+        );
+    }
+    // What is left of a name can be nothing.
+    assert_eq!(windows_safe_name("..."), "");
+    assert!(file_base_name("...").is_err());
+    assert!(file_base_name("   ").is_err());
+}
+
+#[test]
+fn a_file_value_with_an_unsafe_name_does_not_check_out() {
+    use kv_core::secret::FileError;
+
+    let SecretValue::File { data, sha256, .. } = SecretValue::file("list.txt", b"x").unwrap()
+    else {
+        unreachable!()
+    };
+    for name in [
+        "a:b.txt",
+        "CON",
+        "nul.txt",
+        "what?.txt",
+        "trailing.",
+        "COM1",
+    ] {
+        let value = SecretValue::File {
+            file_name: name.into(),
+            data: data.clone(),
+            sha256: sha256.clone(),
+        };
+        assert_eq!(value.verify_file(), Err(FileError::BadName), "{name}");
+    }
+}
