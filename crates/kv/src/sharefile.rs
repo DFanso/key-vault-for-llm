@@ -75,34 +75,23 @@ pub fn downloads(paths: &Paths) -> PathBuf {
 }
 
 /// `name` as a file name that is safe to create on any system: no
-/// separators, no characters Windows reads specially (`:` would start a
-/// stream, `*` and `?` are wildcards), no control characters, no trailing
-/// dots or spaces, and not one of the device names Windows reserves.
+/// separators, no control characters, nothing Windows reads specially (see
+/// `kv_core::secret::windows_safe_name`), and never empty.
 pub fn safe_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {
-            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+            if c.is_control() || matches!(c, '/' | '\\') {
                 '_'
             } else {
                 c
             }
         })
         .collect();
-    let cleaned = cleaned.trim_end_matches(['.', ' ']).trim_start();
-    let stem = cleaned.split('.').next().unwrap_or_default();
-    let reserved = ["CON", "PRN", "AUX", "NUL"]
-        .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
-        || ["COM", "LPT"].iter().any(|device| {
-            stem.len() == 4
-                && stem[..3].eq_ignore_ascii_case(device)
-                && stem.as_bytes()[3].is_ascii_digit()
-        });
-    match cleaned {
+    let safe = kv_core::secret::windows_safe_name(cleaned.trim_start());
+    match safe.as_str() {
         "" | "." | ".." => "file".to_owned(),
-        _ if reserved => format!("_{cleaned}"),
-        _ => cleaned.to_owned(),
+        _ => safe,
     }
 }
 
@@ -301,6 +290,12 @@ mod tests {
         assert_eq!(safe_file_name(".."), "file");
         assert_eq!(safe_file_name(""), "file");
         assert_eq!(safe_file_name("tab\there"), "tab_here");
+        // A stem of four bytes that is not four letters once crashed the
+        // device-name check, which cut it at a byte that is not a boundary.
+        assert_eq!(safe_file_name("\u{e9}\u{e9}"), "\u{e9}\u{e9}");
+        assert_eq!(safe_file_name("\u{e9}\u{e9}.txt"), "\u{e9}\u{e9}.txt");
+        assert_eq!(safe_file_name("COM\u{b2}"), "_COM\u{b2}");
+        assert_eq!(safe_file_name("\u{65e5}\u{672c}"), "\u{65e5}\u{672c}");
     }
 
     #[test]
