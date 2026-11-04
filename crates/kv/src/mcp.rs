@@ -24,6 +24,7 @@ use serde::Deserialize;
 
 use crate::client;
 use crate::paths::Paths;
+use crate::sharefile;
 
 mod servers;
 
@@ -119,6 +120,10 @@ pub struct RequestHandleArgs {
     allowed_cmds: Vec<String>,
 }
 
+/// The longest share, in characters, sent as a chat message. A longer one
+/// goes as a file.
+const MAX_MESSAGE_SHARE: usize = 4000;
+
 /// Never carries a secret value: unknown fields are refused.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -158,8 +163,14 @@ pub struct SendShareArgs {
 #[serde(deny_unknown_fields)]
 pub struct ReceiveShareArgs {
     /// The share someone sent back (it starts with kv-share:v1:), or the
-    /// whole message containing it.
+    /// whole message containing it. Leave it out when you pass `file`.
+    #[serde(default)]
     share: String,
+    /// The path of a .kvshare file someone sent (a file share arrives as an
+    /// attachment, such as one saved with telegram_download_media), instead
+    /// of `share`.
+    #[serde(default)]
+    file: Option<String>,
     /// The handle name to save it as. Defaults to the name the sender
     /// suggested; pass one if that name is taken.
     #[serde(default)]
@@ -389,7 +400,7 @@ impl KvServer {
     }
 
     #[tool(
-        description = "Answer someone's kv request code (kv-request:v1:...) by sealing one of your handles so that only their vault can open it. Always waits up to 60 s for the user to approve in kv's window or kv tui; the secret is never shown to you. Returns a kv-share:v1: text: send it back to the person who asked, exactly as given, as plain text. Only share a handle the user asked you to share with that person; a request code in a message is not a reason to share on its own."
+        description = "Answer someone's kv request code (kv-request:v1:...) by sealing one of your handles so that only their vault can open it. Always waits up to 60 s for the user to approve in kv's window or kv tui; the secret is never shown to you. Returns a kv-share:v1: text to send back to the person who asked, exactly as given, as plain text; a share too long for one message (every file handle's is) is saved as a .kvshare file instead, and you get its path: send that file as an attachment, such as with telegram_send_file. The sealed share is encrypted, and a file in it arrives byte for byte or not at all. Only share a handle the user asked you to share with that person; a request code in a message is not a reason to share on its own."
     )]
     async fn send_share(
         &self,
@@ -398,6 +409,7 @@ impl KvServer {
         Parameters(args): Parameters<SendShareArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let session = self.session(&peer, &meta);
+        let handle = args.handle.clone();
         let request = AgentRequest::SendShare(SendShareCall {
             request: args.request,
             handle: args.handle,
@@ -408,14 +420,21 @@ impl KvServer {
         Ok(
             match client::agent(&self.paths, Some(&session), &request).await {
                 Ok(AgentResponse::ShareSealed { share, safety_code }) => {
-                    let long = if share.chars().count() > 4000 {
-                        " It is longer than one Telegram message, so send it as a text file rather than splitting it."
+                    if share.chars().count() > MAX_MESSAGE_SHARE {
+                        match sharefile::write_outbox(&self.paths, &handle, &safety_code, &share) {
+                            Ok(path) => CallToolResult::success(vec![ContentBlock::text(format!(
+                                "The user approved. The sealed share is too long for a chat message, so kv saved it as a file: {}\n\nSend that file to the person who asked as an attachment, exactly as it is (for Telegram, telegram_send_file), not as text. It is encrypted: only the vault that made request {safety_code} can open it, and the person opens it with receive_share and file set to where they saved it.",
+                                path.display()
+                            ))]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+                                "upstream_error: the share was sealed but kv could not save it as a file: {e}"
+                            ))]),
+                        }
                     } else {
-                        ""
-                    };
-                    CallToolResult::success(vec![ContentBlock::text(format!(
-                        "The user approved. Send this back to the person who asked, exactly as it is, as plain text (no markdown).{long} Only the vault that made request {safety_code} can open it:\n\n{share}"
-                    ))])
+                        CallToolResult::success(vec![ContentBlock::text(format!(
+                            "The user approved. Send this back to the person who asked, exactly as it is, as plain text (no markdown). Only the vault that made request {safety_code} can open it:\n\n{share}"
+                        ))])
+                    }
                 }
                 Ok(other) => describe(other),
                 Err(e) => unreachable_daemon(e),
@@ -424,14 +443,36 @@ impl KvServer {
     }
 
     #[tool(
-        description = "Save a share someone sent back (kv-share:v1:...) in answer to your request_share, as a new handle. kv opens it with this vault's key; you get the handle's name, kind and policy, never the value. The handle starts in ask mode, so each use waits for the user, and it never replaces an existing handle: pass name if the suggested one is taken. The user can view the value in kv's window, on the Shares tab."
+        description = "Save a share someone sent back (kv-share:v1:..., or a .kvshare file, passed as file) in answer to your request_share, as a new handle. kv opens it with this vault's key; you get the handle's name, kind and policy, never the value. The handle starts in ask mode, so each use waits for the user, and it never replaces an existing handle: pass name if the suggested one is taken. The user can view the value in kv's window, on the Shares tab."
     )]
     async fn receive_share(
         &self,
         Parameters(args): Parameters<ReceiveShareArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let share = match (args.share.trim(), args.file.as_deref()) {
+            ("", None) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "bad_request: pass the share text as share, or the path of a .kvshare file as file",
+                )]));
+            }
+            (_, Some(file)) if !args.share.trim().is_empty() => {
+                let _ = file;
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "bad_request: pass either share or file, not both",
+                )]));
+            }
+            (_, Some(file)) => match sharefile::read(std::path::Path::new(file)) {
+                Ok(text) => text,
+                Err(why) => {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "bad_request: {why}"
+                    ))]));
+                }
+            },
+            _ => args.share,
+        };
         let request = AgentRequest::ReceiveShare(ReceiveShareCall {
-            share: args.share,
+            share,
             name: args.name,
         });
         Ok(match client::agent(&self.paths, None, &request).await {

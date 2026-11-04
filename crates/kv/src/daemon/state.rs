@@ -22,7 +22,7 @@ use kv_core::proto::{
 };
 use kv_core::scrub::{self, MAX_TOTAL_COST, MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
-    AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
+    AuthPlacement, Secret, SecretKind, SecretText, SecretValue, file_env_var, validate_handle,
 };
 use kv_core::share::{self, OpenRequest, Received, Sent, ShareError, ShareRequest, SharedSecret};
 use kv_core::vault::{DeviceKind, DeviceSlot, Vault, device_slots};
@@ -30,6 +30,7 @@ use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::audit::{Audit, Use};
+use crate::broker::files::{self, JobFile};
 use crate::broker::lease::{DEFAULT_TTL, MAX_LEASES, MAX_TTL};
 use crate::broker::{ConnectJob, DbJob, ExecJob, HttpJob, Leases, RoleChecks, RunJob};
 use crate::throttle::Throttle;
@@ -460,6 +461,21 @@ impl Daemon {
         }
         self.touch(now);
         let mut detail = format!("send {} to request {safety}", call.handle);
+        // A file is named, sized and given its fingerprint, so the user knows
+        // what leaves and the receiver can check the same one arrived.
+        if let Some(Secret {
+            value: value @ SecretValue::File { file_name, .. },
+            ..
+        }) = self
+            .vault
+            .as_ref()
+            .and_then(|vault| vault.get(&call.handle))
+            && let (Some(len), Some(fingerprint)) = (value.file_len(), value.file_fingerprint())
+        {
+            detail.push_str(&format!(
+                " (the file {file_name}, {len} bytes, fingerprint {fingerprint})"
+            ));
+        }
         if !sealed.to.is_empty() {
             detail.push_str(&format!(" from {}", sealed.to));
         }
@@ -1001,7 +1017,21 @@ impl Daemon {
                 bad("timeout_secs must be between 1 and 600"),
             );
         }
+        // A `{file:x}` in an argument is replaced by the path of x's file, so
+        // x has to be one of the handles this exec uses.
+        for argument in call.argv.iter().skip(1) {
+            if let Some(stray) = files::placeholders(argument)
+                .into_iter()
+                .find(|named| !call.handles.iter().any(|h| h == named))
+            {
+                let message = format!(
+                    "the arguments name {{file:{stray}}}, but {stray} is not one of the handles"
+                );
+                return refuse(self, "invalid", bad(&message));
+            }
+        }
         let mut env = Vec::new();
+        let mut job_files: Vec<JobFile> = Vec::new();
         let mut set_by: BTreeMap<String, &str> = BTreeMap::new();
         let mut asks = Vec::new();
         let mut asked = false;
@@ -1051,6 +1081,35 @@ impl Daemon {
                     env.push((var.clone(), value.clone()));
                 }
             }
+            if let Some((file_name, bytes)) = secret.value.file_parts() {
+                let env_var = file_env_var(name);
+                let key = if cfg!(windows) {
+                    env_var.to_ascii_uppercase()
+                } else {
+                    env_var.clone()
+                };
+                if let Some(other) = set_by.insert(key, name) {
+                    let message = if other == name.as_str() {
+                        format!("{name} is listed twice")
+                    } else {
+                        format!("{other} and {name} both set {env_var}")
+                    };
+                    return refuse(self, "invalid", bad(&message));
+                }
+                job_files.push(JobFile {
+                    handle: name.clone(),
+                    file_name,
+                    bytes,
+                    env_var,
+                });
+            } else if matches!(secret.value, SecretValue::File { .. }) {
+                let message = format!("{name} does not hold a readable file");
+                return refuse(
+                    self,
+                    "invalid",
+                    agent_error(AgentErrorCode::UpstreamError, message),
+                );
+            }
         }
         if !asks.is_empty() && self.approvals.len() >= MAX_PENDING {
             return refuse(self, "denied", too_many_waiting());
@@ -1058,13 +1117,18 @@ impl Daemon {
         self.touch(now);
         let detail = serde_json::to_string(&call.argv).unwrap_or_default();
         let cwd = call.cwd.display().to_string();
-        let env_names: Vec<String> = env.iter().map(|(name, _)| name.clone()).collect();
+        let env_names: Vec<String> = env
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(job_files.iter().map(|file| file.env_var.clone()))
+            .collect();
         let job = Prepared::Exec(Box::new(ExecJob {
             handles: call.handles,
             argv: call.argv,
             cwd: call.cwd,
             timeout,
             env,
+            files: job_files,
             scrubber: self.scrubber(),
             audit: self.audit.clone(),
             started: now,
@@ -1703,6 +1767,9 @@ impl Daemon {
                     handle: name.clone(),
                     fields,
                 }),
+            ControlCommand::ExportFile { handle: name } => self
+                .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
+                .and_then(|vault| export_file(vault, &name)),
             ControlCommand::ForgetShare { id } => self
                 .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .and_then(|vault| forget_share(vault, &id))
@@ -2095,6 +2162,7 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::Decide { .. }
         | ControlCommand::DismissRequest { .. }
         | ControlCommand::RevealShare { .. }
+        | ControlCommand::ExportFile { .. }
         | ControlCommand::ForgetShare { .. }
         | ControlCommand::RequestShare(_)
         | ControlCommand::SendShare(_)
@@ -2247,6 +2315,7 @@ fn kind_name(kind: SecretKind) -> &'static str {
         SecretKind::Postgres => "postgres",
         SecretKind::Redis => "redis",
         SecretKind::Env => "env",
+        SecretKind::File => "file",
     }
 }
 
@@ -2412,6 +2481,11 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
                 return invalid("a redis handle needs a redis:// or rediss:// URL");
             }
         }
+        SecretValue::File { .. } => {
+            if let Err(why) = value.verify_file() {
+                return invalid(&why.to_string());
+            }
+        }
         SecretValue::Env { vars } => {
             if vars.len() > MAX_ENV_VARS {
                 return invalid("an env handle holds at most 256 variables");
@@ -2516,6 +2590,20 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
                 "{name} has no allowed commands, so every exec with it is denied; add one with `kv policy {name} --cmd <program>`"
             ));
         }
+        SecretValue::File { .. } => {
+            if secret.policy.allowed_cmds.is_empty() {
+                warnings.push(format!(
+                    "{name} has no allowed commands, so every exec with it is denied; add one with `kv policy {name} --cmd <program>`"
+                ));
+            }
+            if secret.sensitive_values().is_empty() {
+                warnings.push(format!(
+                    "{name} is not a text file with lines of {MIN_SECRET_LEN} characters or more, \
+                     so kv cannot scrub its contents from output; a program that prints the file \
+                     would show it"
+                ));
+            }
+        }
         _ => {}
     }
     warnings
@@ -2541,6 +2629,7 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::EnrollDevice { .. } => ("enroll_device", None),
         ControlCommand::RemoveDevice { .. } => ("remove_device", None),
         ControlCommand::RevealShare { handle } => ("reveal_share", Some(handle.clone())),
+        ControlCommand::ExportFile { handle } => ("export_file", Some(handle.clone())),
         ControlCommand::ForgetShare { .. } => ("forget_share", None),
         ControlCommand::RequestShare(_) => ("request_share", None),
         ControlCommand::SendShare(call) => ("send_share", Some(call.handle.clone())),
@@ -2585,6 +2674,57 @@ fn reveal_share(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure
             .iter()
             .map(|(name, value)| field(name, value))
             .collect(),
+        // The bytes are not text to read: the window shows what the file is
+        // and offers to save it, which is `export_file`.
+        value @ SecretValue::File { file_name, .. } => {
+            let mut fields = vec![field("File", &SecretText::new(file_name.clone()))];
+            if let Some(len) = value.file_len() {
+                fields.push(field("Size", &SecretText::new(format!("{len} bytes"))));
+            }
+            if let Some(fingerprint) = value.file_fingerprint() {
+                fields.push(field("Fingerprint", &SecretText::new(fingerprint)));
+            }
+            fields
+        }
+    })
+}
+
+/// A file handle's bytes, for the user to save. Only a file kv received:
+/// the user already has the ones they added.
+fn export_file(vault: &Vault, name: &str) -> Result<ControlResponse, Failure> {
+    let secret = vault.get(name).ok_or_else(|| unknown(name))?;
+    let SecretValue::File {
+        file_name,
+        data,
+        sha256,
+    } = &secret.value
+    else {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            format!("{name} is not a file handle"),
+        ));
+    };
+    if !vault
+        .shares()
+        .holds_received(name, &share::value_digest(&secret.value))
+    {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            format!(
+                "{name} does not hold a file kv received through a share; kv gives back only \
+                 those"
+            ),
+        ));
+    }
+    secret
+        .value
+        .verify_file()
+        .map_err(|e| internal(format!("{name} does not check out: {e}")))?;
+    Ok(ControlResponse::File {
+        handle: name.to_owned(),
+        file_name: file_name.clone(),
+        sha256: sha256.clone(),
+        data: data.clone(),
     })
 }
 

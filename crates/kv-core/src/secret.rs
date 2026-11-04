@@ -5,12 +5,62 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+use crate::envvars::MAX_VALUE_LEN;
 use crate::error::VaultError;
 use crate::policy::{Mode, Policy};
+use crate::scrub::MIN_SECRET_LEN;
+
+/// Most bytes one `file` handle holds. A share of it has to fit the
+/// vault, the control socket's frame and a chat attachment.
+pub const MAX_FILE_LEN: usize = 1024 * 1024;
+
+/// Longest file name a `file` handle keeps, in bytes.
+const MAX_FILE_NAME_LEN: usize = 255;
+
+/// Why a file cannot become a handle's value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FileError {
+    #[error("the file has no name")]
+    NoName,
+    #[error("the file's name is not one kv can keep")]
+    BadName,
+    #[error("a file handle holds at most 1 MiB, and this file is {0} bytes")]
+    TooLarge(usize),
+    /// The bytes are not the ones the value's SHA-256 was made from, or do
+    /// not decode.
+    #[error("the file is not the one that was sent: its contents do not match its checksum")]
+    Altered,
+}
+
+/// The part of `name` after the last `/` or `\`: all a file handle keeps of
+/// where a file came from, and all a receiver is told, so a share can never
+/// carry a path that climbs out of the folder the file is saved in.
+pub fn file_base_name(name: &str) -> Result<String, FileError> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    if base.is_empty() {
+        return Err(FileError::NoName);
+    }
+    if matches!(base, "." | "..")
+        || base.len() > MAX_FILE_NAME_LEN
+        || base.chars().any(char::is_control)
+    {
+        return Err(FileError::BadName);
+    }
+    Ok(base.to_owned())
+}
+
+/// The variable that carries a `file` handle's path to a program kv
+/// starts: `KV_FILE_` and the handle's name in capitals.
+pub fn file_env_var(handle: &str) -> String {
+    format!("KV_FILE_{}", handle.to_ascii_uppercase().replace('-', "_"))
+}
 
 /// A secret string. Zeroed on drop; `Debug` never shows it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +90,7 @@ pub enum SecretKind {
     Postgres,
     Redis,
     Env,
+    File,
 }
 
 /// Where an HTTP token goes on the outgoing request.
@@ -76,6 +127,18 @@ pub enum SecretValue {
     Env {
         vars: BTreeMap<String, SecretText>,
     },
+    /// Any file, kept as it is: raw bytes, never read as text. kv hands
+    /// it to programs as a file and never shows it to an agent.
+    File {
+        /// The file's base name, kept so a program and a receiver see it.
+        file_name: String,
+        /// The file's bytes as standard padded base64.
+        data: SecretText,
+        /// SHA-256 of the bytes, in lowercase hex. A share carries it so
+        /// the receiver can tell the file arrived exactly as it left.
+        #[serde(default)]
+        sha256: String,
+    },
 }
 
 impl SecretValue {
@@ -85,7 +148,79 @@ impl SecretValue {
             Self::Postgres { .. } => SecretKind::Postgres,
             Self::Redis { .. } => SecretKind::Redis,
             Self::Env { .. } => SecretKind::Env,
+            Self::File { .. } => SecretKind::File,
         }
+    }
+
+    /// A `file` value holding `bytes` exactly, under the base name of
+    /// `file_name`.
+    pub fn file(file_name: &str, bytes: &[u8]) -> Result<Self, FileError> {
+        let file_name = file_base_name(file_name)?;
+        if bytes.len() > MAX_FILE_LEN {
+            return Err(FileError::TooLarge(bytes.len()));
+        }
+        Ok(Self::File {
+            file_name,
+            data: SecretText::new(STANDARD.encode(bytes)),
+            sha256: hex::encode(Sha256::digest(bytes)),
+        })
+    }
+
+    /// Checks that a `file` value is what it says: a usable base name,
+    /// bytes that decode and fit, and a checksum that matches them. A
+    /// value of another kind passes.
+    pub fn verify_file(&self) -> Result<(), FileError> {
+        let Self::File {
+            file_name, sha256, ..
+        } = self
+        else {
+            return Ok(());
+        };
+        if file_base_name(file_name)? != *file_name {
+            return Err(FileError::BadName);
+        }
+        let (_, bytes) = self.file_parts().ok_or(FileError::Altered)?;
+        if bytes.len() > MAX_FILE_LEN {
+            return Err(FileError::TooLarge(bytes.len()));
+        }
+        if hex::encode(Sha256::digest(&bytes[..])) != *sha256 {
+            return Err(FileError::Altered);
+        }
+        Ok(())
+    }
+
+    /// Twelve characters such as `A1B2-C3D4-E5F6` from the file's
+    /// checksum, which the sender and the receiver can read out to each
+    /// other to confirm the same file.
+    pub fn file_fingerprint(&self) -> Option<String> {
+        let Self::File { sha256, .. } = self else {
+            return None;
+        };
+        let head = sha256.get(..12)?.to_ascii_uppercase();
+        Some(format!("{}-{}-{}", &head[..4], &head[4..8], &head[8..]))
+    }
+
+    /// A `file` value's name and bytes; `None` for any other kind, or
+    /// bytes that do not decode.
+    pub fn file_parts(&self) -> Option<(String, Zeroizing<Vec<u8>>)> {
+        let Self::File {
+            file_name, data, ..
+        } = self
+        else {
+            return None;
+        };
+        let bytes = STANDARD.decode(data.expose()).ok()?;
+        Some((file_name.clone(), Zeroizing::new(bytes)))
+    }
+
+    /// The size in bytes of a `file` value's file.
+    pub fn file_len(&self) -> Option<usize> {
+        let Self::File { data, .. } = self else {
+            return None;
+        };
+        let text = data.expose();
+        let padding = text.bytes().rev().take_while(|b| *b == b'=').count();
+        Some((text.len() / 4 * 3).saturating_sub(padding))
     }
 }
 
@@ -144,6 +279,7 @@ impl Secret {
     pub fn info(&self) -> HandleInfo {
         let env_vars = match &self.value {
             SecretValue::Env { vars } => vars.keys().cloned().collect(),
+            SecretValue::File { .. } => vec![file_env_var(&self.name)],
             _ => Vec::new(),
         };
         let auth = match &self.value {
@@ -236,6 +372,35 @@ impl Secret {
             }
             SecretValue::Env { vars } => {
                 out.extend(vars.values().map(|v| Zeroizing::new(v.expose().to_owned())));
+            }
+            SecretValue::File { .. } => out.extend(self.file_lines()),
+        }
+        out
+    }
+
+    /// For a text file, each line a program could print: the scrubber
+    /// cannot take the whole file, but it takes its lines. A binary file
+    /// has none. Lines too short to scrub are left out, repeats kept once,
+    /// and a line longer than a value may be is cut into pieces that are.
+    fn file_lines(&self) -> Vec<Zeroizing<String>> {
+        let Some((_, bytes)) = self.value.file_parts() else {
+            return Vec::new();
+        };
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return Vec::new();
+        };
+        if text.contains('\0') {
+            return Vec::new();
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for line in text.lines().map(str::trim) {
+            let chars: Vec<char> = line.chars().collect();
+            for piece in chars.chunks(MAX_VALUE_LEN) {
+                let piece: String = piece.iter().collect();
+                if piece.chars().count() >= MIN_SECRET_LEN && seen.insert(piece.clone()) {
+                    out.push(Zeroizing::new(piece));
+                }
             }
         }
         out

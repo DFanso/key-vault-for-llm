@@ -6,6 +6,133 @@ use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
 
+fn file_secret(name: &str, bytes: &[u8]) -> Secret {
+    Secret {
+        name: name.into(),
+        description: "a file".into(),
+        value: SecretValue::file("passwords.txt", bytes).unwrap(),
+        policy: Policy::default(),
+        created_at: 0,
+        updated_at: 0,
+        from_share: None,
+    }
+}
+
+#[test]
+fn a_file_value_keeps_every_byte_and_its_name() {
+    // Binary, CRLF, a BOM, no trailing newline: nothing is normalised.
+    let bytes: Vec<u8> = [
+        &b"\xEF\xBB\xBFhunter2hunter\r\n"[..],
+        &[0, 255, 10, 13, 128],
+    ]
+    .concat();
+    let value = SecretValue::file("a/b\\passwords.txt", &bytes).unwrap();
+    assert_eq!(value.kind(), SecretKind::File);
+    let (name, back) = value.file_parts().unwrap();
+    assert_eq!(name, "passwords.txt", "only the base name is kept");
+    assert_eq!(&back[..], &bytes[..]);
+    assert_eq!(value.file_len(), Some(bytes.len()));
+    let json = serde_json::to_string(&value).unwrap();
+    let again: SecretValue = serde_json::from_str(&json).unwrap();
+    assert_eq!(again, value);
+    assert_eq!(&again.file_parts().unwrap().1[..], &bytes[..]);
+}
+
+#[test]
+fn a_file_value_checks_that_it_is_what_it_says() {
+    let bytes = b"one\ntwo\n";
+    let value = SecretValue::file("list.txt", bytes).unwrap();
+    assert_eq!(value.verify_file(), Ok(()));
+    let fingerprint = value.file_fingerprint().unwrap();
+    assert_eq!(fingerprint.len(), 14);
+    assert_eq!(fingerprint, fingerprint.to_ascii_uppercase());
+    // The same bytes make the same fingerprint, other bytes another.
+    assert_eq!(
+        SecretValue::file("other.txt", bytes)
+            .unwrap()
+            .file_fingerprint(),
+        Some(fingerprint.clone())
+    );
+    assert_ne!(
+        SecretValue::file("list.txt", b"one\ntwo")
+            .unwrap()
+            .file_fingerprint(),
+        Some(fingerprint)
+    );
+
+    // Contents changed under the checksum, a missing checksum, a name
+    // with a path in it, and bytes that are not base64 are all refused.
+    let SecretValue::File {
+        file_name, sha256, ..
+    } = value.clone()
+    else {
+        unreachable!()
+    };
+    let with = |name: &str, data: &str, sum: &str| SecretValue::File {
+        file_name: name.into(),
+        data: SecretText::new(data),
+        sha256: sum.into(),
+    };
+    let good = "b25lCnR3bwo="; // "one\ntwo\n"
+    assert_eq!(with(&file_name, good, &sha256).verify_file(), Ok(()));
+    assert_eq!(
+        with(&file_name, "b25lCnR3bwA=", &sha256).verify_file(),
+        Err(kv_core::secret::FileError::Altered)
+    );
+    assert_eq!(
+        with(&file_name, good, "").verify_file(),
+        Err(kv_core::secret::FileError::Altered)
+    );
+    assert_eq!(
+        with("../list.txt", good, &sha256).verify_file(),
+        Err(kv_core::secret::FileError::BadName)
+    );
+    assert_eq!(
+        with(&file_name, "!!not base64!!", &sha256).verify_file(),
+        Err(kv_core::secret::FileError::Altered)
+    );
+}
+
+#[test]
+fn a_file_value_refuses_a_bad_name_or_too_many_bytes() {
+    assert!(SecretValue::file("", b"x").is_err());
+    assert!(SecretValue::file("..", b"x").is_err());
+    assert!(SecretValue::file("a\0b", b"x").is_err());
+    let big = vec![0u8; kv_core::secret::MAX_FILE_LEN + 1];
+    assert!(SecretValue::file("big.bin", &big).is_err());
+    assert!(SecretValue::file("ok.bin", &big[..kv_core::secret::MAX_FILE_LEN]).is_ok());
+}
+
+#[test]
+fn a_file_never_shows_in_debug_or_handle_info() {
+    let secret = file_secret("passwords", b"correct horse battery staple\n");
+    assert!(!format!("{secret:?}").contains("correct horse"));
+    let info = secret.info();
+    assert_eq!(info.kind, SecretKind::File);
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(!json.contains("correct horse"));
+    assert!(!json.contains("Y29ycmVjdC")); // its base64
+    assert_eq!(info.env_vars, vec!["KV_FILE_PASSWORDS".to_owned()]);
+}
+
+#[test]
+fn a_text_files_lines_are_scrubbed_and_a_binary_file_is_not() {
+    let text = file_secret(
+        "passwords",
+        b"short\r\ncorrect-horse-battery\n\n  trustno1trustno1  \ncorrect-horse-battery\n",
+    );
+    let mut lines: Vec<String> = text
+        .sensitive_values()
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    lines.sort();
+    // Lines too short for the scrubber are left to it; repeats are kept once.
+    assert_eq!(lines, vec!["correct-horse-battery", "trustno1trustno1"]);
+    let binary = file_secret("key", &[0u8, 159, 146, 150, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert!(binary.sensitive_values().is_empty());
+}
+
 fn http_secret() -> Secret {
     Secret {
         name: "openrouter".into(),
