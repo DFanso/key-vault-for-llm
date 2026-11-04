@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use kv::audit::Entry;
-use kv::tray::window::{FormRequest, FromPage, Tab, Theme, ToPage};
+use kv::tray::window::{FormRequest, FromPage, Stays, Tab, Theme, ToPage};
 use kv::tui::app::ShareDone;
 use kv_core::proto::Verdict;
 use kv_core::secret::{SecretKind, SecretText};
@@ -403,4 +403,86 @@ fn the_file_results_reach_the_page_as_json_data() {
         .unwrap_or_else(|e| panic!("the argument is not one JSON value ({e}): {script}"));
     assert_eq!(data["path"], "x\"});alert(1);kv.receive({\"");
     assert_eq!(data["handle"], "wordlist");
+}
+
+#[test]
+fn the_move_and_focus_messages_are_read() {
+    let cases = [
+        (r#"{"type":"drag"}"#, FromPage::Drag),
+        (r#"{"type":"picking"}"#, FromPage::Picking),
+        (r#"{"type":"busy","on":true}"#, FromPage::Busy { on: true }),
+        (
+            r#"{"type":"busy","on":false}"#,
+            FromPage::Busy { on: false },
+        ),
+    ];
+    for (json, expected) in cases {
+        assert_eq!(FromPage::parse(json), Some(expected), "{json}");
+    }
+    // Whether a dialog is open has to be said either way.
+    assert_eq!(FromPage::parse(r#"{"type":"busy"}"#), None);
+    assert_eq!(FromPage::parse(r#"{"type":"busy","on":"yes"}"#), None);
+}
+
+#[test]
+fn a_loss_of_focus_hides_the_window_unless_something_keeps_it_up() {
+    assert!(!Stays::default().any(), "a plain click elsewhere hides it");
+    // Any one of these keeps it: the device prompt, the file panel, a form
+    // open in the page, a window the user moved.
+    for stays in [
+        Stays {
+            prompting: true,
+            ..Stays::default()
+        },
+        Stays {
+            picking: true,
+            ..Stays::default()
+        },
+        Stays {
+            busy: true,
+            ..Stays::default()
+        },
+        Stays {
+            moved: true,
+            ..Stays::default()
+        },
+    ] {
+        assert!(stays.any(), "{stays:?}");
+    }
+}
+
+#[test]
+fn the_file_panel_closing_lets_the_window_hide_again() {
+    let mut stays = Stays {
+        picking: true,
+        busy: true,
+        ..Stays::default()
+    };
+    // The panel closed and the window has the focus again: the page's own
+    // dialog still keeps it up, the panel no longer does.
+    stays.gained_focus();
+    assert!(!stays.picking && stays.busy);
+    stays.busy = false;
+    assert!(!stays.any());
+}
+
+#[test]
+fn hiding_or_showing_the_menu_takes_the_window_back_to_a_flyout() {
+    let mut stays = Stays {
+        prompting: true,
+        picking: true,
+        busy: true,
+        moved: true,
+    };
+    // The user hid it: what they moved and any file panel are over, while a
+    // dialog still open in the page and a device prompt are not theirs to end.
+    stays.hidden();
+    assert!(!stays.picking && !stays.moved);
+    assert!(stays.busy && stays.prompting);
+    let mut moved = Stays {
+        moved: true,
+        ..Stays::default()
+    };
+    moved.shown_as_menu();
+    assert!(!moved.any(), "the small menu is a flyout again");
 }
