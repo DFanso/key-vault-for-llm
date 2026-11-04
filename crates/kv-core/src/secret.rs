@@ -98,6 +98,12 @@ pub struct Secret {
     /// Unix seconds. Set by `Vault::upsert`.
     pub created_at: u64,
     pub updated_at: u64,
+    /// Whether kv saved this handle from a share: its variable names were
+    /// picked by someone else. The daemon sets it when it adds or receives
+    /// a handle and keeps it through edits; `None` only in a vault saved
+    /// before kv kept it, which `Vault` settles when it opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_share: Option<bool>,
 }
 
 /// What an agent may learn about a handle. Has no field that can hold a

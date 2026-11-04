@@ -14,6 +14,7 @@ fn secret(value: SecretValue, policy: Policy) -> Secret {
         policy,
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 

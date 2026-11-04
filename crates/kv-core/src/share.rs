@@ -431,6 +431,12 @@ impl Shares {
         }
     }
 
+    /// Whether a received share was saved under `handle`, whatever it holds
+    /// now.
+    pub fn names_received(&self, handle: &str) -> bool {
+        self.received.iter().any(|r| r.handle == handle)
+    }
+
     /// Whether `handle` holds the value of a share it received.
     pub fn holds_received(&self, handle: &str, digest: &str) -> bool {
         self.received

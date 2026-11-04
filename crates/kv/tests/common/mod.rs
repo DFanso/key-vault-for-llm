@@ -220,6 +220,7 @@ pub fn secret(name: &str, value: SecretValue, policy: Policy) -> Secret {
         policy,
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 

@@ -249,6 +249,7 @@ pub async fn check_role(handle: &str, url: &str) -> Result<Option<String>, Strin
         policy: Policy::default(),
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     };
     let values = secret.sensitive_values();
     let scrubber = Scrubber::new(values.iter().map(|v| (handle, v.as_str())));
