@@ -20,7 +20,7 @@ use kv_core::proto::{
     HandleRequest, HttpCall, Overview, PolicyPatch, ReceiveShareCall, RequestedHandle,
     RevealedField, RunCall, SendShareCall, SessionInfo, ShareRequestCall, Status, Verdict,
 };
-use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
+use kv_core::scrub::{self, MAX_TOTAL_COST, MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
@@ -680,6 +680,9 @@ impl Daemon {
                  does not take it; ask the sender to leave them out",
                 envvars::list(&risky)
             ));
+        }
+        if let Err(failure) = check_scrub_budget(vault, &secret) {
+            return bad(failure.message);
         }
         let kind = secret.kind();
         if let Err(e) = vault.upsert(secret) {
@@ -2096,6 +2099,7 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
 fn add(vault: &mut Vault, mut secret: Secret, replace: bool) -> Result<Vec<String>, Failure> {
     // The user typed or pasted it, even over a handle a share delivered.
     secret.from_share = Some(false);
+    check_scrub_budget(vault, &secret)?;
     validate_value(&secret.value)?;
     validate_secret(&secret)?;
     let previous = vault.get(&secret.name).cloned();
@@ -2174,6 +2178,7 @@ fn update(
         updated.value = value;
     }
     validate_secret(&updated)?;
+    check_scrub_budget(vault, &updated)?;
     let warnings = warnings_for(&updated);
     vault
         .upsert(updated)
@@ -2235,6 +2240,38 @@ fn received_risky(vault: &Vault, secret: &Secret) -> Option<String> {
         secret.name,
         envvars::list(&risky)
     ))
+}
+
+/// What `secret`'s values cost the output scrubber.
+fn scrub_cost(secret: &Secret) -> usize {
+    secret
+        .sensitive_values()
+        .iter()
+        .map(|value| scrub::cost(value))
+        .sum()
+}
+
+/// Refuses `secret` if saving it would take the vault's values past what
+/// the output scrubber takes. A change that lowers the total always goes
+/// through, so a vault already over it can still be brought under.
+fn check_scrub_budget(vault: &Vault, secret: &Secret) -> Result<(), Failure> {
+    let others: usize = vault
+        .secrets()
+        .iter()
+        .filter(|s| s.name != secret.name)
+        .map(scrub_cost)
+        .sum();
+    let before = others + vault.get(&secret.name).map_or(0, scrub_cost);
+    let after = others + scrub_cost(secret);
+    if after > MAX_TOTAL_COST && after > before {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            "the vault's secret values would add up to more than kv's output scrubber takes \
+             (about 256 KiB of ordinary tokens, less of ones full of punctuation); remove \
+             handles you no longer need",
+        ));
+    }
+    Ok(())
 }
 
 /// Why a value is refused for its length. kv's output scrubber keeps every
