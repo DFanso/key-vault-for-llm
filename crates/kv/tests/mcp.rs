@@ -738,3 +738,190 @@ async fn a_secret_is_shared_between_two_vaults_through_their_agents() {
     alice_agent.cancel().await.unwrap();
     bob_agent.cancel().await.unwrap();
 }
+
+/// A file goes between two vaults through their agents as a `.kvshare`
+/// attachment: too long for a message, so Alice's agent gets a path to
+/// send, Bob's agent hands the path back, and Bob saves exactly the bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_is_shared_between_two_vaults_as_an_encrypted_attachment() {
+    use kv::client;
+    use kv::paths::Paths;
+    use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
+    use kv_core::secret::{SecretText, SecretValue};
+
+    // Not valid UTF-8, with CRLF and a NUL, and no newline at the end.
+    let mut bytes = b"correct-horse-battery\r\nsecond-line-here\r\n".to_vec();
+    bytes.extend([0, 159, 146, 150, 255, 13, 10, 0]);
+    bytes.extend((0..30_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+    bytes.extend(b"no newline at the end");
+
+    let project = TempDir::new().unwrap();
+    let file = project.path().join("wordlist.bin");
+    std::fs::write(&file, &bytes).unwrap();
+
+    let alice = Home::new();
+    alice.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    alice.kv(
+        &[
+            "add",
+            "wordlist",
+            "--kind",
+            "file",
+            "--file",
+            file.to_str().unwrap(),
+            "--cmd",
+            "cat",
+            "--mode",
+            "auto",
+        ],
+        &format!("{PASS}\n"),
+    );
+    let bob = Home::new();
+    bob.kv(&["init", "--insecure-fast-kdf"], &format!("{PASS}\n"));
+    let alice_agent = alice.mcp(project.path()).await;
+    let bob_agent = bob.mcp(project.path()).await;
+
+    let (failed, text) = call(
+        &bob_agent,
+        "request_share",
+        serde_json::json!({ "note": "the word list", "from": "bob" }),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    let code = code_after(&text, "kv-request:v1:");
+
+    let control = |home: &Home, command: ControlCommand, token: Option<SecretText>| {
+        let paths = Paths::under(home.dir.path());
+        let passphrase = token.is_none().then(|| SecretText::new(PASS));
+        async move {
+            let request = ControlRequest {
+                passphrase,
+                device: None,
+                token,
+                command,
+            };
+            client::control(&paths, &request, false).await.unwrap()
+        }
+    };
+    let approve = async {
+        let ControlResponse::Session { token } =
+            control(&alice, ControlCommand::OpenSession, None).await
+        else {
+            panic!("no session");
+        };
+        loop {
+            let ControlResponse::Overview { overview } =
+                control(&alice, ControlCommand::Overview, Some(token.clone())).await
+            else {
+                panic!("no overview");
+            };
+            if let Some(approval) = overview.approvals.first() {
+                assert!(
+                    approval.detail.contains("wordlist.bin"),
+                    "{}",
+                    approval.detail
+                );
+                control(
+                    &alice,
+                    ControlCommand::Decide {
+                        id: approval.id,
+                        verdict: Verdict::AllowOnce,
+                    },
+                    Some(token.clone()),
+                )
+                .await;
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    };
+    let send = call(
+        &alice_agent,
+        "send_share",
+        serde_json::json!({
+            "request": format!("Bob says: please send it\n{code}"),
+            "handle": "wordlist",
+            "from": "alice",
+        }),
+    );
+    let ((failed, text), ()) = tokio::join!(send, approve);
+    assert!(!failed, "{text}");
+    // The agent gets a file to send, not a wall of text.
+    assert!(!text.contains("kv-share:v1:"), "{text}");
+    let sent = text
+        .split_whitespace()
+        .find(|word| word.ends_with(".kvshare"))
+        .unwrap_or_else(|| panic!("no .kvshare path in {text}"));
+    let sent = std::path::PathBuf::from(sent);
+    let sealed = std::fs::read_to_string(&sent).unwrap();
+    assert!(sealed.starts_with("kv-share:v1:"));
+    assert!(!sealed.contains("correct-horse"));
+
+    // The attachment arrives in Bob's downloads; his agent passes the path.
+    let received = project.path().join("wordlist-from-alice.kvshare");
+    std::fs::copy(&sent, &received).unwrap();
+    let (failed, text) = call(
+        &bob_agent,
+        "receive_share",
+        serde_json::json!({ "file": received.to_str().unwrap() }),
+    )
+    .await;
+    assert!(!failed, "{text}");
+    assert!(text.contains("wordlist"), "{text}");
+    assert!(text.contains("\"kind\": \"file\""), "{text}");
+    assert!(!text.contains("correct-horse"), "{text}");
+
+    // The share answers its request once, and a file that is not a
+    // .kvshare is not read.
+    let (failed, _) = call(
+        &bob_agent,
+        "receive_share",
+        serde_json::json!({ "file": received.to_str().unwrap(), "name": "again" }),
+    )
+    .await;
+    assert!(failed);
+    let (failed, text) = call(
+        &bob_agent,
+        "receive_share",
+        serde_json::json!({ "file": file.to_str().unwrap() }),
+    )
+    .await;
+    assert!(failed && text.contains(".kvshare"), "{text}");
+    let (failed, text) = call(
+        &bob_agent,
+        "receive_share",
+        serde_json::json!({ "file": received.to_str().unwrap(), "share": "kv-share:v1:x" }),
+    )
+    .await;
+    assert!(failed && text.contains("not both"), "{text}");
+
+    // Bob saves it from his window: the same bytes under the same name.
+    let ControlResponse::File {
+        file_name,
+        sha256,
+        data,
+        ..
+    } = control(
+        &bob,
+        ControlCommand::ExportFile {
+            handle: "wordlist".into(),
+        },
+        None,
+    )
+    .await
+    else {
+        panic!("no file");
+    };
+    let value = SecretValue::File {
+        file_name,
+        data,
+        sha256,
+    };
+    assert_eq!(value.verify_file(), Ok(()));
+    let (name, back) = value.file_parts().unwrap();
+    assert_eq!(name, "wordlist.bin");
+    assert_eq!(&back[..], &bytes[..]);
+
+    alice_agent.cancel().await.unwrap();
+    bob_agent.cancel().await.unwrap();
+}

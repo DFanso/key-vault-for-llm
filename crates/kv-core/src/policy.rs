@@ -186,7 +186,7 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
                 Operation::DbQuery | Operation::DbConnect,
                 SecretKind::Postgres | SecretKind::Redis
             )
-            | (Operation::Exec { .. }, SecretKind::Env)
+            | (Operation::Exec { .. }, SecretKind::Env | SecretKind::File)
             | (Operation::Run, SecretKind::Env)
     );
     if !kind_ok {
