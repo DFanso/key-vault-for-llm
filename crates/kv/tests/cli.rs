@@ -710,3 +710,101 @@ fn a_second_tray_refuses_to_start() {
         );
     }
 }
+
+fn write_file(kv: &Kv, name: &str, text: &str) -> String {
+    let path = kv.home.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn listed_vars(kv: &Kv, handle: &str) -> Vec<String> {
+    let list: serde_json::Value = serde_json::from_str(&kv.ok(&["list", "--json"], "")).unwrap();
+    let handle = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == handle)
+        .unwrap_or_else(|| panic!("{handle} is not listed: {list}"));
+    handle["env_vars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn import_adds_a_dotenv_file_as_one_handle_without_printing_values() {
+    let kv = Kv::initialized();
+    let file = write_file(
+        &kv,
+        ".env",
+        &format!(
+            "# app\nAPI_KEY={TOKEN}\nDATABASE_URL=postgres://demo:demo-pass@db.example.test/app\nNODE_OPTIONS=--require ./x.js\n"
+        ),
+    );
+    let output = kv.run(
+        &["import", &file, "--yes", "--cmd", "node"],
+        &format!("{PASS}\n"),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stdout.contains("added env with 2 variables"), "{stdout}");
+    assert!(
+        stderr.contains("NODE_OPTIONS"),
+        "risky names are pointed out: {stderr}"
+    );
+    for text in [&stdout, &stderr] {
+        assert!(
+            !text.contains(TOKEN) && !text.contains("demo-pass"),
+            "{text}"
+        );
+    }
+    assert_eq!(listed_vars(&kv, "env"), ["API_KEY", "DATABASE_URL"]);
+}
+
+#[test]
+fn import_keeps_and_drops_what_it_is_told_and_names_the_handle() {
+    let kv = Kv::initialized();
+    let file = write_file(
+        &kv,
+        "app.env",
+        &format!("A={TOKEN}\nB=bbbbbbbbbb\nC=cccccccccc\n"),
+    );
+    kv.ok(
+        &[
+            "import", &file, "--name", "app", "--keep", "A,C", "--drop", "C",
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert_eq!(listed_vars(&kv, "app"), ["A"]);
+    let stderr = kv.fails(&["import", &file, "--name", "app2", "--keep", "NOPE"], "");
+    assert!(stderr.contains("no variable NOPE"), "{stderr}");
+}
+
+#[test]
+fn import_needs_a_terminal_or_a_choice() {
+    let kv = Kv::initialized();
+    let file = write_file(&kv, ".env", &format!("A={TOKEN}\n"));
+    let stderr = kv.fails(&["import", &file], &format!("{PASS}\n"));
+    assert!(stderr.contains("--yes"), "{stderr}");
+}
+
+#[test]
+fn import_flattens_a_settings_file_and_warns_against_sharing_it() {
+    let kv = Kv::initialized();
+    let file = write_file(
+        &kv,
+        "appsettings.Production.json",
+        r#"{"ConnectionStrings": {"Default": "Server=db.example.test;Database=demo"}, "Logging": {"LogLevel": {"Default": "Warning"}}}"#,
+    );
+    let output = kv.run(&["import", &file, "--yes"], &format!("{PASS}\n"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("don't share"), "{stderr}");
+    assert_eq!(
+        listed_vars(&kv, "appsettings-production"),
+        ["ConnectionStrings__Default", "Logging__LogLevel__Default"]
+    );
+}

@@ -323,6 +323,41 @@ requester when the code is made, the sender on the approval or with the sealed
 share. For anything sensitive, compare the two over a call or another channel
 before you send the share or use the handle.
 
+A share of a token, or of an env handle with a few variables, fits in one
+chat message. When a share is longer than one Telegram message, kv says so:
+send it as a text file rather than splitting it.
+
+### Sharing the variables of a `.env` or settings file
+
+To pass on what a project's `.env` or JSON settings file holds, import it
+into a handle, then share that handle as above:
+
+```sh
+kv import .env                      # tick the variables to keep, then save
+kv import appsettings.Development.json --name demo-app
+kv import .env --keep API_TOKEN,DB_URL --yes
+```
+
+kv reads the file, lists the variables it found by name (never their
+values) and saves the ones you tick as one env handle, in ask mode unless
+you pass `--mode`. It asks for your passphrase or Touch ID as `kv add` does.
+A JSON file's nested keys become names joined with `__`, as .NET reads them
+(`ConnectionStrings__Db`).
+Variables that change how a program runs or where it connects, such as
+`PATH` or `NODE_OPTIONS`, start unticked; kv will not send them in a share
+anyway. `kv import` notes what it skipped or could not read, such as `${VAR}`
+references, which it keeps as written. On the Handles tab, **Import file**
+does the same in the window (on a Mac, press Command-Shift-Period in the file
+panel to see `.env`).
+
+Don't share a handle made from a settings file such as `appsettings.json`
+yet. Besides secrets, those files set addresses (a database host, an API's
+base URL), and kv cannot yet show the receiver a code for what a share
+holds: someone who forges a share could point their app at a server of
+theirs. The same goes for a `.env` variable that holds an address, such as
+`DATABASE_URL`. Tokens and passwords are fine to share, with the safety code
+checked as above.
+
 ## Day to day
 
 ```sh

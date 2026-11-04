@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod db;
 pub mod envvars;
 pub mod error;
+pub mod import;
 pub mod policy;
 pub mod proto;
 pub mod scrub;

@@ -15,7 +15,7 @@ use kv::client;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
-use kv::tray::window::{FormRequest, FromPage, Tab, Theme, ToPage};
+use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
 use kv::tray::worker::{Desktop, Worker};
 use kv::tui::app::ShareDone;
 use kv_core::proto::{
@@ -1178,4 +1178,191 @@ async fn sharing_from_a_locked_window_asks_to_unlock() {
     assert!(done.is_empty(), "{pages:?}");
     assert!(state(&pages).0, "{pages:?}");
     assert_eq!(messages(&pages), [("Unlock first".to_owned(), None)]);
+}
+
+/// The env handle `name` in the last overview, if there is one.
+async fn handle(
+    worker: &mut Worker<Desk>,
+    desk: &Desk,
+    name: &str,
+) -> Option<kv_core::secret::HandleInfo> {
+    worker.model().await;
+    let (_, _, overview) = state(&desk.take());
+    overview?.handles.into_iter().find(|h| h.name == name)
+}
+
+const DEMO_ENV: &str = "# demo fixture\nexport API_TOKEN=demo-token-1\nDB_URL=\"postgres://demo:demo-pass@db.example.test/app\"\nNODE_OPTIONS=--require ./x.js\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_imported_in_the_window_shows_names_and_saves_the_ticked_ones() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    worker.model().await;
+    desk.take();
+
+    assert!(
+        !worker
+            .act(page(FromPage::ImportFile {
+                file_name: ".env".into(),
+                text: SecretText::new(DEMO_ENV),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    let [
+        ToPage::ImportPreview {
+            file_name,
+            name,
+            format,
+            vars,
+            ..
+        },
+    ] = pages.as_slice()
+    else {
+        panic!("{pages:?}");
+    };
+    assert_eq!(file_name, ".env");
+    assert_eq!(name, "env");
+    assert_eq!(format, ".env");
+    let var = |name: &str, risky: bool, keep: bool| ImportVar {
+        name: name.into(),
+        risky,
+        keep,
+    };
+    assert_eq!(
+        vars,
+        &[
+            var("API_TOKEN", false, true),
+            var("DB_URL", false, true),
+            var("NODE_OPTIONS", true, false),
+        ]
+    );
+    // Names only: no value goes to the page.
+    let shown = format!("{pages:?}");
+    for value in ["demo-token-1", "demo-pass", "./x.js"] {
+        assert!(!shown.contains(value), "{shown}");
+    }
+
+    // Nothing ticked is refused, and the file stays read for another try.
+    assert!(
+        !worker
+            .act(page(FromPage::ImportSave {
+                name: "demo-app".into(),
+                keep: Vec::new(),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    assert!(
+        matches!(pages.as_slice(), [ToPage::ImportError { .. }]),
+        "{pages:?}"
+    );
+
+    assert!(
+        !worker
+            .act(page(FromPage::ImportSave {
+                name: "demo-app".into(),
+                keep: vec!["API_TOKEN".into(), "DB_URL".into()],
+            }))
+            .await
+    );
+    let pages = desk.take();
+    assert!(
+        pages
+            .iter()
+            .any(|p| matches!(p, ToPage::Imported { name, .. } if name == "demo-app")),
+        "{pages:?}"
+    );
+    let saved = handle(&mut worker, &desk, "demo-app").await.expect("saved");
+    assert_eq!(saved.kind, SecretKind::Env);
+    assert_eq!(saved.env_vars, ["API_TOKEN", "DB_URL"]);
+    assert_eq!(saved.mode, kv_core::policy::Mode::Ask);
+
+    // The file went with the save.
+    assert!(
+        !worker
+            .act(page(FromPage::ImportSave {
+                name: "again".into(),
+                keep: vec!["API_TOKEN".into()],
+            }))
+            .await
+    );
+    assert_eq!(desk.take(), Vec::<ToPage>::new());
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_import_keeps_the_file_and_a_cancel_or_lock_drops_it() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    worker.model().await;
+    let import = || {
+        page(FromPage::ImportFile {
+            file_name: "demo.env".into(),
+            text: SecretText::new(DEMO_ENV),
+        })
+    };
+    let save = |name: &str| {
+        page(FromPage::ImportSave {
+            name: name.into(),
+            keep: vec!["API_TOKEN".into()],
+        })
+    };
+
+    assert!(!worker.act(import()).await);
+    desk.take();
+    // A name the daemon refuses: the file is still there for a better one.
+    assert!(!worker.act(save("not a name")).await);
+    let pages = desk.take();
+    assert!(
+        matches!(pages.as_slice(), [ToPage::ImportError { .. }]),
+        "{pages:?}"
+    );
+    assert!(!worker.act(save("demo-app")).await);
+    assert!(
+        desk.take()
+            .iter()
+            .any(|p| matches!(p, ToPage::Imported { .. }))
+    );
+
+    // Cancelled: a save afterwards does nothing.
+    assert!(!worker.act(import()).await);
+    assert!(!worker.act(page(FromPage::ImportCancel)).await);
+    desk.take();
+    assert!(!worker.act(save("other")).await);
+    assert_eq!(desk.take(), Vec::<ToPage>::new());
+
+    // Locked: the same.
+    assert!(!worker.act(import()).await);
+    assert!(!worker.act(page(FromPage::Lock)).await);
+    assert!(!worker.act(Action::Unlock).await);
+    desk.take();
+    assert!(!worker.act(save("other")).await);
+    assert!(
+        !desk
+            .take()
+            .iter()
+            .any(|p| matches!(p, ToPage::Imported { .. } | ToPage::ImportError { .. }))
+    );
+    assert!(handle(&mut worker, &desk, "other").await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_cannot_be_read_says_why() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    desk.take();
+    assert!(
+        !worker
+            .act(page(FromPage::ImportFile {
+                file_name: "demo.env".into(),
+                text: SecretText::new("A=\"never closed\n"),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    assert!(
+        matches!(pages.as_slice(), [ToPage::ImportError { .. }]),
+        "{pages:?}"
+    );
 }
