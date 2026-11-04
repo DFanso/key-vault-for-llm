@@ -273,6 +273,16 @@ be given to. Add those with Policy if it needs them. A share never replaces a
 handle: pick another name if the suggested one is taken. Each request answers
 one share and expires after 7 days.
 
+kv refuses a share that sets environment variables which change how a program
+runs or where it connects, such as `PATH`, `LD_PRELOAD`, `DYLD_*`,
+`NODE_OPTIONS`, `GIT_SSH_COMMAND`, package-manager settings (`npm_config_*`,
+`PIP_*`, `UV_*`) or `*_PROXY`: every program kv starts with the handle would
+get them. It won't send a handle that sets them either. A handle you add
+yourself may set them, with a warning. A handle received from an older kv
+that sets one starts no program until you change it. Values longer than 4096
+bytes are refused everywhere, since kv's output scrubber would need too much
+memory for them.
+
 You don't need an agent for any of it. The same three steps are buttons on the
 Shares tab of kv's window, and each shows its code or share with a Copy
 button, ready to paste into whatever chat you use:
