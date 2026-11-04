@@ -62,7 +62,8 @@
   const PADLOCK_FADE_MS = 220;
   const TOAST_SECS = 8;
 
-  // The screens, in sidebar order (Ctrl+1 to Ctrl+6), and their titles.
+  // The screens, in tab order with Settings last (Ctrl+1 to Ctrl+6), and
+  // their titles.
   const SCREENS = ["home", "approvals", "handles", "shares", "audit", "settings"];
   const TITLES = {
     home: "Home",
@@ -581,6 +582,7 @@
     const requests = overview.handle_requests;
     const waiting = approvals.length + requests.length;
     $("stat-waiting").textContent = String(waiting);
+    $("stat-waiting").closest(".stat").classList.toggle("hot", waiting > 0);
     $("stat-waiting-note").textContent =
       waiting === 0 ? "Nothing waiting" : `${approvals.length} to approve · ${requests.length} asked for`;
     const handles = overview.handles;

@@ -41,7 +41,7 @@
     <svg viewBox="0 0 64 64" focusable="false">
       <path class="shackle" d="M21 30 V21 a11 11 0 0 1 22 0 V30" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
       <rect x="13" y="28" width="38" height="28" rx="8" fill="#ffffff"/>
-      <g class="keyhole"><circle cx="32" cy="40" r="4.5" fill="#5b3fd9"/><rect x="30.25" y="41" width="3.5" height="8" rx="1.75" fill="#5b3fd9"/></g>
+      <g class="keyhole"><circle cx="32" cy="40" r="4.5" fill="#e0501f"/><rect x="30.25" y="41" width="3.5" height="8" rx="1.75" fill="#e0501f"/></g>
     </svg>
   </div>
   <strong id="padlock-title" class="unlock-title"></strong>
@@ -73,46 +73,30 @@
 </main>
 
 <div id="app" class="shell" hidden>
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
-      <div>
-        <strong>kv</strong>
-        <span id="brand-status" class="status-line"><span class="dot" aria-hidden="true"></span><span id="brand-text">Unlocked</span></span>
-      </div>
+  <header class="topbar">
+    <span class="logo" aria-hidden="true"></span>
+    <div class="grow">
+      <h1 id="page-title">Home</h1>
+      <span id="brand-status" class="status-pill"><span class="dot" aria-hidden="true"></span><span id="brand-text">Unlocked</span></span>
     </div>
-    <nav aria-label="kv">
-      <button type="button" data-tab="home"><span class="i i-house" aria-hidden="true"></span><span class="label">Home</span></button>
-      <button type="button" data-tab="approvals"><span class="i i-shield-check" aria-hidden="true"></span><span class="label">Approvals</span><span class="count" id="count-approvals" hidden></span></button>
-      <button type="button" data-tab="handles"><span class="i i-key-round" aria-hidden="true"></span><span class="label">Handles</span><span class="count" id="count-handles" hidden></span></button>
-      <button type="button" data-tab="shares"><span class="i i-share-2" aria-hidden="true"></span><span class="label">Shares</span><span class="count" id="count-shares" hidden></span></button>
-      <button type="button" data-tab="audit"><span class="i i-scroll-text" aria-hidden="true"></span><span class="label">Audit</span></button>
+    <nav class="round-actions" aria-label="More">
+      <button type="button" class="round" data-tab="settings" aria-label="Settings" title="Settings"><span class="i i-settings" aria-hidden="true"></span></button>
+      <button id="lock" type="button" class="round" aria-label="Lock kv" title="Lock now"><span class="i i-lock" aria-hidden="true"></span></button>
+      <button id="hide" type="button" class="round" aria-label="Hide kv (Esc)" title="Hide (Esc)"><span class="i i-x" aria-hidden="true"></span></button>
     </nav>
-    <div class="spacer"></div>
-    <nav aria-label="More">
-      <button type="button" data-tab="settings"><span class="i i-settings" aria-hidden="true"></span><span class="label">Settings</span></button>
-    </nav>
-    <div class="session-card">
-      <span class="i i-lock-open" aria-hidden="true"></span>
-      <strong>Vault unlocked</strong>
-      <span id="locks-in" class="small"></span>
-      <button id="lock" type="button" class="on-accent"><span class="i i-lock" aria-hidden="true"></span>Lock now</button>
-    </div>
-  </aside>
-
-  <div class="content">
-    <header class="topbar">
-      <div>
-        <p id="today" class="eyebrow"></p>
-        <h1 id="page-title">Home</h1>
-      </div>
-      <button id="hide" type="button" class="icon-button" aria-label="Hide kv (Esc)" title="Hide (Esc)"><span class="i i-x" aria-hidden="true"></span></button>
-    </header>
-    <div id="app-message" class="toast" role="status" hidden>
-      <span class="i i-circle-alert" aria-hidden="true"></span>
-      <span id="app-message-text"></span>
-      <button type="button" id="app-message-close" class="icon-button small" aria-label="Dismiss"><span class="i i-x" aria-hidden="true"></span></button>
-    </div>
+  </header>
+  <nav class="tabs" aria-label="kv">
+    <button type="button" data-tab="home"><span class="i i-house" aria-hidden="true"></span><span class="label">Home</span></button>
+    <button type="button" data-tab="approvals"><span class="i i-shield-check" aria-hidden="true"></span><span class="label">Approvals</span><span class="count" id="count-approvals" hidden></span></button>
+    <button type="button" data-tab="handles"><span class="i i-key-round" aria-hidden="true"></span><span class="label">Handles</span><span class="count" id="count-handles" hidden></span></button>
+    <button type="button" data-tab="shares"><span class="i i-share-2" aria-hidden="true"></span><span class="label">Shares</span><span class="count" id="count-shares" hidden></span></button>
+    <button type="button" data-tab="audit"><span class="i i-scroll-text" aria-hidden="true"></span><span class="label">Audit</span></button>
+  </nav>
+  <div id="app-message" class="toast" role="status" hidden>
+    <span class="i i-circle-alert" aria-hidden="true"></span>
+    <span id="app-message-text"></span>
+    <button type="button" id="app-message-close" class="icon-button small" aria-label="Dismiss"><span class="i i-x" aria-hidden="true"></span></button>
+  </div>
 
     <div class="scroll">
       <section id="home" aria-labelledby="page-title">
@@ -279,7 +263,11 @@
         </div>
       </section>
     </div>
-  </div>
+  <footer class="app-footer">
+    <span class="grow"><span id="today"></span> · <span id="locks-in"></span></span>
+    <span class="hints">Esc hides · Ctrl+1–6 · / finds</span>
+    <button type="button" class="ghost" data-quit><span class="i i-power" aria-hidden="true"></span>Quit</button>
+  </footer>
 </div>
 
 <dialog id="form-dialog" aria-labelledby="form-title">
