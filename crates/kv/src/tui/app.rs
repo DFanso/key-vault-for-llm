@@ -2,6 +2,8 @@
 //! become effects for the driver to carry out, and the driver's outcomes
 //! update what is shown.
 
+use std::collections::BTreeMap;
+
 use kv_core::proto::{
     Overview, PolicyPatch, ReceiveShareCall, RevealedField, SendShareCall, ShareRequestCall,
     Verdict,
@@ -45,6 +47,14 @@ pub enum Effect {
         name: String,
         description: Option<String>,
         value: Option<SecretValue>,
+    },
+    /// Sets and removes some of an `env` handle's variables, keeping the
+    /// rest.
+    EditVars {
+        name: String,
+        description: Option<String>,
+        set: BTreeMap<String, SecretText>,
+        remove: Vec<String>,
     },
     SetPolicy {
         name: String,

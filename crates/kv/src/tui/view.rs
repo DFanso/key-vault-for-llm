@@ -233,6 +233,12 @@ fn approval_lines(approval: &Approval, selected: bool) -> Vec<Line<'static>> {
     if let Some(cwd) = &approval.cwd {
         lines.push(Line::raw(format!("    in {cwd}")));
     }
+    if !approval.env_vars.is_empty() {
+        lines.push(Line::raw(format!(
+            "    with {}",
+            approval.env_vars.join(", ")
+        )));
+    }
     lines.push(Line::styled(
         format!("    answer within {}s", approval.expires_in_secs),
         dim(),

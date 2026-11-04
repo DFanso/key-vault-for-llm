@@ -1,6 +1,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
-use kv_core::scrub::Scrubber;
+use std::time::{Duration, Instant};
+
+use kv_core::scrub::{self, MAX_TOTAL_COST, Scrubber};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
 use proptest::prelude::*;
 
@@ -205,6 +207,47 @@ fn resuming_on_a_scrubber_without_secrets_keeps_the_held_bytes() {
     assert_eq!(stream.push(b"sk-or"), b"");
     let mut stream = empty.resume(stream.into_pending());
     assert_eq!(stream.push(b"-v1"), b"sk-or-v1");
+}
+
+#[test]
+fn a_long_value_of_one_letter_builds_quickly() {
+    // It took seconds while the matcher was a DFA, under the daemon's lock.
+    let value = "a".repeat(4096);
+    let start = Instant::now();
+    let s = Scrubber::new([("blob", value.as_str())]);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(scrub(&s, &format!("x{value}y")), "x[kv:blob]y");
+}
+
+#[test]
+fn a_stream_holds_back_the_longest_possible_start_of_a_long_secret() {
+    let value: String = (0..4096).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    let s = Scrubber::new([("blob", value.as_str())]);
+    let mut stream = s.stream();
+    // Everything up to the start of the secret goes out at once; the rest
+    // could still become it.
+    let out = stream.push(format!("log line\n{}", &value[..4000]).as_bytes());
+    assert_eq!(out, b"log line\n");
+    let out = stream.push(format!("{} done\n", &value[4000..]).as_bytes());
+    assert_eq!(String::from_utf8(out).unwrap(), "[kv:blob] done\n");
+    assert!(stream.finish().is_empty());
+}
+
+#[test]
+fn cost_counts_every_encoding_and_short_values_cost_nothing() {
+    assert_eq!(scrub::cost("short"), 0);
+    let plain = scrub::cost(KEY);
+    let symbols = scrub::cost("!#$%&*+/=?@ ;:,<>[]{}^~");
+    assert!(plain >= KEY.len(), "{plain}");
+    // Percent-encodings make punctuation cost far more per byte.
+    assert!(symbols / 23 > plain / KEY.len(), "{symbols} vs {plain}");
+    // A vault of ordinary (alphanumeric) tokens fits about 256 KiB of them.
+    let token = "Ab3dEf0123456789XyZ0123456789qrs";
+    assert!(MAX_TOTAL_COST / (scrub::cost(token) / token.len()) >= 200 * 1024);
 }
 
 fn chunked<'a>(input: &'a [u8], cuts: &[usize]) -> Vec<&'a [u8]> {

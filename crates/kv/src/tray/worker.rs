@@ -15,13 +15,17 @@ use kv_core::secret::SecretText;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::model::{Action, Model, View};
-use super::window::{FormRequest, FromPage, Tab, Theme, ToPage};
+use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
 use crate::client;
 use crate::device::Device;
 use crate::forms::{self, Form, Purpose};
+use crate::importing;
 use crate::paths::Paths;
 use crate::tui::app::{Effect, Outcome};
 use crate::tui::{DeviceAnswer, Driver};
+use kv_core::envvars;
+use kv_core::import::{self, Format, Imported};
+use kv_core::policy::Policy;
 
 /// How often the tray asks the daemon for news.
 const TICK: Duration = Duration::from_secs(1);
@@ -73,6 +77,8 @@ pub struct Worker<D> {
     prompting: Option<Asker>,
     /// How the window looks, as the user last picked it.
     theme: Theme,
+    /// A file the window is importing, read but not yet saved.
+    import: Option<Imported>,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -80,6 +86,7 @@ impl<D: Desktop> Worker<D> {
         Self {
             driver: Driver::with_device(paths.clone(), device).with_reason(REASON),
             theme: Theme::load(&paths.tray_theme_file()),
+            import: None,
             paths,
             desktop,
             window: None,
@@ -195,7 +202,10 @@ impl<D: Desktop> Worker<D> {
                 self.open_window(Tab::Home);
             }
             Action::Window(message) => return self.on_page(message).await,
-            Action::WindowClosed => self.window = None,
+            Action::WindowClosed => {
+                self.window = None;
+                self.import = None;
+            }
             Action::Login(on) => {
                 if let Err(e) = self.desktop.set_login(on) {
                     self.desktop
@@ -284,6 +294,9 @@ impl<D: Desktop> Worker<D> {
                 let outcome = self.driver.run(Effect::Forget(id)).await;
                 self.report(Asker::Window, outcome, None);
             }
+            FromPage::ImportFile { file_name, text } => self.read_import(&file_name, &text),
+            FromPage::ImportSave { name, keep } => self.save_import(&name, &keep).await,
+            FromPage::ImportCancel => self.import = None,
             FromPage::RequestShare { note, from } => {
                 self.share(Effect::RequestShare(ShareRequestCall { note, from }))
                     .await;
@@ -438,12 +451,82 @@ impl<D: Desktop> Worker<D> {
     async fn lock(&mut self, asker: Asker) {
         let outcome = self.driver.run(Effect::Lock).await;
         self.set_form(None);
+        self.import = None;
         self.report(asker, outcome, None);
     }
 
     async fn unlock(&mut self, asker: Asker, answer: DeviceAnswer) {
         let outcome = self.driver.finish_device(answer).await;
         self.report(asker, outcome, None);
+    }
+
+    /// Reads a file the window picked and shows what it holds, by name.
+    fn read_import(&mut self, file_name: &str, text: &SecretText) {
+        let format = Format::guess(file_name, text.expose());
+        match import::parse(format, text.expose().as_bytes()) {
+            Ok(imported) => {
+                let keep = importing::default_keep(&imported);
+                let vars = imported
+                    .names()
+                    .into_iter()
+                    .map(|name| ImportVar {
+                        name: name.to_owned(),
+                        risky: envvars::is_risky(name),
+                        keep: keep.iter().any(|k| k == name),
+                    })
+                    .collect();
+                self.desktop.page(ToPage::ImportPreview {
+                    file_name: file_name.to_owned(),
+                    name: importing::suggested_name(file_name),
+                    format: format.label().to_owned(),
+                    vars,
+                    notes: importing::notes(&imported),
+                });
+                self.import = Some(imported);
+            }
+            Err(e) => {
+                self.import = None;
+                self.desktop.page(ToPage::ImportError {
+                    message: sentence(&e.to_string()),
+                });
+            }
+        }
+    }
+
+    /// Saves the import being shown through the same Add as the New handle
+    /// form. On a refusal the file stays read, for another name or choice.
+    async fn save_import(&mut self, name: &str, keep: &[String]) {
+        let Some(imported) = self.import.take() else {
+            return;
+        };
+        let vars = imported.keep(keep);
+        if vars.is_empty() {
+            self.import = Some(imported);
+            self.desktop.page(ToPage::ImportError {
+                message: "Tick at least one variable to import.".into(),
+            });
+            return;
+        }
+        let description = format!("imported from a {} file", imported.format.label());
+        let secret = importing::secret(name, &description, vars, Policy::default());
+        match self.driver.run(Effect::Add(secret)).await {
+            Outcome::Done(warnings) => {
+                self.desktop.page(ToPage::Imported {
+                    name: name.to_owned(),
+                    warnings: warnings.iter().map(|w| sentence(w)).collect(),
+                });
+            }
+            Outcome::Failed(message) => {
+                self.import = Some(imported);
+                self.desktop.page(ToPage::ImportError {
+                    message: sentence(&message),
+                });
+            }
+            other => {
+                self.import = Some(imported);
+                self.report(Asker::Window, other, None);
+            }
+        }
     }
 
     /// Tells `asker` how an action went, when it failed.

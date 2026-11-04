@@ -44,9 +44,15 @@
     // working on it.
     share: null,
     shareBusy: false,
+    // Whether a file being imported is on show.
+    importing: false,
   };
 
   const REVEAL_SECS = 60;
+  // The largest file kv imports, as kv-core's import::MAX_FILE_LEN.
+  const IMPORT_MAX_BYTES = 64 * 1024;
+  // Past this many characters a share does not fit one Telegram message.
+  const CHAT_MESSAGE_CHARS = 4000;
   // How long the menu takes to fade out before the window grows; as in
   // app.css.
   const LEAVE_MS = 110;
@@ -288,6 +294,7 @@
           closeConfirm();
           closeReveal();
           closeShare();
+          closeImport(false);
           // Whatever it said belonged to the session that just ended.
           hideToast();
           page.audit = [];
@@ -331,6 +338,18 @@
       case "share_error":
         shareBusy(false);
         $("share-error").textContent = message.message;
+        break;
+      case "import_preview":
+        openImport(message);
+        break;
+      case "imported":
+        closeImport(false);
+        say([`Saved ${message.name}.`, ...message.warnings].join(" "));
+        break;
+      case "import_error":
+        $("import-save").disabled = false;
+        if (page.importing) $("import-error").textContent = message.message;
+        else say(message.message);
         break;
       case "message":
         say(message.text, message.request);
@@ -733,6 +752,7 @@
       el("div", "chips", ...approval.handles.map((h) => chip(h, "tone-grey", "key-round"))),
       el("div", "code-box", approval.detail),
       approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
+      approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
       el("div", "timer", bar, el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
       el(
         "div",
@@ -1099,6 +1119,9 @@
           "it. kv does not keep this text, so copy it before you close.";
         if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
         output = result.share;
+        if ([...output].length > CHAT_MESSAGE_CHARS) {
+          about += " It is longer than one Telegram message, so send it as a text file rather than splitting it.";
+        }
         safety =
           `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
           "for anything sensitive, check over a call that their request shows the same code before " +
@@ -1373,6 +1396,91 @@
     $("page-title").focus({ preventScroll: true });
   }
 
+  // Opens the file panel; what is picked goes to the tray, which answers
+  // with the variables' names and never their values.
+  function pickImport() {
+    const input = $("import-file");
+    input.value = "";
+    input.click();
+  }
+
+  function readImport() {
+    const input = $("import-file");
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const done = () => {
+      input.value = "";
+    };
+    if (file.size > IMPORT_MAX_BYTES) {
+      done();
+      say(`${file.name} is larger than 64 KiB. kv imports .env and JSON settings files.`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      done();
+      send({ type: "import_file", file_name: file.name, text: String(reader.result) });
+    };
+    reader.onerror = () => {
+      done();
+      say(`Could not read ${file.name}.`);
+    };
+    reader.readAsText(file);
+  }
+
+  function openImport(preview) {
+    page.importing = true;
+    const count = preview.vars.length;
+    $("import-about").textContent =
+      `${preview.file_name}, read as ${preview.format}: ${count} variable${count === 1 ? "" : "s"}. ` +
+      "Tick the ones to keep.";
+    $("import-name").value = preview.name;
+    $("import-error").textContent = "";
+    $("import-save").disabled = false;
+    const rows = preview.vars.map((v) => {
+      const box = el("input");
+      box.type = "checkbox";
+      box.checked = v.keep;
+      box.value = v.name;
+      const row = el("label", "import-var", box, el("span", "name", v.name), v.risky ? chip("changes how programs run", "tone-amber", "triangle-alert") : null);
+      if (v.risky) row.title = "It can change what a program runs or where it connects, so it starts unticked.";
+      return row;
+    });
+    $("import-vars").replaceChildren(...rows);
+    $("import-note-list").replaceChildren(...preview.notes.map((n) => el("li", null, n)));
+    show($("import-notes"), preview.notes.length > 0);
+    const dialog = $("import-dialog");
+    if (!dialog.open) dialog.showModal();
+    $("import-name").focus();
+  }
+
+  function tickImport(on) {
+    for (const box of $("import-vars").querySelectorAll("input")) box.checked = on;
+  }
+
+  function submitImport(event) {
+    event.preventDefault();
+    if (!page.importing) return;
+    const keep = [...$("import-vars").querySelectorAll("input:checked")].map((box) => box.value);
+    $("import-error").textContent = "";
+    $("import-save").disabled = true;
+    send({ type: "import_save", name: $("import-name").value.trim(), keep });
+  }
+
+  // Closes the import and drops the names shown. `tell` says the tray
+  // still holds the file.
+  function closeImport(tell) {
+    const dialog = $("import-dialog");
+    const was = page.importing;
+    page.importing = false;
+    $("import-form").reset();
+    $("import-vars").replaceChildren();
+    $("import-note-list").replaceChildren();
+    $("import-error").textContent = "";
+    if (dialog.open) dialog.close();
+    if (tell && was) send({ type: "import_cancel" });
+  }
+
   function anyDialogOpen() {
     return [...document.querySelectorAll("dialog")].some((d) => d.open);
   }
@@ -1462,6 +1570,17 @@
       send({ type: "login", on: page.login });
     });
     $("add").addEventListener("click", () => openRequest({ kind: "new" }));
+    $("import").addEventListener("click", pickImport);
+    $("import-file").addEventListener("change", readImport);
+    $("import-form").addEventListener("submit", submitImport);
+    $("import-all").addEventListener("click", () => tickImport(true));
+    $("import-none").addEventListener("click", () => tickImport(false));
+    $("import-cancel").addEventListener("click", () => closeImport(true));
+    $("import-x").addEventListener("click", () => closeImport(true));
+    $("import-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeImport(true);
+    });
     for (const tab of document.querySelectorAll("nav button[data-tab]")) {
       tab.addEventListener("click", () => go(tab.dataset.tab));
     }

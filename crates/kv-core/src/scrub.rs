@@ -2,11 +2,13 @@
 
 use std::collections::HashSet;
 
-use aho_corasick::{AhoCorasick, MatchKind};
+use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use base64::Engine;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_encode};
+
+use crate::crypto::fill_random;
 
 /// Values shorter than this many characters are not scrubbed; they would
 /// match ordinary text.
@@ -45,9 +47,70 @@ pub struct Scrubber {
     /// `replacements[i]` replaces pattern `i`.
     replacements: Vec<Vec<u8>>,
     max_pattern_len: usize,
-    /// Every proper prefix of every pattern, in ASCII lowercase: the tails a
-    /// stream must hold back, because more input could complete a secret.
-    prefixes: HashSet<Vec<u8>>,
+    /// A hash of every proper prefix of every pattern, in ASCII lowercase,
+    /// with its length: the tails a stream must hold back, because more
+    /// input could complete a secret. Hashes rather than the prefixes
+    /// themselves keep this linear in the patterns' length; keeping every
+    /// prefix took gigabytes for a few long values. Two strings that share
+    /// a hash only make a stream hold back more than it had to, never less.
+    prefixes: HashSet<u64>,
+    /// The base of the prefix hash, random per scrubber, so text chosen to
+    /// collide with a secret's prefixes does not know it.
+    base: u64,
+}
+
+/// The prime the prefix hash works modulo: 2^61 - 1.
+const MODULUS: u64 = (1 << 61) - 1;
+
+fn mul_mod(a: u64, b: u64) -> u64 {
+    let product = u128::from(a) * u128::from(b);
+    let folded = (product as u64 & MODULUS) + (product >> 61) as u64;
+    let folded = (folded & MODULUS) + (folded >> 61);
+    if folded >= MODULUS {
+        folded - MODULUS
+    } else {
+        folded
+    }
+}
+
+fn add_mod(a: u64, b: u64) -> u64 {
+    let sum = a + b;
+    if sum >= MODULUS { sum - MODULUS } else { sum }
+}
+
+/// One byte of a prefix, as the hash counts it: never zero, so leading
+/// zero bytes still change it.
+fn digit(byte: u8) -> u64 {
+    u64::from(byte.to_ascii_lowercase()) + 1
+}
+
+/// What the prefix set holds for a prefix of `len` bytes hashing to `hash`.
+fn prefix_key(len: usize, hash: u64) -> u64 {
+    hash ^ (len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn random_base() -> u64 {
+    let mut bytes = [0u8; 8];
+    fill_random(&mut bytes);
+    // Anything from 2^8 up keeps bytes from colliding as digits.
+    (u64::from_le_bytes(bytes) % (MODULUS - 512)) + 256
+}
+
+/// The most `cost` all of a vault's values may add up to. The scrubber
+/// takes about 52 bytes of memory and 0.2 microseconds to build per unit,
+/// so this keeps it near 110 MB and half a second at worst. Ordinary
+/// tokens cost about 8 per byte, so this is about 256 KiB of them; values
+/// full of punctuation, whose percent-encodings are long, cost about 55.
+pub const MAX_TOTAL_COST: usize = 2 * 1024 * 1024;
+
+/// What scrubbing `value` costs: the bytes of every encoding of it the
+/// scrubber looks for, which its memory and build time grow with. A value
+/// too short to scrub costs nothing.
+pub fn cost(value: &str) -> usize {
+    if value.chars().count() < MIN_SECRET_LEN {
+        return 0;
+    }
+    variants(value).iter().map(Vec::len).sum()
 }
 
 impl Scrubber {
@@ -66,16 +129,22 @@ impl Scrubber {
             }
         }
         let max_pattern_len = patterns.iter().map(Vec::len).max().unwrap_or(0);
+        let base = random_base();
         let mut prefixes = HashSet::new();
         for pattern in &patterns {
-            let lower = pattern.to_ascii_lowercase();
-            for end in 1..lower.len() {
-                prefixes.insert(lower[..end].to_vec());
+            let mut hash = 0;
+            for (len, &byte) in pattern.iter().enumerate().take(pattern.len() - 1) {
+                hash = add_mod(mul_mod(hash, base), digit(byte));
+                prefixes.insert(prefix_key(len + 1, hash));
             }
         }
         let matcher = (!patterns.is_empty()).then(|| {
             AhoCorasick::builder()
                 .match_kind(MatchKind::LeftmostLongest)
+                // A DFA took seconds to build for a long value of one
+                // repeated letter, under the daemon's lock; the contiguous
+                // NFA takes milliseconds and is quick enough for output.
+                .kind(Some(AhoCorasickKind::ContiguousNFA))
                 // Host names are case-insensitive, and a secret in another
                 // case is still a secret.
                 .ascii_case_insensitive(true)
@@ -87,6 +156,7 @@ impl Scrubber {
             replacements,
             max_pattern_len,
             prefixes,
+            base,
         }
     }
 
@@ -123,11 +193,21 @@ impl Scrubber {
     /// `pending.len()` when none is.
     fn held_from(&self, pending: &[u8]) -> usize {
         let longest = self.max_pattern_len.saturating_sub(1).min(pending.len());
-        let tail = pending[pending.len() - longest..].to_ascii_lowercase();
-        (1..=longest)
-            .rev()
-            .find(|&len| self.prefixes.contains(&tail[longest - len..]))
-            .map_or(pending.len(), |len| pending.len() - len)
+        let tail = &pending[pending.len() - longest..];
+        // The suffixes' hashes, shortest first: each adds one byte in front,
+        // at the next power of the base. Linear in the tail.
+        let mut hash = 0;
+        let mut power = 1;
+        let mut held = 0;
+        for (index, &byte) in tail.iter().enumerate().rev() {
+            hash = add_mod(hash, mul_mod(digit(byte), power));
+            power = mul_mod(power, self.base);
+            let len = tail.len() - index;
+            if self.prefixes.contains(&prefix_key(len, hash)) {
+                held = len;
+            }
+        }
+        pending.len() - held
     }
 }
 

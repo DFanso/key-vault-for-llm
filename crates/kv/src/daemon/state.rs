@@ -20,7 +20,7 @@ use kv_core::proto::{
     HandleRequest, HttpCall, Overview, PolicyPatch, ReceiveShareCall, RequestedHandle,
     RevealedField, RunCall, SendShareCall, SessionInfo, ShareRequestCall, Status, Verdict,
 };
-use kv_core::scrub::{MIN_SECRET_LEN, Scrubber};
+use kv_core::scrub::{self, MAX_TOTAL_COST, MIN_SECRET_LEN, Scrubber};
 use kv_core::secret::{
     AuthPlacement, Secret, SecretKind, SecretText, SecretValue, validate_handle,
 };
@@ -193,6 +193,7 @@ struct Pending {
     summary: String,
     detail: String,
     cwd: Option<String>,
+    env_vars: Vec<String>,
     client: Option<String>,
     session: Option<String>,
     /// Whether "allow for the session" may grant anything. Sending a share
@@ -221,6 +222,8 @@ struct Ask {
     summary: String,
     detail: String,
     cwd: Option<String>,
+    /// The variables the program would get, for `exec` and `run`.
+    env_vars: Vec<String>,
     grantable: bool,
     sent: Option<Sent>,
 }
@@ -474,6 +477,7 @@ impl Daemon {
             summary: summary.clone(),
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: false,
             sent: Some(sealed.sent),
         };
@@ -677,6 +681,9 @@ impl Daemon {
                 envvars::list(&risky)
             ));
         }
+        if let Err(failure) = check_scrub_budget(vault, &secret) {
+            return bad(failure.message);
+        }
         let kind = secret.kind();
         if let Err(e) = vault.upsert(secret) {
             return bad(e.to_string());
@@ -801,7 +808,22 @@ impl Daemon {
             request.allowed_hosts.clear();
         }
         if request.kind == SecretKind::Env {
-            request.env_vars = list(request.env_vars, &is_variable_name, 32);
+            request.env_vars = list(
+                request.env_vars,
+                &|name| envvars::name_problem(name).is_none(),
+                32,
+            );
+            // An agent picked these names, maybe on someone else's say-so:
+            // refused as a share's would be, so the user is not asked to
+            // fill in one that loads code into the program it is for.
+            let risky = envvars::risky(request.env_vars.iter());
+            if !risky.is_empty() {
+                return bad(format!(
+                    "{} change how a program runs or where it connects, so kv does not ask the \
+                     user for them; leave them out, or ask the user to add them in kv's window",
+                    envvars::list(&risky)
+                ));
+            }
             request.allowed_cmds = list(request.allowed_cmds, &|_| true, 16);
         } else {
             request.env_vars.clear();
@@ -931,6 +953,7 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1035,6 +1058,7 @@ impl Daemon {
         self.touch(now);
         let detail = serde_json::to_string(&call.argv).unwrap_or_default();
         let cwd = call.cwd.display().to_string();
+        let env_names: Vec<String> = env.iter().map(|(name, _)| name.clone()).collect();
         let job = Prepared::Exec(Box::new(ExecJob {
             handles: call.handles,
             argv: call.argv,
@@ -1056,6 +1080,7 @@ impl Daemon {
             summary,
             detail,
             cwd: Some(cwd),
+            env_vars: env_names,
             grantable: true,
             sent: None,
         };
@@ -1155,6 +1180,7 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1241,6 +1267,7 @@ impl Daemon {
                 humantime::format_duration(ttl)
             ),
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1313,6 +1340,7 @@ impl Daemon {
                 .collect(),
             _ => Vec::new(),
         };
+        let job_env_names: Vec<String> = env.iter().map(|(name, _)| name.clone()).collect();
         let job = Prepared::Run(Box::new(RunJob {
             handle: handle.clone(),
             argv: secret.policy.run.clone().unwrap_or_default(),
@@ -1337,6 +1365,7 @@ impl Daemon {
             summary: program.clone(),
             detail: format!("starts {program}"),
             cwd: None,
+            env_vars: job_env_names,
             grantable: true,
             sent: None,
         };
@@ -1377,6 +1406,11 @@ impl Daemon {
             summary: ask.summary,
             detail: printable(&ask.detail, 300),
             cwd: ask.cwd.map(|cwd| printable(&cwd, 300)),
+            env_vars: ask
+                .env_vars
+                .iter()
+                .map(|name| envvars::shown(name))
+                .collect(),
             client,
             session: session.map(|s| s.id.clone()),
             grantable: ask.grantable,
@@ -1828,6 +1862,7 @@ impl Daemon {
                 handles: p.ask.clone(),
                 detail: p.detail.clone(),
                 cwd: p.cwd.clone(),
+                env_vars: p.env_vars.clone(),
                 can_grant: p.session.is_some() && p.grantable,
                 expires_in_secs: p.expires.saturating_duration_since(now).as_secs(),
             })
@@ -2021,6 +2056,12 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
             description,
             value,
         } => update(vault, &name, description, value),
+        ControlCommand::EditVars {
+            name,
+            description,
+            set,
+            remove,
+        } => edit_vars(vault, &name, description, set, &remove),
         ControlCommand::ChangePassphrase { new_passphrase } => {
             match vault.change_passphrase(new_passphrase.expose(), KdfParams::RECOMMENDED) {
                 Ok(()) => Ok(Vec::new()),
@@ -2064,6 +2105,7 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
 fn add(vault: &mut Vault, mut secret: Secret, replace: bool) -> Result<Vec<String>, Failure> {
     // The user typed or pasted it, even over a handle a share delivered.
     secret.from_share = Some(false);
+    check_scrub_budget(vault, &secret)?;
     validate_value(&secret.value)?;
     validate_secret(&secret)?;
     let previous = vault.get(&secret.name).cloned();
@@ -2142,6 +2184,55 @@ fn update(
         updated.value = value;
     }
     validate_secret(&updated)?;
+    check_scrub_budget(vault, &updated)?;
+    let warnings = warnings_for(&updated);
+    vault
+        .upsert(updated)
+        .map_err(|e| fail(ControlErrorCode::Invalid, e.to_string()))?;
+    save_or_restore(vault, name, Some(previous))?;
+    Ok(warnings)
+}
+
+/// Sets and takes out some of an `env` handle's variables and keeps the
+/// rest, so a handle can be repaired without typing every value again,
+/// even one whose values kv will not show.
+fn edit_vars(
+    vault: &mut Vault,
+    name: &str,
+    description: Option<String>,
+    set: BTreeMap<String, SecretText>,
+    remove: &[String],
+) -> Result<Vec<String>, Failure> {
+    let invalid = |message: String| Err(fail(ControlErrorCode::Invalid, message));
+    let previous = vault.get(name).cloned().ok_or_else(|| unknown(name))?;
+    let SecretValue::Env { vars } = &previous.value else {
+        return invalid(format!(
+            "{name} is not an env handle, so it has no variables"
+        ));
+    };
+    if set.is_empty() && remove.is_empty() && description.is_none() {
+        return invalid("nothing changed".into());
+    }
+    let mut vars = vars.clone();
+    for var in remove {
+        if vars.remove(var).is_none() {
+            return invalid(format!("{name} has no variable {}", envvars::shown(var)));
+        }
+    }
+    vars.extend(set);
+    if vars.is_empty() {
+        return invalid(format!(
+            "{name} would have no variables left; remove the handle instead"
+        ));
+    }
+    let mut updated = previous.clone();
+    if let Some(description) = description {
+        updated.description = description;
+    }
+    updated.value = SecretValue::Env { vars };
+    validate_value(&updated.value)?;
+    validate_secret(&updated)?;
+    check_scrub_budget(vault, &updated)?;
     let warnings = warnings_for(&updated);
     vault
         .upsert(updated)
@@ -2203,6 +2294,38 @@ fn received_risky(vault: &Vault, secret: &Secret) -> Option<String> {
         secret.name,
         envvars::list(&risky)
     ))
+}
+
+/// What `secret`'s values cost the output scrubber.
+fn scrub_cost(secret: &Secret) -> usize {
+    secret
+        .sensitive_values()
+        .iter()
+        .map(|value| scrub::cost(value))
+        .sum()
+}
+
+/// Refuses `secret` if saving it would take the vault's values past what
+/// the output scrubber takes. A change that lowers the total always goes
+/// through, so a vault already over it can still be brought under.
+fn check_scrub_budget(vault: &Vault, secret: &Secret) -> Result<(), Failure> {
+    let others: usize = vault
+        .secrets()
+        .iter()
+        .filter(|s| s.name != secret.name)
+        .map(scrub_cost)
+        .sum();
+    let before = others + vault.get(&secret.name).map_or(0, scrub_cost);
+    let after = others + scrub_cost(secret);
+    if after > MAX_TOTAL_COST && after > before {
+        return Err(fail(
+            ControlErrorCode::Invalid,
+            "the vault's secret values would add up to more than kv's output scrubber takes \
+             (about 256 KiB of ordinary tokens, less of ones full of punctuation); remove \
+             handles you no longer need",
+        ));
+    }
+    Ok(())
 }
 
 /// Why a value is refused for its length. kv's output scrubber keeps every
@@ -2351,7 +2474,14 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
         _ => {}
     }
     let risky = risky_vars(&secret.value);
-    if !risky.is_empty() {
+    if !risky.is_empty() && secret.from_share == Some(true) {
+        warnings.push(format!(
+            "{name} came from a share and sets {}, which change how a program runs or where it \
+             connects, so kv will not start programs with it until you take them out, or add \
+             it again as your own",
+            envvars::list(&risky)
+        ));
+    } else if !risky.is_empty() {
         warnings.push(format!(
             "{name} sets {}, which change how a program runs or where it connects; every program \
              kv starts with {name} gets them, and kv will not send or take them in a share",
@@ -2400,7 +2530,9 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         ControlCommand::Add { secret, .. } => ("add", Some(secret.name.clone())),
         ControlCommand::Remove { name } => ("remove", Some(name.clone())),
         ControlCommand::SetPolicy { name, .. } => ("set_policy", Some(name.clone())),
-        ControlCommand::Update { name, .. } => ("update", Some(name.clone())),
+        ControlCommand::Update { name, .. } | ControlCommand::EditVars { name, .. } => {
+            ("update", Some(name.clone()))
+        }
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
         ControlCommand::Overview => ("overview", None),
@@ -2667,13 +2799,4 @@ fn agent_outcome(response: &AgentResponse) -> &'static str {
         AgentResponse::Error { .. } => "error",
         _ => "done",
     }
-}
-
-/// Letters, digits and `_`, not starting with a digit.
-fn is_variable_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

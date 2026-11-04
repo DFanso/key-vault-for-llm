@@ -70,6 +70,7 @@ fn approval(id: u64, can_grant: bool) -> Approval {
         handles: vec!["openrouter".into()],
         detail: format!("GET https://openrouter.ai/api/v1/models?page={id}"),
         cwd: None,
+        env_vars: Vec::new(),
         can_grant,
         expires_in_secs: 42,
     }

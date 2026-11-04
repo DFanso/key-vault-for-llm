@@ -55,6 +55,9 @@ enum Command {
     },
     /// Add a secret
     Add(AddArgs),
+    /// Add a .env or JSON settings file as one env handle; asks which
+    /// variables to keep and never prints a value
+    Import(ImportArgs),
     /// Remove a secret
     Rm { name: String },
     /// Change a secret's policy
@@ -160,6 +163,40 @@ struct AddArgs {
     replace: bool,
     #[command(flatten)]
     policy: PolicyArgs,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// The .env or JSON settings file to read
+    file: std::path::PathBuf,
+    /// Handle name; made from the file's name if left out
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+    /// How to read the file; guessed from its name and contents
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+    /// Keep only these variables (repeat, or separate with commas)
+    #[arg(long = "keep", value_name = "NAME", value_delimiter = ',')]
+    keep: Vec<String>,
+    /// Leave these variables out (repeat, or separate with commas)
+    #[arg(long = "drop", value_name = "NAME", value_delimiter = ',')]
+    drop: Vec<String>,
+    /// Save what is ticked at first without asking
+    #[arg(long)]
+    yes: bool,
+    /// Overwrite an existing handle with this name
+    #[arg(long)]
+    replace: bool,
+    #[command(flatten)]
+    policy: PolicyArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FormatArg {
+    Env,
+    Json,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -434,6 +471,7 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Command::Import(args) => import(&paths, &mut input, args).await,
         Command::Rm { name } => {
             let command = ControlCommand::Remove { name: name.clone() };
             authorized(&paths, &mut input, command).await?;
@@ -630,6 +668,135 @@ fn no_device() -> String {
 enum Credential {
     Passphrase(SecretText),
     Device(DeviceCredential),
+}
+
+/// `kv import`: reads the file, lets the user pick variables, and adds the
+/// handle the way `kv add` does.
+async fn import(paths: &Paths, input: &mut Input, args: ImportArgs) -> Result<()> {
+    use kv_core::import::{self, Format, MAX_FILE_LEN};
+
+    let shown = args.file.display().to_string();
+    let size = std::fs::metadata(&args.file)
+        .map_err(|e| CliError(format!("cannot read {shown}: {e}")))?
+        .len();
+    if size > MAX_FILE_LEN as u64 {
+        return Err(CliError(format!(
+            "{shown} is larger than 64 KiB, which kv does not import"
+        )));
+    }
+    let bytes = Zeroizing::new(
+        std::fs::read(&args.file).map_err(|e| CliError(format!("cannot read {shown}: {e}")))?,
+    );
+    let file_name = args
+        .file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let format = match args.format {
+        Some(FormatArg::Env) => Format::Env,
+        Some(FormatArg::Json) => Format::Json,
+        None => Format::guess(
+            &file_name,
+            &String::from_utf8_lossy(&bytes[..bytes.len().min(64)]),
+        ),
+    };
+    let imported = import::parse(format, &bytes).map_err(|e| CliError(format!("{shown}: {e}")))?;
+    let names: Vec<String> = imported.names().into_iter().map(str::to_owned).collect();
+    for name in args.keep.iter().chain(&args.drop) {
+        if !names.contains(name) {
+            return Err(CliError(format!("{shown} has no variable {name}")));
+        }
+    }
+    let mut keep = if args.keep.is_empty() {
+        crate::importing::default_keep(&imported)
+    } else {
+        args.keep.clone()
+    };
+    keep.retain(|name| !args.drop.contains(name));
+    println!("{shown}: {} variables ({})", names.len(), format.label());
+    for note in crate::importing::notes(&imported) {
+        eprintln!("note: {note}");
+    }
+    let choose = args.keep.is_empty() && args.drop.is_empty() && !args.yes;
+    if choose {
+        if !input.interactive {
+            return Err(CliError(
+                "stdin is not a terminal; pass --yes, --keep or --drop to pick the variables"
+                    .into(),
+            ));
+        }
+        if !pick(&names, &mut keep)? {
+            return Err(CliError("nothing was imported".into()));
+        }
+    } else {
+        for name in &names {
+            let mark = if keep.contains(name) { "x" } else { " " };
+            println!("  [{mark}] {name}");
+        }
+    }
+    if keep.is_empty() {
+        return Err(CliError(
+            "no variable is ticked, so nothing was imported".into(),
+        ));
+    }
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| crate::importing::suggested_name(&file_name));
+    let description = args
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("imported from {file_name}"));
+    let mut policy = Policy::default();
+    args.policy.patch().apply(&mut policy);
+    let secret = crate::importing::secret(&name, &description, imported.keep(&keep), policy);
+    let credential = input
+        .credential(paths, &adding(&name, args.replace))
+        .await?;
+    let command = ControlCommand::Add {
+        secret,
+        replace: args.replace,
+    };
+    send_as(paths, input, credential, command).await?;
+    println!("added {name} with {} variables", keep.len());
+    Ok(())
+}
+
+/// Shows `names` with tick boxes and lets the user toggle them by number.
+/// Returns whether to save.
+fn pick(names: &[String], keep: &mut Vec<String>) -> Result<bool> {
+    loop {
+        for (n, name) in names.iter().enumerate() {
+            let mark = if keep.contains(name) { "x" } else { " " };
+            println!("  [{mark}] {:>2} {name}", n + 1);
+        }
+        print!("Numbers to tick or untick, a for all, n for none, Enter to save, q to quit: ");
+        io::Write::flush(&mut io::stdout())?;
+        let mut line = String::new();
+        if io::stdin().lock().read_line(&mut line)? == 0 {
+            return Ok(false);
+        }
+        let line = line.trim();
+        match line {
+            "" => return Ok(true),
+            "q" | "Q" => return Ok(false),
+            "a" | "A" => *keep = names.to_vec(),
+            "n" | "N" => keep.clear(),
+            _ => {
+                for part in line.split([' ', ',']).filter(|p| !p.is_empty()) {
+                    match part
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| names.get(n.wrapping_sub(1)))
+                    {
+                        Some(name) if keep.contains(name) => keep.retain(|k| k != name),
+                        Some(name) => keep.push(name.clone()),
+                        None => println!("{part} is not one of the numbers"),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Sends `command` with the credential `Input::credential` picks.
