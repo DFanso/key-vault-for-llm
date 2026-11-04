@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod mcp;
 pub mod notify;
 pub mod paths;
+pub mod sharefile;
 pub mod throttle;
 pub mod tray;
 pub mod tui;

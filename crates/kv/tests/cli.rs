@@ -808,3 +808,116 @@ fn import_flattens_a_settings_file_and_warns_against_sharing_it() {
         ["ConnectionStrings__Default", "Logging__LogLevel__Default"]
     );
 }
+
+#[test]
+fn add_keeps_a_file_as_a_handle_and_never_lists_its_contents() {
+    let kv = Kv::initialized();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("passwords.txt");
+    std::fs::write(&path, b"correct-horse-battery\r\nlonger-password-2\r\n").unwrap();
+    let path = path.to_str().unwrap();
+
+    let output = kv.run(
+        &[
+            "add",
+            "passwords",
+            "--kind",
+            "file",
+            "--file",
+            path,
+            "--cmd",
+            "cat",
+            "--mode",
+            "auto",
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    let listed = kv.ok(&["list", "--json"], "");
+    assert!(listed.contains("\"kind\": \"file\""), "{listed}");
+    assert!(listed.contains("KV_FILE_PASSWORDS"), "{listed}");
+    assert!(!listed.contains("correct-horse"), "{listed}");
+    assert!(!listed.contains("Y29ycmVjdC"), "{listed}");
+
+    // --file is needed, and a file over 1 MiB is refused with the reason.
+    let stderr = kv.fails(&["add", "nofile", "--kind", "file"], &format!("{PASS}\n"));
+    assert!(stderr.contains("--file"), "{stderr}");
+    let big = dir.path().join("big.bin");
+    std::fs::write(&big, vec![0u8; 1024 * 1024 + 1]).unwrap();
+    let stderr = kv.fails(
+        &[
+            "add",
+            "big",
+            "--kind",
+            "file",
+            "--file",
+            big.to_str().unwrap(),
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert!(stderr.contains("1 MiB"), "{stderr}");
+}
+
+#[test]
+fn a_big_binary_file_is_kept_with_a_warning_and_a_big_word_list_is_refused() {
+    let kv = Kv::initialized();
+    let dir = TempDir::new().unwrap();
+
+    // 1 MiB of bytes that are not text: nothing to scrub, so it fits, and
+    // kv says so.
+    let binary = dir.path().join("keystore.bin");
+    let bytes: Vec<u8> = (0..1024 * 1024u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8 | 0x80)
+        .collect();
+    std::fs::write(&binary, &bytes).unwrap();
+    let output = kv.run(
+        &[
+            "add",
+            "keystore",
+            "--kind",
+            "file",
+            "--file",
+            binary.to_str().unwrap(),
+            "--cmd",
+            "cat",
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("cannot scrub its contents"), "{stderr}");
+
+    // A text list whose lines the scrubber would have to take whole is
+    // more than its budget holds, so kv refuses it rather than leave most
+    // of it unscrubbed.
+    let words = dir.path().join("words.txt");
+    let list: String = (0..40_000)
+        .map(|i| format!("word-{i:08}-secret\n"))
+        .collect();
+    std::fs::write(&words, &list).unwrap();
+    let stderr = kv.fails(
+        &[
+            "add",
+            "words",
+            "--kind",
+            "file",
+            "--file",
+            words.to_str().unwrap(),
+            "--cmd",
+            "cat",
+        ],
+        &format!("{PASS}\n"),
+    );
+    assert!(stderr.contains("scrubber"), "{stderr}");
+}

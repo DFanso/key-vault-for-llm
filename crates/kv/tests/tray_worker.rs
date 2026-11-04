@@ -1366,3 +1366,269 @@ async fn a_file_that_cannot_be_read_says_why() {
         "{pages:?}"
     );
 }
+
+/// A file as the page sends it: its name and its bytes as base64.
+fn picked(file_name: &str, bytes: &[u8]) -> FromPage {
+    use base64::Engine;
+    FromPage::FileRead {
+        file_name: file_name.into(),
+        data: SecretText::new(base64::engine::general_purpose::STANDARD.encode(bytes)),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_picked_in_the_window_is_kept_as_a_file_handle() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    worker.model().await;
+    desk.take();
+
+    // A text file: the page hears its size and fingerprint, never a byte.
+    let text = b"correct-horse-battery\r\nlonger-password-2\r\n";
+    assert!(!worker.act(page(picked("passwords.txt", text))).await);
+    let pages = desk.take();
+    let [
+        ToPage::FilePreview {
+            file_name,
+            name,
+            size,
+            fingerprint,
+            scrubbed,
+            notes,
+        },
+    ] = pages.as_slice()
+    else {
+        panic!("expected one preview, got {pages:?}");
+    };
+    assert_eq!(file_name, "passwords.txt");
+    assert_eq!(name, "passwords");
+    assert_eq!(*size, text.len());
+    assert_eq!(fingerprint.len(), 14);
+    assert!(*scrubbed && notes.is_empty(), "{notes:?}");
+    assert!(!format!("{pages:?}").contains("correct-horse"));
+
+    // A name kv refuses keeps the file for another try.
+    assert!(
+        !worker
+            .act(page(FromPage::FileSave {
+                name: "Bad Name".into(),
+                cmds: "hydra".into(),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    assert!(
+        matches!(pages.as_slice(), [ToPage::FileError { .. }]),
+        "{pages:?}"
+    );
+    assert!(
+        !worker
+            .act(page(FromPage::FileSave {
+                name: "passwords".into(),
+                cmds: "hydra, medusa,".into(),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    let [ToPage::FileAdded { name, warnings }] = pages.as_slice() else {
+        panic!("expected the file saved, got {pages:?}");
+    };
+    assert_eq!(name, "passwords");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let saved = handle(&mut worker, &desk, "passwords").await.unwrap();
+    assert_eq!(saved.kind, SecretKind::File);
+    assert_eq!(saved.allowed_cmds, ["hydra", "medusa"]);
+    assert_eq!(saved.mode, kv_core::policy::Mode::Ask);
+    assert_eq!(saved.env_vars, ["KV_FILE_PASSWORDS"]);
+
+    // Nothing is left to save, and a second Save does nothing.
+    assert!(
+        !worker
+            .act(page(FromPage::FileSave {
+                name: "again".into(),
+                cmds: String::new(),
+            }))
+            .await
+    );
+    assert!(desk.take().is_empty());
+
+    // A file that is not text says kv cannot scrub it; a cancel drops it.
+    let binary: Vec<u8> = (0..300u32).map(|i| (i * 7 % 256) as u8 | 0x80).collect();
+    assert!(!worker.act(page(picked("keystore.p12", &binary))).await);
+    let pages = desk.take();
+    let [
+        ToPage::FilePreview {
+            scrubbed, notes, ..
+        },
+    ] = pages.as_slice()
+    else {
+        panic!("expected one preview, got {pages:?}");
+    };
+    assert!(!*scrubbed);
+    assert!(notes[0].contains("cannot scrub"), "{notes:?}");
+    assert!(!worker.act(page(FromPage::FileCancel)).await);
+    assert!(
+        !worker
+            .act(page(FromPage::FileSave {
+                name: "keystore".into(),
+                cmds: String::new(),
+            }))
+            .await
+    );
+    assert!(handle(&mut worker, &desk, "keystore").await.is_none());
+
+    // Too big, or not base64 at all, says why.
+    let big = vec![0u8; kv_core::secret::MAX_FILE_LEN + 1];
+    assert!(!worker.act(page(picked("big.bin", &big))).await);
+    let pages = desk.take();
+    let [ToPage::FileError { message }] = pages.as_slice() else {
+        panic!("expected an error, got {pages:?}");
+    };
+    assert!(message.contains("1 MiB"), "{message}");
+    assert!(
+        !worker
+            .act(page(FromPage::FileRead {
+                file_name: "x.txt".into(),
+                data: SecretText::new("not base64!!"),
+            }))
+            .await
+    );
+    assert!(matches!(desk.take().as_slice(), [ToPage::FileError { .. }]));
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_is_sent_as_a_kvshare_file_and_a_received_one_is_saved_as_it_arrived() {
+    use kv_core::proto::{ReceiveShareCall, ShareRequestCall};
+    use kv_core::secret::SecretValue;
+    use kv_core::share::{OpenRequest, ShareRequest, SharedSecret, open, seal};
+
+    let (daemon, _fake, desk, worker) = unlocked().await;
+    let downloads = TempDir::new().unwrap();
+    let mut worker = worker.with_downloads(downloads.path().join("Downloads"));
+    assert!(!worker.act(Action::Open(Tab::Shares)).await);
+
+    // Someone seals a file to this vault's request. Not text, with CRLF, a
+    // NUL and no newline at the end, and too long for a message.
+    let mut bytes = b"\xEF\xBB\xBFcorrect-horse-battery\r\nsecond-line\r\n".to_vec();
+    bytes.extend([0, 159, 146, 150, 255, 13, 10, 0]);
+    bytes.extend((0..9_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+    bytes.extend(b"no newline at the end");
+    let code = match client::agent(
+        &daemon.paths,
+        None,
+        &AgentRequest::RequestShare(ShareRequestCall {
+            note: "the word list".into(),
+            from: "me".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    {
+        AgentResponse::ShareRequested { code, .. } => code,
+        other => panic!("expected a request code, got {other:?}"),
+    };
+    let share = seal(
+        &ShareRequest::decode(&code).unwrap(),
+        &SharedSecret {
+            name: "wordlist".into(),
+            description: String::new(),
+            value: SecretValue::file("C:\\Users\\alice\\con:words.bin", &bytes).unwrap(),
+            allowed_hosts: Vec::new(),
+            allow_plain_http: false,
+            allowed_methods: Vec::new(),
+            read_only: false,
+            from: "alice".into(),
+            note: String::new(),
+        },
+    )
+    .unwrap();
+    let received = client::agent(
+        &daemon.paths,
+        None,
+        &AgentRequest::ReceiveShare(ReceiveShareCall { share, name: None }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(received, AgentResponse::ShareReceived { .. }),
+        "{received:?}"
+    );
+    worker.model().await;
+    desk.take();
+
+    // Saved to the Downloads folder, which is made, under a name that is
+    // safe to create, the bytes untouched. A second save never replaces it.
+    for expected in ["con_words.bin", "con_words (1).bin"] {
+        assert!(
+            !worker
+                .act(page(FromPage::SaveFile {
+                    handle: "wordlist".into()
+                }))
+                .await
+        );
+        let pages = desk.take();
+        let [ToPage::FileSaved { handle, path }] = pages.as_slice() else {
+            panic!("expected the file saved, got {pages:?}");
+        };
+        assert_eq!(handle, "wordlist");
+        let path = std::path::Path::new(path);
+        assert_eq!(path.file_name().unwrap(), expected);
+        assert_eq!(path.parent().unwrap(), downloads.path().join("Downloads"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    // Sending a file seals it to a file instead of showing text.
+    let theirs = OpenRequest::new(
+        "the word list".into(),
+        "carol".into(),
+        1_800_000_000,
+        86_400,
+    );
+    assert!(
+        !worker
+            .act(page(FromPage::SendShare {
+                request: theirs.code(),
+                handle: "wordlist".into(),
+                name: String::new(),
+                from: "me".into(),
+                note: String::new(),
+            }))
+            .await
+    );
+    let pages = desk.take();
+    let [
+        ToPage::ShareSaved {
+            path,
+            safety_code,
+            to,
+            asked_for,
+        },
+    ] = pages.as_slice()
+    else {
+        panic!("expected a share saved as a file, got {pages:?}");
+    };
+    assert_eq!(*safety_code, theirs.safety_code());
+    assert_eq!(
+        (to.as_str(), asked_for.as_str()),
+        ("carol", "the word list")
+    );
+    let path = std::path::Path::new(path);
+    assert_eq!(
+        path.file_name().unwrap().to_string_lossy(),
+        format!("wordlist-{}.kvshare", theirs.safety_code())
+    );
+    // Carol's vault opens it and gets the same file, name and all.
+    let sealed = std::fs::read_to_string(path).unwrap();
+    assert!(sealed.starts_with("kv-share:v1:") && !sealed.contains("correct-horse"));
+    let (_, opened) = open(&sealed, std::slice::from_ref(&theirs)).unwrap();
+    let (name, back) = opened.value.file_parts().unwrap();
+    assert_eq!(name, "con:words.bin");
+    assert_eq!(&back[..], &bytes[..]);
+    assert!(
+        !pages
+            .iter()
+            .any(|p| matches!(p, ToPage::Shared { .. } | ToPage::ShareError { .. }))
+    );
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}

@@ -158,6 +158,11 @@ struct AddArgs {
     /// env: variable to inject (repeat for several); each value is prompted for
     #[arg(long = "var", value_name = "NAME")]
     vars: Vec<String>,
+    /// file: the file to keep, whatever it holds, up to 1 MiB. Programs get
+    /// it as a file (`{file:<handle>}` in exec arguments) and agents never
+    /// see its contents
+    #[arg(long, value_name = "PATH", required_if_eq("kind", "file"))]
+    file: Option<std::path::PathBuf>,
     /// Overwrite an existing handle with this name
     #[arg(long)]
     replace: bool,
@@ -205,6 +210,7 @@ enum Kind {
     Postgres,
     Redis,
     Env,
+    File,
 }
 
 #[derive(Args)]
@@ -954,7 +960,41 @@ fn read_value(args: &AddArgs, input: &mut Input) -> Result<SecretValue> {
             }
             SecretValue::Env { vars }
         }
+        Kind::File => {
+            let path = args
+                .file
+                .as_ref()
+                .ok_or_else(|| CliError("a file handle needs --file <path>".into()))?;
+            read_file_value(path)?
+        }
     })
+}
+
+/// A `file` value holding the file at `path`, byte for byte, under the
+/// file's own name.
+fn read_file_value(path: &std::path::Path) -> Result<SecretValue> {
+    use kv_core::secret::MAX_FILE_LEN;
+
+    let shown = path.display().to_string();
+    let metadata =
+        std::fs::metadata(path).map_err(|e| CliError(format!("cannot read {shown}: {e}")))?;
+    if !metadata.is_file() {
+        return Err(CliError(format!("{shown} is not a file")));
+    }
+    if metadata.len() > MAX_FILE_LEN as u64 {
+        return Err(CliError(format!(
+            "{shown} is {} bytes; a file handle holds at most 1 MiB",
+            metadata.len()
+        )));
+    }
+    let bytes = Zeroizing::new(
+        std::fs::read(path).map_err(|e| CliError(format!("cannot read {shown}: {e}")))?,
+    );
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    SecretValue::file(&file_name, &bytes).map_err(|e| CliError(format!("{shown}: {e}")))
 }
 
 /// Tokens and connection URLs never mean anything with surrounding

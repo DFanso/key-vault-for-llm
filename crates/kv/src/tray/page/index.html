@@ -163,6 +163,8 @@
           </div>
           <button id="import" type="button" class="outline" title="A .env or JSON settings file. To see .env in the file panel on a Mac, press Command-Shift-Period."><span class="i i-file-up" aria-hidden="true"></span>Import file</button>
           <input id="import-file" type="file" hidden>
+          <button id="add-file" type="button" class="outline" title="Any file, up to 1 MiB: a password list, a key, a certificate. kv hands it to a program as a file and never shows it to an agent."><span class="i i-file-up" aria-hidden="true"></span>Add file</button>
+          <input id="add-file-input" type="file" hidden>
           <button id="add" type="button" class="primary"><span class="i i-plus" aria-hidden="true"></span>Add handle</button>
         </div>
         <div id="no-handles" class="empty">
@@ -299,6 +301,11 @@
         <label for="share-code" id="share-code-label"></label>
         <input id="share-code" type="text" class="code" autocomplete="off" spellcheck="false">
       </div>
+      <div class="field" data-for="receive">
+        <button id="share-pick" type="button" class="outline"><span class="i i-file-up" aria-hidden="true"></span><span id="share-pick-text">Choose a .kvshare file</span></button>
+        <input id="share-file" type="file" accept=".kvshare" hidden>
+        <p class="hint">A share of a file arrives as an attachment, not as text. Save the attachment, then choose it here.</p>
+      </div>
       <div class="field" data-for="send">
         <label for="share-handle">Handle to send</label>
         <select id="share-handle"></select>
@@ -330,6 +337,7 @@
     <p id="share-error" class="message" role="alert"></p>
     <div class="actions">
       <button type="button" id="share-cancel" class="outline">Cancel</button>
+      <button type="button" id="share-show" class="outline" hidden><span class="i i-folder" aria-hidden="true"></span>Show in folder</button>
       <button type="button" id="share-copy" class="primary" hidden><span class="i i-copy" aria-hidden="true"></span><span class="copy-label">Copy</span></button>
       <button type="submit" id="share-submit" class="primary"></button>
     </div>
@@ -370,6 +378,36 @@
   </form>
 </dialog>
 
+<dialog id="file-dialog" aria-labelledby="file-title">
+  <form id="file-form">
+    <div class="dialog-head">
+      <span class="stat-icon tone-accent"><span class="i i-file-up" aria-hidden="true"></span></span>
+      <h2 id="file-title">Keep a file</h2>
+      <button type="button" class="icon-button" id="file-x" aria-label="Cancel"><span class="i i-x" aria-hidden="true"></span></button>
+    </div>
+    <p id="file-about" class="muted"></p>
+    <div class="field">
+      <label for="file-name">Handle name</label>
+      <input id="file-name" type="text" class="code" autocomplete="off" spellcheck="false">
+      <p class="hint">Agents use this name. They never see what is in the file.</p>
+    </div>
+    <div class="field">
+      <label for="file-cmds">Programs that may use it</label>
+      <input id="file-cmds" type="text" class="code" autocomplete="off" spellcheck="false">
+      <p class="hint">Comma-separated, such as hydra, ssh. Left blank, every use is denied until you add one under Policy.</p>
+    </div>
+    <div id="file-notes" class="callout tone-amber" hidden>
+      <span class="i i-triangle-alert" aria-hidden="true"></span>
+      <ul id="file-note-list"></ul>
+    </div>
+    <p id="file-error" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="file-cancel" class="outline">Cancel</button>
+      <button type="submit" id="file-save" class="primary"><span class="i i-check" aria-hidden="true"></span>Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="confirm-dialog" aria-labelledby="confirm-text">
   <form id="confirm">
     <div class="dialog-head">
@@ -394,7 +432,10 @@
     <p>Anyone who can see your screen can read these. They hide again after a minute.</p>
   </div>
   <div id="reveal-fields"></div>
+  <p id="reveal-status" class="muted" role="status" hidden></p>
   <div class="actions">
+    <button type="button" id="reveal-show" class="outline" hidden><span class="i i-folder" aria-hidden="true"></span>Show in folder</button>
+    <button type="button" id="reveal-save" class="outline" hidden><span class="i i-download" aria-hidden="true"></span>Save file</button>
     <button type="button" id="reveal-close" class="primary"><span class="i i-eye" aria-hidden="true"></span>Hide</button>
   </div>
 </dialog>

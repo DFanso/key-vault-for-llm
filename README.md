@@ -51,7 +51,8 @@ The agent then sees these tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
-- `exec`: runs a program (never a shell) with an `env` handle's variables set.
+- `exec`: runs a program (never a shell) with an `env` handle's variables set,
+  or with a `file` handle's file written for it to read (see below).
 - `db_query`: runs SQL on a `postgres` handle or a command on a `redis`
   handle (see below).
 - `db_connect`: a connection URL on this machine for tools that need their own
@@ -357,6 +358,46 @@ holds: someone who forges a share could point their app at a server of
 theirs. The same goes for a `.env` variable that holds an address, such as
 `DATABASE_URL`. Tokens and passwords are fine to share, with the safety code
 checked as above.
+
+### Sharing any file
+
+A `file` handle keeps any file as it is, up to 1 MiB: a list of passwords, a
+key, a certificate, a keystore. kv stores the bytes, never reads them as
+text, and never shows them to an agent.
+
+```sh
+kv add passwords --kind file --file ./passwords.txt --cmd hydra --mode ask
+```
+
+A program uses the file through `exec`. List the handle with the others, and
+put `{file:passwords}` in an argument where the file's path goes (or read the
+path from `KV_FILE_PASSWORDS`). kv writes the file to a folder only you can
+read, under its own name, and removes it when the program ends. If the file
+is text, each line of eight characters or more is scrubbed from the program's
+output like any other secret; a binary file is not scrubbed, and `kv add`
+says so. A text file whose lines add up to more than the scrubber takes
+(about 250 KiB of text) is refused for the same reason.
+
+Sharing works as above, with two differences. The sealed share of a file is
+too long for a chat message, so `send_share` saves it as a `.kvshare` file
+and gives the agent its path to send as an attachment (with Telegram,
+`telegram_send_file`). The person's agent passes the path it saved the
+attachment to as `receive_share`'s `file`. The file is encrypted to the
+receiver's vault and nobody else's, and it arrives byte for byte or not at
+all: the share carries the file's SHA-256, which the receiver's kv checks
+before saving, on top of the encryption refusing anything changed on the
+way. Your approval names the file, its size and a short fingerprint, so you
+can read it out to the receiver to confirm it is the same one. A received
+file starts in ask mode, like any share.
+
+The window does the same without the terminal. On the Handles screen, **Add
+file** picks a file and asks for a name and the programs that may use it. When
+you send a file on the Shares screen, kv saves the sealed share as a
+`.kvshare` file in your Downloads folder and offers **Show in folder**; to
+receive one, choose it with **Choose a .kvshare file** in the Receive dialog.
+The download icon beside a received file saves it to Downloads exactly as it
+arrived, under a name that is safe to create, and never over a file already
+there.
 
 ## Day to day
 

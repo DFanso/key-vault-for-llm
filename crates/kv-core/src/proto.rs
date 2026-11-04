@@ -499,6 +499,12 @@ pub enum ControlCommand {
     RevealShare {
         handle: String,
     },
+    /// The file a `file` handle received through a share holds, for the
+    /// user to save. Answered like `RevealShare`: only for a value kv
+    /// received, never one the user added.
+    ExportFile {
+        handle: String,
+    },
     /// Drops an open share request, with its key, or a received or sent
     /// record.
     ForgetShare {
@@ -546,6 +552,16 @@ pub enum ControlResponse {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// A received file's bytes, for the user to save exactly as they are.
+    File {
+        handle: String,
+        /// The file's base name.
+        file_name: String,
+        /// SHA-256 of the bytes, in lowercase hex.
+        sha256: String,
+        /// The bytes as standard padded base64.
+        data: SecretText,
     },
     /// A request code to send to whoever has the secret.
     ShareRequested {

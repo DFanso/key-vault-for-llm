@@ -17,6 +17,7 @@ use crate::audit::Audit;
 
 pub mod db;
 pub mod exec;
+pub mod files;
 pub mod http;
 pub mod lease;
 pub mod net;
@@ -49,6 +50,9 @@ pub struct ExecJob {
     pub timeout: Duration,
     /// Variables from every handle, already checked for clashes.
     pub env: Vec<(String, SecretText)>,
+    /// The files of the `file` handles, written for the program to read
+    /// and removed when it ends.
+    pub files: Vec<files::JobFile>,
     pub scrubber: Arc<Scrubber>,
     pub audit: Audit,
     pub started: Instant,

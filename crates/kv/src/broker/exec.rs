@@ -13,6 +13,7 @@ use kv_core::scrub::Scrubber;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+use super::files;
 use super::process::{ProcessTree, isolate};
 use super::{ExecJob, capped_text};
 use crate::audit::Use;
@@ -65,11 +66,31 @@ async fn execute(job: &ExecJob) -> Result<AgentResponse, AgentResponse> {
             format!("{name} was not found on the daemon's PATH"),
         )
     })?;
+    // The files of `file` handles stay on disk until the program and
+    // anything it left running are gone: `staged` is dropped last.
+    let staged = if job.files.is_empty() {
+        None
+    } else {
+        Some(files::Staged::write(&job.files).map_err(|e| {
+            error(
+                AgentErrorCode::UpstreamError,
+                format!("could not write the files for {name}: {e}"),
+            )
+        })?)
+    };
+    let args: Vec<String> = job.argv[1..]
+        .iter()
+        .map(|argument| match &staged {
+            Some(staged) => staged.substitute(argument),
+            None => argument.clone(),
+        })
+        .collect();
     let mut command = Command::new(&program);
     command
-        .args(&job.argv[1..])
+        .args(&args)
         .current_dir(&job.cwd)
         .envs(job.env.iter().map(|(name, value)| (name, value.expose())))
+        .envs(staged.iter().flat_map(|staged| staged.env()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
