@@ -463,7 +463,8 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .stat-head { display: flex; align-items: center; gap: 10px; }
 .stat-head .stat-icon { width: 30px; height: 30px; border-radius: 10px; }
 .stat-label { color: var(--text-2); font-size: 12.5px; font-weight: 600; }
-.stat-value { font-size: 28px; font-weight: 700; line-height: 1.15; margin-top: 8px; }
+/* The numbers in the rounded system face, as telegram-mcp draws its own. */
+.stat-value { font-family: ui-rounded, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 28px; font-weight: 700; line-height: 1.15; margin-top: 8px; }
 .stat-note { color: var(--muted); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .needs {
   display: grid;
