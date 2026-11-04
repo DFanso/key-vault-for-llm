@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod device;
 pub mod forms;
 pub mod frame;
+pub mod importing;
 pub mod ipc;
 pub mod mcp;
 pub mod notify;

@@ -177,6 +177,8 @@
             <button type="button" role="radio" data-filter="auto" aria-checked="false">Auto</button>
             <button type="button" role="radio" data-filter="deny" aria-checked="false">Deny</button>
           </div>
+          <button id="import" type="button" class="outline" title="A .env or JSON settings file. To see .env in the file panel on a Mac, press Command-Shift-Period."><span class="i i-file-up" aria-hidden="true"></span>Import file</button>
+          <input id="import-file" type="file" hidden>
           <button id="add" type="button" class="primary"><span class="i i-plus" aria-hidden="true"></span>Add handle</button>
         </div>
         <div id="no-handles" class="empty">
@@ -342,6 +344,40 @@
       <button type="button" id="share-cancel" class="outline">Cancel</button>
       <button type="button" id="share-copy" class="primary" hidden><span class="i i-copy" aria-hidden="true"></span><span class="copy-label">Copy</span></button>
       <button type="submit" id="share-submit" class="primary"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="import-dialog" aria-labelledby="import-title">
+  <form id="import-form">
+    <div class="dialog-head">
+      <span class="stat-icon tone-accent"><span class="i i-file-up" aria-hidden="true"></span></span>
+      <h2 id="import-title">Import a file</h2>
+      <button type="button" class="icon-button" id="import-x" aria-label="Cancel"><span class="i i-x" aria-hidden="true"></span></button>
+    </div>
+    <p id="import-about" class="muted"></p>
+    <div class="field">
+      <label for="import-name">Handle name</label>
+      <input id="import-name" type="text" class="code" autocomplete="off" spellcheck="false">
+      <p class="hint">One env handle holds every variable you tick.</p>
+    </div>
+    <div class="field">
+      <div class="import-head">
+        <span class="label" id="import-vars-label">Variables</span>
+        <button type="button" id="import-all" class="link">All</button>
+        <button type="button" id="import-none" class="link">None</button>
+      </div>
+      <div id="import-vars" class="import-vars" role="group" aria-labelledby="import-vars-label"></div>
+      <p class="hint">Only names show here; the values stay in kv. Variables that change how a program runs or where it connects start unticked.</p>
+    </div>
+    <div id="import-notes" class="callout tone-amber" hidden>
+      <span class="i i-triangle-alert" aria-hidden="true"></span>
+      <ul id="import-note-list"></ul>
+    </div>
+    <p id="import-error" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="import-cancel" class="outline">Cancel</button>
+      <button type="submit" id="import-save" class="primary"><span class="i i-check" aria-hidden="true"></span>Save</button>
     </div>
   </form>
 </dialog>
