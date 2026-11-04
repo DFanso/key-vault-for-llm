@@ -637,6 +637,11 @@ pub struct Approval {
     pub detail: String,
     /// Working directory, for `exec`.
     pub cwd: Option<String>,
+    /// The environment variables the program would get, for `exec` and
+    /// `run`: names only, never values. Shown so the user sees what is
+    /// injected, not only the command.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
     /// Whether `allow_session` can grant anything: the request named its
     /// agent session.
     pub can_grant: bool,

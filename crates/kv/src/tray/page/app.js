@@ -733,6 +733,7 @@
       el("div", "chips", ...approval.handles.map((h) => chip(h, "tone-grey", "key-round"))),
       el("div", "code-box", approval.detail),
       approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
+      approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
       el("div", "timer", bar, el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
       el(
         "div",

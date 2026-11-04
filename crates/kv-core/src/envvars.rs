@@ -17,7 +17,10 @@ pub const MAX_VALUE_LEN: usize = 4096;
 /// Most bytes of values in one `env` handle. The scrubber's cost grows with
 /// the square of each value's length, so this keeps one handle to two values
 /// of `MAX_VALUE_LEN` or many short ones: eight of 4096 bytes measured
-/// 1.26 GB. To be lifted once the scrubber no longer keeps every prefix.
+/// 1.26 GB. Even within it, the worst case for one handle measured about
+/// 1.58 GB and 1.2 s (two all-punctuation 4 KiB values) or 9.4 s (two of
+/// one repeated letter), built under the daemon's lock, and nothing here
+/// limits the total across handles.
 pub const MAX_VALUES_LEN: usize = 8 * 1024;
 
 /// Most variables in one `env` handle.
