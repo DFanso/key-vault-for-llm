@@ -1632,3 +1632,22 @@ async fn a_file_is_sent_as_a_kvshare_file_and_a_received_one_is_saved_as_it_arri
     );
     assert_eq!(desk.notes(), Vec::<String>::new());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_takes_the_move_and_focus_messages_itself() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Home)).await);
+    worker.model().await;
+    desk.take();
+    for message in [
+        FromPage::Drag,
+        FromPage::Picking,
+        FromPage::Busy { on: true },
+        FromPage::Busy { on: false },
+    ] {
+        assert!(!worker.act(page(message)).await);
+    }
+    // Nothing for the page to hear, and nothing wrong to report.
+    assert!(desk.take().is_empty());
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}

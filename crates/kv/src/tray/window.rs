@@ -63,6 +63,46 @@ pub enum Tab {
     Audit,
 }
 
+/// What keeps kv's window up when the focus leaves it. The window hides
+/// when the user clicks elsewhere, like a flyout, unless one of these holds:
+/// the focus left for a reason that is not the user going away, or they are
+/// in the middle of something.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stays {
+    /// A device prompt (Touch ID, Windows Hello) has the focus.
+    pub prompting: bool,
+    /// The system's file panel has, or is about to take, the focus.
+    pub picking: bool,
+    /// A form or another dialog is open in the page.
+    pub busy: bool,
+    /// The user dragged the full window somewhere: it is theirs, and stays
+    /// there until they hide it.
+    pub moved: bool,
+}
+
+impl Stays {
+    /// Whether a loss of focus leaves the window up.
+    pub fn any(self) -> bool {
+        self.prompting || self.picking || self.busy || self.moved
+    }
+
+    /// The window has the focus again, so the file panel is closed.
+    pub fn gained_focus(&mut self) {
+        self.picking = false;
+    }
+
+    /// The user hid the window.
+    pub fn hidden(&mut self) {
+        self.picking = false;
+        self.moved = false;
+    }
+
+    /// The small menu is showing, which is a flyout whatever came before.
+    pub fn shown_as_menu(&mut self) {
+        self.moved = false;
+    }
+}
+
 /// How the window looks: as the system's light or dark mode, or always
 /// one of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +252,17 @@ pub enum FromPage {
     /// Grow the small menu into the full window (its Open kv). The window
     /// side takes this one itself.
     Expand,
+    /// Start moving the window: the mouse went down on the page's title
+    /// bar. The window side takes this one itself.
+    Drag,
+    /// The system's file panel is about to open and take the focus. The
+    /// window side takes this one itself.
+    Picking,
+    /// A form or another dialog opened (`on`) or closed in the page. The
+    /// window side takes this one itself.
+    Busy {
+        on: bool,
+    },
     Theme {
         theme: Theme,
     },
@@ -314,6 +365,9 @@ pub enum ToPage {
     },
     /// The window went out of sight: the page puts away a value on show.
     Hidden,
+    /// The window lost the focus but stays up (a form is open, or the user
+    /// moved it): the page puts away a value on show, as when it hides.
+    Blurred,
     /// The window shows the small menu a click on the tray icon opens
     /// (`on`), or the full page.
     Menu {
