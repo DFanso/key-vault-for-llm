@@ -636,8 +636,11 @@ dialog .message:not(:empty) { margin-top: 10px; }
 .import-var input { flex: none; width: 16px; height: 16px; min-height: 0; margin: 0; padding: 0; accent-color: var(--accent-fill); }
 .import-var .name { flex: 1; min-width: 0; font-family: var(--mono); overflow-wrap: anywhere; }
 #import-about:not(:empty) { margin-bottom: 14px; }
-#import-note-list { margin: 0; padding-left: 18px; color: var(--text); }
-#import-note-list li + li { margin-top: 4px; }
+#import-note-list, #file-note-list { margin: 0; padding-left: 18px; color: var(--text); }
+#import-note-list li + li, #file-note-list li + li { margin-top: 4px; }
+#file-about:not(:empty) { margin-bottom: 14px; }
+#reveal-status { margin: 10px 0 0; font-family: var(--mono); overflow-wrap: anywhere; user-select: text; }
+#share-pick { width: 100%; justify-content: center; }
 
 /* The small menu a click on the tray icon opens. */
 .menu { height: 100%; display: flex; flex-direction: column; gap: 10px; padding: 14px; }

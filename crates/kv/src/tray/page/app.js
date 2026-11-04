@@ -46,11 +46,21 @@
     shareBusy: false,
     // Whether a file being imported is on show.
     importing: false,
+    // Whether a file being kept as a handle is on show.
+    file: false,
+    // A .kvshare file chosen in the share dialog: its name and text.
+    shareFile: null,
+    // The received file handle the reveal dialog can save.
+    revealFile: null,
   };
 
   const REVEAL_SECS = 60;
   // The largest file kv imports, as kv-core's import::MAX_FILE_LEN.
   const IMPORT_MAX_BYTES = 64 * 1024;
+  // The largest file a handle keeps, as kv-core's secret::MAX_FILE_LEN.
+  const FILE_MAX_BYTES = 1024 * 1024;
+  // The largest .kvshare file read: a share of the largest file is about 2.5 MB.
+  const SHARE_FILE_MAX_BYTES = 3 * 1024 * 1024;
   // Past this many characters a share does not fit one Telegram message.
   const CHAT_MESSAGE_CHARS = 4000;
   // How long the menu takes to fade out before the window grows; as in
@@ -296,6 +306,7 @@
           closeReveal();
           closeShare();
           closeImport(false);
+          closeFile(false);
           // Whatever it said belonged to the session that just ended.
           hideToast();
           page.audit = [];
@@ -346,6 +357,24 @@
       case "imported":
         closeImport(false);
         say([`Saved ${message.name}.`, ...message.warnings].join(" "));
+        break;
+      case "file_preview":
+        openFile(message);
+        break;
+      case "file_added":
+        closeFile(false);
+        say([`Saved ${message.name}.`, ...message.warnings].join(" "));
+        break;
+      case "file_error":
+        $("file-save").disabled = false;
+        if (page.file) $("file-error").textContent = message.message;
+        else say(message.message);
+        break;
+      case "share_saved":
+        shareSaved(message);
+        break;
+      case "file_saved":
+        fileSaved(message);
         break;
       case "import_error":
         $("import-save").disabled = false;
@@ -921,7 +950,11 @@
             el(
               "div",
               "row-actions",
-              r.viewable ? iconButton("eye", `View ${r.handle}`, () => send({ type: "reveal", handle: r.handle })) : null,
+              r.viewable
+                ? r.kind === "file"
+                  ? iconButton("download", `Save ${r.handle} as a file`, () => send({ type: "reveal", handle: r.handle }))
+                  : iconButton("eye", `View ${r.handle}`, () => send({ type: "reveal", handle: r.handle }))
+                : null,
               forget(r.id, `the record of ${r.handle}`),
             ),
           );
@@ -958,10 +991,30 @@
     $("reveal-fields").replaceChildren(
       ...fields.map((f) => el("div", "field", el("label", null, f.label), el("div", "code-box secret-value", f.value))),
     );
+    // A received file can be saved as it is; nothing else has a Save.
+    const info = ((page.overview && page.overview.handles) || []).find((h) => h.name === handle);
+    page.revealFile = info && info.kind === "file" ? handle : null;
+    $("reveal-save").disabled = false;
+    show($("reveal-save"), page.revealFile !== null);
+    show($("reveal-show"), false);
+    show($("reveal-status"), false);
+    $("reveal-status").textContent = "";
     const dialog = $("reveal-dialog");
     if (!dialog.open) dialog.showModal();
     clearTimeout(page.revealTimer);
     page.revealTimer = setTimeout(closeReveal, REVEAL_SECS * 1000);
+  }
+
+  // A received file was written to the Downloads folder.
+  function fileSaved(saved) {
+    $("reveal-save").disabled = false;
+    if (!$("reveal-dialog").open) {
+      say(`Saved ${saved.handle} to ${saved.path}.`);
+      return;
+    }
+    $("reveal-status").textContent = `Saved to ${saved.path}`;
+    show($("reveal-status"), true);
+    show($("reveal-show"), true);
   }
 
   function closeReveal() {
@@ -969,6 +1022,11 @@
     page.revealTimer = null;
     $("reveal-fields").replaceChildren();
     $("reveal-title").textContent = "";
+    page.revealFile = null;
+    show($("reveal-save"), false);
+    show($("reveal-show"), false);
+    show($("reveal-status"), false);
+    $("reveal-status").textContent = "";
     const dialog = $("reveal-dialog");
     if (dialog.open) dialog.close();
   }
@@ -1036,6 +1094,7 @@
       $("share-name-hint").textContent = spec.name[1];
     }
     if (step === "send") fillShareHandles();
+    clearShareFile();
     shareResult(false);
     shareBusy(false);
     $("share-error").textContent = "";
@@ -1084,7 +1143,11 @@
         };
         break;
       case "receive":
-        message = { type: "receive_share", share: value("share-code"), name: value("share-name") };
+        message = {
+          type: "receive_share",
+          share: page.shareFile ? page.shareFile.text : value("share-code"),
+          name: value("share-name"),
+        };
         break;
       default:
         return;
@@ -1152,17 +1215,86 @@
     else $("share-cancel").focus();
   }
 
+  // A share too long for a message was saved as a file: show where, to
+  // send as an attachment.
+  function shareSaved(result) {
+    shareBusy(false);
+    if (!page.share) return;
+    let about =
+      `Saved as a file, because it is too long for a chat message. Send that file to ${result.to || "them"} ` +
+      "as an attachment, exactly as it is and not as text. Only the vault that made the request can open it.";
+    if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
+    $("share-result-about").textContent = about;
+    $("share-output").textContent = result.path;
+    show($("share-output"), true);
+    $("share-safety").textContent =
+      `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
+      "for anything sensitive, check over a call that their request shows the same code before " +
+      "you send this.";
+    shareResult(true);
+    show($("share-copy"), true);
+    show($("share-show"), true);
+    $("share-show").focus();
+  }
+
+  // Chooses a .kvshare file to receive, or lets go of the one chosen.
+  function pickShareFile() {
+    if (page.shareFile) {
+      clearShareFile();
+      return;
+    }
+    const input = $("share-file");
+    input.value = "";
+    input.click();
+  }
+
+  function readShareFile() {
+    const input = $("share-file");
+    const file = input.files && input.files[0];
+    if (!file) return;
+    if (file.size > SHARE_FILE_MAX_BYTES) {
+      input.value = "";
+      $("share-error").textContent = `${file.name} is too large to be a kv share.`;
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      input.value = "";
+      page.shareFile = { name: file.name, text: String(reader.result) };
+      $("share-code").value = "";
+      $("share-code").disabled = true;
+      $("share-code").placeholder = `Using ${file.name}`;
+      $("share-pick-text").textContent = "Use pasted text instead";
+      $("share-error").textContent = "";
+    };
+    reader.onerror = () => {
+      input.value = "";
+      $("share-error").textContent = `Could not read ${file.name}.`;
+    };
+    reader.readAsText(file);
+  }
+
+  function clearShareFile() {
+    page.shareFile = null;
+    $("share-code").disabled = false;
+    $("share-pick-text").textContent = "Choose a .kvshare file";
+    const spec = SHARE_STEPS[page.share];
+    if (spec && spec.code) $("share-code").placeholder = spec.code[1];
+  }
+
   function shareResult(shown) {
     show($("share-ask"), !shown);
     show($("share-about"), !shown);
     show($("share-result"), shown);
     show($("share-submit"), !shown);
     show($("share-copy"), false);
+    show($("share-show"), false);
     $("share-cancel").textContent = shown ? "Done" : "Cancel";
   }
 
   // Closes the share dialog and drops what was typed and shown.
   function closeShare() {
+    clearShareFile();
     page.share = null;
     shareBusy(false);
     $("share-form").reset();
@@ -1483,6 +1615,91 @@
     if (tell && was) send({ type: "import_cancel" });
   }
 
+  // Opens the file panel for a file to keep as a handle. Any file goes, up
+  // to 1 MiB; the tray answers with what it is, never what it holds.
+  function pickFile() {
+    const input = $("add-file-input");
+    input.value = "";
+    input.click();
+  }
+
+  // The bytes as base64, in pieces so a large file does not overflow the
+  // call stack.
+  function toBase64(bytes) {
+    let binary = "";
+    const step = 0x8000;
+    for (let at = 0; at < bytes.length; at += step) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(at, at + step));
+    }
+    return btoa(binary);
+  }
+
+  function readFile() {
+    const input = $("add-file-input");
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const done = () => {
+      input.value = "";
+    };
+    if (file.size > FILE_MAX_BYTES) {
+      done();
+      say(`${file.name} is larger than 1 MiB, which a file handle holds.`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      done();
+      send({ type: "file_read", file_name: file.name, data: toBase64(new Uint8Array(reader.result)) });
+    };
+    reader.onerror = () => {
+      done();
+      say(`Could not read ${file.name}.`);
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function fileSize(bytes) {
+    if (bytes < 1024) return `${bytes} bytes`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MiB`;
+  }
+
+  function openFile(preview) {
+    page.file = true;
+    $("file-about").textContent =
+      `${preview.file_name}, ${fileSize(preview.size)}, fingerprint ${preview.fingerprint}. ` +
+      "kv keeps it exactly as it is and gives a program the file; agents never see what is in it.";
+    $("file-name").value = preview.name;
+    $("file-cmds").value = "";
+    $("file-error").textContent = "";
+    $("file-save").disabled = false;
+    $("file-note-list").replaceChildren(...preview.notes.map((n) => el("li", null, n)));
+    show($("file-notes"), preview.notes.length > 0);
+    const dialog = $("file-dialog");
+    if (!dialog.open) dialog.showModal();
+    $("file-name").focus();
+  }
+
+  function submitFile(event) {
+    event.preventDefault();
+    if (!page.file) return;
+    $("file-error").textContent = "";
+    $("file-save").disabled = true;
+    send({ type: "file_save", name: $("file-name").value.trim(), cmds: $("file-cmds").value });
+  }
+
+  // Closes the file dialog. `tell` says the tray still holds the file.
+  function closeFile(tell) {
+    const dialog = $("file-dialog");
+    const was = page.file;
+    page.file = false;
+    $("file-form").reset();
+    $("file-note-list").replaceChildren();
+    $("file-error").textContent = "";
+    if (dialog.open) dialog.close();
+    if (tell && was) send({ type: "file_cancel" });
+  }
+
   function anyDialogOpen() {
     return [...document.querySelectorAll("dialog")].some((d) => d.open);
   }
@@ -1583,6 +1800,15 @@
       event.preventDefault();
       closeImport(true);
     });
+    $("add-file").addEventListener("click", pickFile);
+    $("add-file-input").addEventListener("change", readFile);
+    $("file-form").addEventListener("submit", submitFile);
+    $("file-cancel").addEventListener("click", () => closeFile(true));
+    $("file-x").addEventListener("click", () => closeFile(true));
+    $("file-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeFile(true);
+    });
     for (const tab of document.querySelectorAll("nav button[data-tab]")) {
       tab.addEventListener("click", () => go(tab.dataset.tab));
     }
@@ -1636,6 +1862,15 @@
     });
     $("confirm-cancel").addEventListener("click", closeConfirm);
     $("reveal-close").addEventListener("click", closeReveal);
+    $("reveal-save").addEventListener("click", () => {
+      if (!page.revealFile) return;
+      $("reveal-save").disabled = true;
+      send({ type: "save_file", handle: page.revealFile });
+    });
+    $("reveal-show").addEventListener("click", () => send({ type: "show_saved" }));
+    $("share-show").addEventListener("click", () => send({ type: "show_saved" }));
+    $("share-pick").addEventListener("click", pickShareFile);
+    $("share-file").addEventListener("change", readShareFile);
     $("share-request").addEventListener("click", () => openShare("request"));
     $("share-send").addEventListener("click", () => openShare("send"));
     $("share-receive").addEventListener("click", () => openShare("receive"));

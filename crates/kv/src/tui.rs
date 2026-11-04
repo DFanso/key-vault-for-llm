@@ -159,6 +159,7 @@ impl Driver {
             Effect::Remove(name) => self.send(ControlCommand::Remove { name }).await,
             Effect::Dismiss(id) => self.send(ControlCommand::DismissRequest { id }).await,
             Effect::Reveal(handle) => self.send(ControlCommand::RevealShare { handle }).await,
+            Effect::ExportFile(handle) => self.send(ControlCommand::ExportFile { handle }).await,
             Effect::Forget(id) => self.send(ControlCommand::ForgetShare { id }).await,
             Effect::RequestShare(call) => self.send(ControlCommand::RequestShare(call)).await,
             Effect::SendShare(call) => self.send(ControlCommand::SendShare(call)).await,
@@ -277,6 +278,17 @@ impl Driver {
             Ok(Some(ControlResponse::Revealed { handle, fields })) => {
                 Outcome::Revealed { handle, fields }
             }
+            Ok(Some(ControlResponse::File {
+                handle,
+                file_name,
+                sha256,
+                data,
+            })) => Outcome::File {
+                handle,
+                file_name,
+                sha256,
+                data,
+            },
             Ok(Some(ControlResponse::ShareRequested {
                 code, safety_code, ..
             })) => Outcome::Share(ShareDone::Requested { code, safety_code }),

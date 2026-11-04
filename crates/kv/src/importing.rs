@@ -47,6 +47,18 @@ pub fn suggested_name(file_name: &str) -> String {
     }
 }
 
+/// A handle name made from a file's name without its extension:
+/// `passwords.txt` gives `passwords`, `Prod Keys.p12` gives `prod-keys`.
+pub fn suggested_file_name(file_name: &str) -> String {
+    let base = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+    let stem = base
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(base);
+    suggested_name(stem)
+}
+
 /// The variables ticked at first: all but the ones that change how a
 /// program runs or where it connects, which the user ticks on purpose.
 pub fn default_keep(imported: &Imported) -> Vec<String> {
@@ -109,6 +121,16 @@ mod tests {
             "appsettings-production"
         );
         assert_eq!(suggested_name("..."), "imported");
+    }
+
+    #[test]
+    fn a_files_name_loses_its_extension() {
+        assert_eq!(suggested_file_name("passwords.txt"), "passwords");
+        assert_eq!(suggested_file_name("/home/me/Prod Keys.p12"), "prod-keys");
+        assert_eq!(suggested_file_name("C:\\keys\\server.pem"), "server");
+        assert_eq!(suggested_file_name("archive.tar.gz"), "archive-tar");
+        assert_eq!(suggested_file_name("README"), "readme");
+        assert_eq!(suggested_file_name(".bashrc"), "bashrc");
     }
 
     #[test]

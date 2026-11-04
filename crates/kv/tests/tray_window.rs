@@ -325,3 +325,82 @@ fn the_theme_is_saved_and_read_back() {
     std::fs::write(&path, "sepia").unwrap();
     assert_eq!(Theme::load(&path), Theme::System);
 }
+
+#[test]
+fn the_file_messages_are_read_and_their_bytes_stay_out_of_debug_output() {
+    let cases = [
+        (
+            r#"{"type":"file_read","file_name":"passwords.txt","data":"b25lCg=="}"#,
+            FromPage::FileRead {
+                file_name: "passwords.txt".into(),
+                data: SecretText::new("b25lCg=="),
+            },
+        ),
+        (
+            r#"{"type":"file_save","name":"wordlist","cmds":"hydra, ssh"}"#,
+            FromPage::FileSave {
+                name: "wordlist".into(),
+                cmds: "hydra, ssh".into(),
+            },
+        ),
+        (r#"{"type":"file_cancel"}"#, FromPage::FileCancel),
+        (
+            r#"{"type":"save_file","handle":"wordlist"}"#,
+            FromPage::SaveFile {
+                handle: "wordlist".into(),
+            },
+        ),
+        (r#"{"type":"show_saved"}"#, FromPage::ShowSaved),
+    ];
+    for (json, expected) in cases {
+        assert_eq!(FromPage::parse(json), Some(expected), "{json}");
+    }
+    // The page cannot name the file to show: the message has no field for a
+    // path, so one sent along is dropped and the tray shows only what it saved.
+    assert_eq!(
+        FromPage::parse(r#"{"type":"show_saved","path":"/etc/passwd"}"#),
+        Some(FromPage::ShowSaved)
+    );
+    let read = FromPage::parse(r#"{"type":"file_read","file_name":"k.pem","data":"c2VjcmV0"}"#);
+    assert!(!format!("{read:?}").contains("c2VjcmV0"));
+}
+
+#[test]
+fn the_file_results_reach_the_page_as_json_data() {
+    let preview = ToPage::FilePreview {
+        file_name: "passwords.txt".into(),
+        name: "passwords".into(),
+        size: 44,
+        fingerprint: "A1B2-C3D4-E5F6".into(),
+        scrubbed: true,
+        notes: vec!["a note".into()],
+    };
+    let script = preview.script();
+    assert!(script.starts_with("kv.receive({"), "{script}");
+    assert!(script.contains(r#""type":"file_preview""#), "{script}");
+    assert!(
+        script.contains(r#""fingerprint":"A1B2-C3D4-E5F6""#),
+        "{script}"
+    );
+    let saved = ToPage::ShareSaved {
+        path: "/Users/me/Downloads/wordlist-7KQ2-M9XD.kvshare".into(),
+        safety_code: "7KQ2-M9XD".into(),
+        to: "carol".into(),
+        asked_for: "the list".into(),
+    };
+    assert!(saved.script().contains(r#""type":"share_saved""#));
+    // Text that closes the call early stays inside the JSON string.
+    let hostile = ToPage::FileSaved {
+        handle: "wordlist".into(),
+        path: "x\"});alert(1);kv.receive({\"".into(),
+    };
+    let script = hostile.script();
+    let argument = script
+        .strip_prefix("kv.receive(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("not one call: {script}"));
+    let data: serde_json::Value = serde_json::from_str(argument)
+        .unwrap_or_else(|e| panic!("the argument is not one JSON value ({e}): {script}"));
+    assert_eq!(data["path"], "x\"});alert(1);kv.receive({\"");
+    assert_eq!(data["handle"], "wordlist");
+}

@@ -390,6 +390,15 @@ way. Your approval names the file, its size and a short fingerprint, so you
 can read it out to the receiver to confirm it is the same one. A received
 file starts in ask mode, like any share.
 
+The window does the same without the terminal. On the Handles screen, **Add
+file** picks a file and asks for a name and the programs that may use it. When
+you send a file on the Shares screen, kv saves the sealed share as a
+`.kvshare` file in your Downloads folder and offers **Show in folder**; to
+receive one, choose it with **Choose a .kvshare file** in the Receive dialog.
+The download icon beside a received file saves it to Downloads exactly as it
+arrived, under a name that is safe to create, and never over a file already
+there.
+
 ## Day to day
 
 ```sh
