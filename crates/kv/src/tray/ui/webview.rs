@@ -105,6 +105,9 @@ impl KvWindow {
                     let _ = match message {
                         FromPage::Hide => proxy.send_event(Message::Hide).ok(),
                         FromPage::Expand => proxy.send_event(Message::Expand).ok(),
+                        FromPage::Drag => proxy.send_event(Message::Drag).ok(),
+                        FromPage::Picking => proxy.send_event(Message::Picking).ok(),
+                        FromPage::Busy { on } => proxy.send_event(Message::Busy(on)).ok(),
                         message => actions.send(Action::Window(message)).ok(),
                     };
                 }
@@ -195,6 +198,13 @@ impl KvWindow {
     pub fn expand(&self, anchor: Option<Anchor>) {
         self.window.set_inner_size(size(false));
         self.show_at(anchor, false);
+    }
+
+    /// Starts moving the window with the mouse, which is down: the page's
+    /// title bar asked for it, since a window without a frame has no other
+    /// handle.
+    pub fn drag(&self) {
+        let _ = self.window.drag_window();
     }
 
     /// Hides the window; the page puts away whatever it showed of a secret.

@@ -24,7 +24,7 @@ use tray_icon::menu::{
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use super::model::{Action, Edit, IconState, Item, Model, edits};
-use super::window::{Tab, ToPage};
+use super::window::{Stays, Tab, ToPage};
 use super::worker::{Desktop, Worker};
 use super::{icon, login};
 use crate::device;
@@ -53,6 +53,12 @@ enum Message {
     Hide,
     /// The page's menu asked for the full window.
     Expand,
+    /// The mouse went down on the page's title bar: move the window.
+    Drag,
+    /// The page is about to open the system's file panel.
+    Picking,
+    /// A dialog opened or closed in the page.
+    Busy(bool),
     /// The worker has stopped.
     Quit,
 }
@@ -125,8 +131,12 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     // When the window last hid, and last showed.
     let mut hidden_at: Option<Instant> = None;
     let mut shown_at: Option<Instant> = None;
-    // A device prompt takes the focus; the window stays up behind it.
-    let mut prompting = false;
+    // What keeps the window up when the focus leaves it: a device prompt or
+    // the file panel takes the focus, and a dialog open in the page, or a
+    // window the user moved, is not something to hide.
+    let mut stays = Stays::default();
+    // Whether the window shows the full page, not the small menu.
+    let mut full = false;
     // A click on the icon asked the worker for the window: it opens as the
     // menu, not the full window.
     let mut want_menu = false;
@@ -154,11 +164,14 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                     Some(open) if open.is_visible() => {
                         open.hide();
                         hidden_at = Some(Instant::now());
+                        stays.hidden();
                     }
                     Some(_) if just_hidden => {}
                     Some(open) => {
                         open.show_menu(anchor);
                         shown_at = Some(Instant::now());
+                        full = false;
+                        stays.shown_as_menu();
                     }
                     // The worker opens it, and the page gets its state.
                     None => {
@@ -171,53 +184,80 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 if let Some(open) = &window {
                     open.hide();
                     hidden_at = Some(Instant::now());
+                    stays.hidden();
                 }
             }
             Event::UserEvent(Message::Expand) => {
                 if let Some(open) = &window {
                     open.expand(anchor);
                     shown_at = Some(Instant::now());
+                    full = true;
                 }
+            }
+            // Only the full window has a title bar to drag. Once moved it is
+            // the user's: it stays up when they click elsewhere.
+            Event::UserEvent(Message::Drag) => {
+                if full && let Some(open) = &window {
+                    open.drag();
+                    stays.moved = true;
+                }
+            }
+            Event::UserEvent(Message::Picking) => stays.picking = true,
+            Event::UserEvent(Message::Busy(on)) => stays.busy = on,
+            // The file panel closed, or the user came back to the window.
+            Event::WindowEvent {
+                window_id,
+                event: WindowEvent::Focused(true),
+                ..
+            } if window.as_ref().is_some_and(|open| open.id() == window_id) => {
+                stays.gained_focus();
             }
             Event::WindowEvent {
                 window_id,
                 event: WindowEvent::Focused(false),
                 ..
-            } if !prompting && window.as_ref().is_some_and(|open| open.id() == window_id) => {
+            } if !stays.any() && window.as_ref().is_some_and(|open| open.id() == window_id) => {
                 let settling = shown_at.is_some_and(|t| t.elapsed() < SETTLE);
                 if let Some(open) = window.as_ref().filter(|open| open.is_visible())
                     && !settling
                 {
                     open.hide();
                     hidden_at = Some(Instant::now());
+                    stays.hidden();
                 }
             }
             Event::UserEvent(Message::Open) => match &window {
                 Some(open) => {
                     if std::mem::take(&mut want_menu) {
                         open.show_menu(anchor);
+                        full = false;
+                        stays.shown_as_menu();
+                    } else if stays.moved && full && open.is_visible() {
+                        // The user put the window where they want it: it
+                        // comes to the front there, not back to the icon.
+                        open.raise();
                     } else {
                         open.show_full(anchor);
+                        full = true;
                     }
                     shown_at = Some(Instant::now());
                 }
-                None => match KvWindow::open(
-                    target,
-                    actions.clone(),
-                    pages.clone(),
-                    anchor,
-                    std::mem::take(&mut want_menu),
-                ) {
-                    Ok(opened) => {
-                        window = Some(opened);
-                        shown_at = Some(Instant::now());
+                None => {
+                    let menu = std::mem::take(&mut want_menu);
+                    match KvWindow::open(target, actions.clone(), pages.clone(), anchor, menu) {
+                        Ok(opened) => {
+                            window = Some(opened);
+                            full = !menu;
+                            stays = Stays::default();
+                            shown_at = Some(Instant::now());
+                        }
+                        Err(e) => {
+                            eprintln!("kv: cannot open kv's window: {e}");
+                            notify::tray(no_window(&e));
+                            let _ = actions.send(Action::WindowClosed);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("kv: cannot open kv's window: {e}");
-                        notify::tray(no_window(&e));
-                        let _ = actions.send(Action::WindowClosed);
-                    }
-                },
+                }
             },
             Event::UserEvent(Message::Page(message)) => {
                 if let ToPage::State {
@@ -226,13 +266,13 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 {
                     // The prompt is over: the window takes the focus back,
                     // so a click elsewhere hides it again.
-                    if prompting
+                    if stays.prompting
                         && !waiting_for_device
                         && let Some(open) = window.as_ref().filter(|open| open.is_visible())
                     {
                         open.raise();
                     }
-                    prompting = *waiting_for_device;
+                    stays.prompting = *waiting_for_device;
                 }
                 if let Some(open) = &window {
                     open.send(&message);
@@ -244,6 +284,7 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 ..
             } if window.as_ref().is_some_and(|open| open.id() == window_id) => {
                 window = None;
+                stays = Stays::default();
                 let _ = actions.send(Action::WindowClosed);
             }
             Event::UserEvent(Message::Quit) => {
