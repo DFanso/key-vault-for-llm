@@ -310,7 +310,7 @@ input:focus, select:focus { border-color: var(--accent); }
 
 /* The shell: a header, the pill tabs, the screen and a footer. */
 .shell { position: relative; display: flex; flex-direction: column; height: 100%; }
-.topbar { display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px; -webkit-user-select: none; user-select: none; }
 .topbar .logo { width: 44px; height: 44px; }
 .topbar .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .topbar h1 { font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

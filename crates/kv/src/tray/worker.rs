@@ -371,7 +371,11 @@ impl<D: Desktop> Worker<D> {
                 }
             }
             // The window takes these before they get here.
-            FromPage::Hide | FromPage::Expand => {}
+            FromPage::Hide
+            | FromPage::Expand
+            | FromPage::Drag
+            | FromPage::Picking
+            | FromPage::Busy { .. } => {}
             FromPage::Theme { theme } => {
                 self.theme = theme;
                 if let Err(e) = theme.save(&self.paths.tray_theme_file()) {

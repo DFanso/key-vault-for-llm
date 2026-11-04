@@ -52,6 +52,8 @@
     shareFile: null,
     // The received file handle the reveal dialog can save.
     revealFile: null,
+    // Whether a dialog is open, as the tray last heard.
+    busy: false,
   };
 
   const REVEAL_SECS = 60;
@@ -320,11 +322,18 @@
       case "menu":
         // Sent each time the window shows: the view comes in again.
         page.menu = Boolean(message.on);
+        // The small menu has no room for a form: whatever was open is put
+        // away, as its Cancel would, rather than left in the menu.
+        if (page.menu) cancelDialogs();
         draw();
         enter($(page.view));
         break;
       case "hidden":
         // The window went out of sight: values on show go first.
+        closeReveal();
+        break;
+      case "blurred":
+        // The window stays up, but the user has left it: so does no value.
         closeReveal();
         break;
       case "form":
@@ -1704,6 +1713,40 @@
     return [...document.querySelectorAll("dialog")].some((d) => d.open);
   }
 
+  // Closes every open dialog the way its Cancel does: each one's cancel
+  // handler puts away what it held and tells the tray.
+  function cancelDialogs() {
+    for (const dialog of document.querySelectorAll("dialog[open]")) {
+      dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+    }
+  }
+
+  // Whether a dialog the user may be in the middle of is open. The reveal
+  // dialog is not one: it shows a secret, which goes as soon as the window
+  // loses the focus, so it must never keep the window up.
+  function busyDialogOpen() {
+    return [...document.querySelectorAll("dialog")].some((d) => d.open && d.id !== "reveal-dialog");
+  }
+
+  // While a form or any other dialog is open the user is in the middle of
+  // something, so the tray keeps the window up when they click elsewhere.
+  function syncBusy() {
+    const busy = busyDialogOpen();
+    if (busy === page.busy) return;
+    page.busy = busy;
+    send({ type: "busy", on: busy });
+  }
+
+  // The window has no frame, so its title bar is its handle: pressing on it,
+  // outside its buttons, lets the tray start moving the window. Once moved it
+  // stays up where the user put it.
+  function wireDrag(handle) {
+    handle.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || event.target.closest("button, a, input, select, label")) return;
+      send({ type: "drag" });
+    });
+  }
+
   function onKey(event) {
     if (page.menu) {
       if (event.key === "Escape") send({ type: "hide" });
@@ -1765,6 +1808,26 @@
 
   function start() {
     buildThemeChoices();
+    wireDrag(document.querySelector(".topbar"));
+    wireDrag($("unlock"));
+    // A value on show is put away whenever the window loses the focus, also
+    // where the tray keeps the window up.
+    window.addEventListener("blur", closeReveal);
+    // The system's file panel takes the focus: tell the tray first, so it
+    // does not take that for the user going away and hide the window.
+    document.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target;
+        if (target instanceof HTMLInputElement && target.type === "file") send({ type: "picking" });
+      },
+      true,
+    );
+    new MutationObserver(syncBusy).observe(document.body, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["open"],
+    });
     $("page-title").tabIndex = -1;
     $("unlock-form").addEventListener("submit", (event) => {
       event.preventDefault();

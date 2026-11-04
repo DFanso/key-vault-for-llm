@@ -234,6 +234,16 @@ menu. Treat a kv window that appears on its own, asking for your passphrase,
 as fake. On Windows the window needs the Microsoft Edge WebView2 Runtime,
 which Windows 10 and 11 normally have.
 
+The window has no frame, so it opens beside the icon like the menu and hides
+when you click elsewhere, with three exceptions. Drag it by its title bar and
+it is yours: it stays where you put it, above other windows, until you hide it
+with the close button, Esc or the icon. It also stays up while a form or any
+other dialog is open, and while the system's file panel is open (Add file,
+Import file), so neither is lost when the focus moves. A value revealed on
+the Shares screen is the exception: it is put away whenever the window loses
+the focus, even where the window stays up. The small menu is always a flyout: if the window is hidden in the middle of a form, the form is
+cancelled when the menu opens, not left inside it.
+
 The login item takes effect at your next login. On Windows a console window
 may flash as it starts.
 
