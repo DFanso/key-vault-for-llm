@@ -207,6 +207,7 @@ fn add(form: &Form) -> Result<Effect, String> {
         policy,
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }))
 }
 

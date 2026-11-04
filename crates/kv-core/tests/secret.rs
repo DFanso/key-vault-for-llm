@@ -24,6 +24,7 @@ fn http_secret() -> Secret {
         },
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 
@@ -37,6 +38,7 @@ fn pg_secret(url: &str) -> Secret {
         policy: Policy::default(),
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     }
 }
 
@@ -61,6 +63,7 @@ fn handle_info_carries_no_secret_values() {
         policy: Policy::default(),
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     };
     for secret in [
         http_secret(),
@@ -91,6 +94,7 @@ fn handle_info_lists_env_var_names() {
         policy: Policy::default(),
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     };
     let info = secret.info();
     assert_eq!(info.kind, SecretKind::Env);
@@ -247,6 +251,7 @@ fn handle_info_shows_only_the_program_a_handle_runs() {
         },
         created_at: 0,
         updated_at: 0,
+        from_share: None,
     };
     let info = secret.info();
     assert_eq!(info.runs.as_deref(), Some("bunx"));

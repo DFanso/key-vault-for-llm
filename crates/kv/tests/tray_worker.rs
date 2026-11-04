@@ -1043,6 +1043,7 @@ async fn a_share_is_requested_sealed_and_received_by_hand_in_the_window() {
                     policy: Policy::default(),
                     created_at: 0,
                     updated_at: 0,
+                    from_share: None,
                 },
                 replace: false,
             },

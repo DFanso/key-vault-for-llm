@@ -88,6 +88,7 @@ impl Daemon {
             },
             created_at: 0,
             updated_at: 0,
+            from_share: None,
         };
         let add = ControlCommand::Add {
             secret,
