@@ -453,6 +453,18 @@ pub enum ControlCommand {
         #[serde(default)]
         value: Option<SecretValue>,
     },
+    /// Changes some variables of an `env` handle and keeps the others as
+    /// they are: `set` adds or replaces, `remove` takes out by name. The
+    /// user need not see or type the values they keep.
+    EditVars {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        set: BTreeMap<String, SecretText>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     ChangePassphrase {
         new_passphrase: SecretText,
     },

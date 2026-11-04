@@ -187,7 +187,9 @@ asked for (the first screenshot above):
 
 The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
 their policy (`p`). Secret values are typed into hidden fields and never shown
-again; leave one blank when editing to keep it. The Audit tab shows the
+again; leave one blank when editing to keep it. Editing an env handle sets
+the variables you type over its others and takes out the ones you list under
+Remove variables, so you never type the rest again. The Audit tab shows the
 newest entries of the audit log. `L` locks the vault, `q` quits.
 
 ![The Handles tab, with an agent's request for a new handle at the top](docs/images/tui-handles.svg)
@@ -280,8 +282,9 @@ runs or where it connects, such as `PATH`, `LD_PRELOAD`, `DYLD_*`,
 get them. It won't send a handle that sets them either. A handle you add
 yourself may set them, with a warning. A handle kv saved from a share that
 sets one, such as one received by an older kv, starts no program until you
-take those variables out of it or add it again as your own; forgetting the
-share on the Shares tab doesn't change that.
+take those variables out of it (Edit, then Remove variables, which needs none
+of its values) or add it again as your own; forgetting the share on the
+Shares tab doesn't change that.
 
 kv also refuses a value, token or URL longer than 4096 bytes, an env handle
 with more than 8 KiB of values, and a value that would take the whole vault
