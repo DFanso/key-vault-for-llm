@@ -30,6 +30,9 @@ const MENU_HEIGHT: f64 = 330.0;
 /// The space between the window and the tray icon or the screen's edge, in
 /// physical pixels.
 const GAP: i32 = 12;
+/// How round the window's corners are on macOS, in points.
+#[cfg(target_os = "macos")]
+const CORNER_RADIUS: f64 = 16.0;
 
 /// Where the tray icon is, in physical pixels: the window opens beside it.
 /// On macOS it is the pointer, in points (see `pointer`): the icon's own
@@ -118,6 +121,8 @@ impl KvWindow {
             })
             .build(&window)
             .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        round_corners(&window);
         let opened = Self { webview, window };
         opened.show_at(anchor, menu);
         Ok(opened)
@@ -144,6 +149,10 @@ impl KvWindow {
     pub fn show_at(&self, anchor: Option<Anchor>, menu: bool) {
         self.place_on_mac(anchor.unwrap_or_else(pointer), menu);
         self.raise();
+        // The shadow follows the rounded outline at the new size.
+        if let Some(ns_window) = ns_window(&self.window) {
+            ns_window.invalidateShadow();
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -303,6 +312,50 @@ pub fn pointer() -> Anchor {
         y: at.y,
         width: 0.0,
         height: 0.0,
+    }
+}
+
+/// macOS gives a window without a frame square corners. Round them as it
+/// rounds its own menu-bar windows: the window goes clear, its view clips
+/// what it holds (the page) to a rounded rectangle with the continuous
+/// curve, and the shadow takes the new outline.
+#[cfg(target_os = "macos")]
+fn round_corners(window: &Window) {
+    use objc2_app_kit::{NSColor, NSView};
+    use objc2_quartz_core::kCACornerCurveContinuous;
+    use tao::platform::macos::WindowExtMacOS;
+
+    let Some(ns_window) = ns_window(window) else {
+        return;
+    };
+    // SAFETY: tao hands out its window's content view, an NSView that lives
+    // as long as the window, which `window` borrows.
+    let Some(view) = (unsafe { window.ns_view().cast::<NSView>().as_ref() }) else {
+        return;
+    };
+    ns_window.setOpaque(false);
+    ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(CORNER_RADIUS);
+        // SAFETY: a constant Core Animation defines, read once.
+        layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
+        layer.setMasksToBounds(true);
+    }
+    ns_window.invalidateShadow();
+}
+
+/// The NSWindow behind `window`.
+#[cfg(target_os = "macos")]
+fn ns_window(window: &Window) -> Option<&objc2_app_kit::NSWindow> {
+    use tao::platform::macos::WindowExtMacOS;
+    // SAFETY: tao hands out its NSWindow, which lives as long as `window`;
+    // the reference borrows `window`.
+    unsafe {
+        window
+            .ns_window()
+            .cast::<objc2_app_kit::NSWindow>()
+            .as_ref()
     }
 }
 
