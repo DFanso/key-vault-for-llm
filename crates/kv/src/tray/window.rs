@@ -148,6 +148,20 @@ pub enum FromPage {
     Forget {
         id: String,
     },
+    /// A `.env` or JSON settings file the user picked to import. Its values
+    /// stay with the worker; the page hears back only the variables' names.
+    ImportFile {
+        file_name: String,
+        text: SecretText,
+    },
+    /// Save the import being shown as the handle `name`, with the variables
+    /// in `keep`.
+    ImportSave {
+        name: String,
+        keep: Vec<String>,
+    },
+    /// Drop the import being shown.
+    ImportCancel,
     /// Make a request code for the user to send someone.
     RequestShare {
         note: String,
@@ -195,10 +209,38 @@ impl FromPage {
     }
 }
 
+/// A variable of a file being imported: its name, never its value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ImportVar {
+    pub name: String,
+    /// Whether it changes how a program runs or where it connects.
+    pub risky: bool,
+    /// Whether it starts ticked.
+    pub keep: bool,
+}
+
 /// A message to the page.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToPage {
+    /// What a file to import holds, for the user to tick.
+    ImportPreview {
+        file_name: String,
+        /// The handle name to suggest.
+        name: String,
+        format: String,
+        vars: Vec<ImportVar>,
+        notes: Vec<String>,
+    },
+    /// The import was saved as `name`.
+    Imported {
+        name: String,
+        warnings: Vec<String>,
+    },
+    /// Why a file cannot be imported or saved.
+    ImportError {
+        message: String,
+    },
     /// Sent every tick while the window is open.
     State {
         locked: bool,

@@ -7,17 +7,15 @@
 //! change how a program runs or where it connects, and kv refuses them in a
 //! share while only warning about them in a handle the user makes.
 
-/// The longest secret value, token or URL kv takes, in bytes. The scrubber
-/// holds every prefix of every value, so its memory grows with the square of
-/// the length: 4 KiB is about 120 to 250 MB, 8 KiB and over is unusable.
-/// Service-account JSON (about 2.4 KB) and an RSA-4096 PEM (about 3.3 KB)
-/// fit.
+/// The longest secret value, token or URL kv takes, in bytes. Service-
+/// account JSON (about 2.4 KB) and an RSA-4096 PEM (about 3.3 KB) fit.
 pub const MAX_VALUE_LEN: usize = 4096;
 
-/// Most bytes of values in one `env` handle. The scrubber's cost grows with
-/// the square of each value's length, so this keeps one handle to two values
-/// of `MAX_VALUE_LEN` or many short ones: eight of 4096 bytes measured
-/// 1.26 GB. To be lifted once the scrubber no longer keeps every prefix.
+/// Most bytes of values in one `env` handle. The scrubber's cost is linear
+/// in the values now (`scrub::MAX_TOTAL_COST` bounds the vault as a whole);
+/// this keeps any one handle, which a share may deliver, to a small part of
+/// that budget. Two 4096-byte values of punctuation, the most one handle
+/// can cost, measured 28 MB and 0.08 s to build in a release build.
 pub const MAX_VALUES_LEN: usize = 8 * 1024;
 
 /// Most variables in one `env` handle.

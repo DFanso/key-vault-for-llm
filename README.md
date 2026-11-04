@@ -187,7 +187,9 @@ asked for (the first screenshot above):
 
 The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
 their policy (`p`). Secret values are typed into hidden fields and never shown
-again; leave one blank when editing to keep it. The Audit tab shows the
+again; leave one blank when editing to keep it. Editing an env handle sets
+the variables you type over its others and takes out the ones you list under
+Remove variables, so you never type the rest again. The Audit tab shows the
 newest entries of the audit log. `L` locks the vault, `q` quits.
 
 ![The Handles tab, with an agent's request for a new handle at the top](docs/images/tui-handles.svg)
@@ -280,15 +282,18 @@ runs or where it connects, such as `PATH`, `LD_PRELOAD`, `DYLD_*`,
 get them. It won't send a handle that sets them either. A handle you add
 yourself may set them, with a warning. A handle kv saved from a share that
 sets one, such as one received by an older kv, starts no program until you
-take those variables out of it or add it again as your own; forgetting the
-share on the Shares tab doesn't change that.
+take those variables out of it (Edit, then Remove variables, which needs none
+of its values) or add it again as your own; forgetting the share on the
+Shares tab doesn't change that.
 
-kv also refuses a value, token or URL longer than 4096 bytes, and an env
-handle with more than 8 KiB of values, since kv's output scrubber would need
-too much memory and time for them. These limits are checked whenever a value
-is saved (add, update, a share sent or received), not when a vault is opened
-or a program starts, so a handle saved by an older kv keeps working; you can
-only change its value to one within them.
+kv also refuses a value, token or URL longer than 4096 bytes, an env handle
+with more than 8 KiB of values, and a value that would take the whole vault
+past what kv's output scrubber takes: about 256 KiB of ordinary tokens, less
+of values full of punctuation, whose encodings it also looks for. A change
+that makes the vault smaller always goes through. These limits are checked
+whenever a value is saved (add, update, a share sent or received), not when
+a vault is opened or a program starts, so a handle saved by an older kv keeps
+working; you can only change its value to one within them.
 
 You don't need an agent for any of it. The same three steps are buttons on the
 Shares tab of kv's window, and each shows its code or share with a Copy
@@ -317,6 +322,41 @@ Each request has a safety code such as `7KQ2-M9XD`, shown to both people: the
 requester when the code is made, the sender on the approval or with the sealed
 share. For anything sensitive, compare the two over a call or another channel
 before you send the share or use the handle.
+
+A share of a token, or of an env handle with a few variables, fits in one
+chat message. When a share is longer than one Telegram message, kv says so:
+send it as a text file rather than splitting it.
+
+### Sharing the variables of a `.env` or settings file
+
+To pass on what a project's `.env` or JSON settings file holds, import it
+into a handle, then share that handle as above:
+
+```sh
+kv import .env                      # tick the variables to keep, then save
+kv import appsettings.Development.json --name demo-app
+kv import .env --keep API_TOKEN,DB_URL --yes
+```
+
+kv reads the file, lists the variables it found by name (never their
+values) and saves the ones you tick as one env handle, in ask mode unless
+you pass `--mode`. It asks for your passphrase or Touch ID as `kv add` does.
+A JSON file's nested keys become names joined with `__`, as .NET reads them
+(`ConnectionStrings__Db`).
+Variables that change how a program runs or where it connects, such as
+`PATH` or `NODE_OPTIONS`, start unticked; kv will not send them in a share
+anyway. `kv import` notes what it skipped or could not read, such as `${VAR}`
+references, which it keeps as written. On the Handles tab, **Import file**
+does the same in the window (on a Mac, press Command-Shift-Period in the file
+panel to see `.env`).
+
+Don't share a handle made from a settings file such as `appsettings.json`
+yet. Besides secrets, those files set addresses (a database host, an API's
+base URL), and kv cannot yet show the receiver a code for what a share
+holds: someone who forges a share could point their app at a server of
+theirs. The same goes for a `.env` variable that holds an address, such as
+`DATABASE_URL`. Tokens and passwords are fine to share, with the safety code
+checked as above.
 
 ## Day to day
 

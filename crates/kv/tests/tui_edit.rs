@@ -405,7 +405,7 @@ fn saving_an_unchanged_edit_does_nothing() {
 }
 
 #[test]
-fn new_variables_replace_an_env_handles_variables() {
+fn new_variables_are_set_over_an_env_handles_and_the_rest_stay() {
     let mut app = handles(vec![env_handle("aws")]);
     key(&mut app, 'e');
     assert!(
@@ -416,13 +416,48 @@ fn new_variables_replace_an_env_handles_variables() {
     type_text(&mut app, &format!("AWS_ACCESS_KEY_ID={AWS_KEY}"));
     press(&mut app, KeyCode::Enter);
     match save(&mut app) {
-        Some(Effect::Update {
-            value: Some(SecretValue::Env { vars }),
+        Some(Effect::EditVars {
+            set,
+            remove,
             description: None,
             ..
-        }) => assert_eq!(vars.keys().collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID"]),
+        }) => {
+            assert_eq!(set.keys().collect::<Vec<_>>(), ["AWS_ACCESS_KEY_ID"]);
+            assert!(remove.is_empty());
+        }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_variable_can_be_removed_without_typing_the_others_again() {
+    let mut app = handles(vec![env_handle("aws")]);
+    key(&mut app, 'e');
+    focus(&mut app, "remove");
+    type_text(&mut app, "AWS_SECRET_ACCESS_KEY");
+    assert_eq!(
+        save(&mut app),
+        Some(Effect::EditVars {
+            name: "aws".into(),
+            description: None,
+            set: Default::default(),
+            remove: vec!["AWS_SECRET_ACCESS_KEY".into()],
+        })
+    );
+}
+
+#[test]
+fn removing_a_variable_the_handle_lacks_says_so() {
+    let mut app = handles(vec![env_handle("aws")]);
+    key(&mut app, 'e');
+    focus(&mut app, "remove");
+    type_text(&mut app, "NOPE");
+    assert!(save(&mut app).is_none());
+    assert!(
+        app.message().unwrap().contains("no variable NOPE"),
+        "{:?}",
+        app.message()
+    );
 }
 
 #[test]

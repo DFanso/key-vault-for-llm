@@ -453,6 +453,18 @@ pub enum ControlCommand {
         #[serde(default)]
         value: Option<SecretValue>,
     },
+    /// Changes some variables of an `env` handle and keeps the others as
+    /// they are: `set` adds or replaces, `remove` takes out by name. The
+    /// user need not see or type the values they keep.
+    EditVars {
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        set: BTreeMap<String, SecretText>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     ChangePassphrase {
         new_passphrase: SecretText,
     },
@@ -637,6 +649,11 @@ pub struct Approval {
     pub detail: String,
     /// Working directory, for `exec`.
     pub cwd: Option<String>,
+    /// The environment variables the program would get, for `exec` and
+    /// `run`: names only, never values. Shown so the user sees what is
+    /// injected, not only the command.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
     /// Whether `allow_session` can grant anything: the request named its
     /// agent session.
     pub can_grant: bool,
