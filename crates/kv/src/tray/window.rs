@@ -162,6 +162,26 @@ pub enum FromPage {
     },
     /// Drop the import being shown.
     ImportCancel,
+    /// Any file the user picked to keep as a `file` handle, as base64. Its
+    /// bytes stay with the worker; the page hears back only what it is.
+    FileRead {
+        file_name: String,
+        data: SecretText,
+    },
+    /// Save the file being shown as the handle `name`, for the programs in
+    /// `cmds` (comma-separated).
+    FileSave {
+        name: String,
+        cmds: String,
+    },
+    /// Drop the file being shown.
+    FileCancel,
+    /// Save the file a received `file` handle holds to the Downloads folder.
+    SaveFile {
+        handle: String,
+    },
+    /// Show the file last saved in the file manager.
+    ShowSaved,
     /// Make a request code for the user to send someone.
     RequestShare {
         note: String,
@@ -236,6 +256,41 @@ pub enum ToPage {
     Imported {
         name: String,
         warnings: Vec<String>,
+    },
+    /// What a file to keep holds, for the user to name and allow.
+    FilePreview {
+        file_name: String,
+        /// The handle name to suggest.
+        name: String,
+        /// The size in bytes.
+        size: usize,
+        /// A short fingerprint of the bytes.
+        fingerprint: String,
+        /// Whether kv can scrub the file's contents from program output.
+        scrubbed: bool,
+        notes: Vec<String>,
+    },
+    /// The file was saved as the handle `name`.
+    FileAdded {
+        name: String,
+        warnings: Vec<String>,
+    },
+    /// Why a file cannot be kept.
+    FileError {
+        message: String,
+    },
+    /// A share too long for a message, saved as a file to send as an
+    /// attachment.
+    ShareSaved {
+        path: String,
+        safety_code: String,
+        to: String,
+        asked_for: String,
+    },
+    /// A received file, saved where the user can find it.
+    FileSaved {
+        handle: String,
+        path: String,
     },
     /// Why a file cannot be imported or saved.
     ImportError {

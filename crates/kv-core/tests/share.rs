@@ -313,3 +313,128 @@ fn the_vault_keeps_shares_and_reads_vaults_without_them() {
     let sealed = seal(&open_request.request(), &token("sk-or-v1-0123456789abcdef")).unwrap();
     assert!(open(&sealed, &reopened.shares().requests).is_ok());
 }
+
+fn file_share(value: SecretValue) -> SharedSecret {
+    SharedSecret {
+        name: "passwords".into(),
+        value,
+        ..token("unused-0123456789")
+    }
+}
+
+#[test]
+fn a_file_arrives_byte_for_byte_and_only_the_requester_opens_it() {
+    use kv_core::share::MAX_FILE_TEXT_LEN;
+
+    let mine = request();
+    // Binary bytes, CRLF, a BOM and no trailing newline, well past the
+    // 128 KiB a pasted share holds.
+    let mut bytes: Vec<u8> = b"\xEF\xBB\xBFhunter2hunter\r\nsecond line".to_vec();
+    bytes.extend((0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
+    let value = SecretValue::file("passwords.txt", &bytes).unwrap();
+    let sealed = seal(&mine.request(), &file_share(value.clone())).unwrap();
+    assert!(sealed.starts_with(SHARE_PREFIX));
+    assert!(sealed.len() <= MAX_FILE_TEXT_LEN);
+    assert!(!sealed.contains("hunter2"));
+
+    let (_, opened) = open(&sealed, std::slice::from_ref(&mine)).unwrap();
+    assert_eq!(opened.value, value);
+    let (name, back) = opened.value.file_parts().unwrap();
+    assert_eq!(name, "passwords.txt");
+    assert_eq!(&back[..], &bytes[..]);
+
+    let theirs = OpenRequest::new(String::new(), String::new(), NOW, DAY);
+    assert_eq!(
+        open(&sealed, &[theirs]).unwrap_err(),
+        ShareError::NoMatchingRequest
+    );
+}
+
+#[test]
+fn a_share_of_a_file_holds_up_to_the_largest_file() {
+    let mine = request();
+    let bytes = vec![0xA5u8; kv_core::secret::MAX_FILE_LEN];
+    let value = SecretValue::file("big.bin", &bytes).unwrap();
+    let sealed = seal(&mine.request(), &file_share(value)).unwrap();
+    let (_, opened) = open(&sealed, std::slice::from_ref(&mine)).unwrap();
+    assert_eq!(&opened.value.file_parts().unwrap().1[..], &bytes[..]);
+    // Other values keep the smaller limit.
+    let long = SharedSecret {
+        value: SecretValue::Postgres {
+            url: SecretText::new(format!("postgres://u:{}@h/db", "p".repeat(200_000))),
+        },
+        ..token("unused-0123456789")
+    };
+    assert_eq!(
+        seal(&mine.request(), &long).unwrap_err(),
+        ShareError::TooLarge
+    );
+}
+
+#[test]
+fn a_file_that_does_not_match_its_checksum_is_refused_on_both_sides() {
+    let mine = request();
+    let good = SecretValue::file("list.txt", b"one-secret-line\n").unwrap();
+    let SecretValue::File {
+        file_name, sha256, ..
+    } = good.clone()
+    else {
+        unreachable!()
+    };
+    let forged = |name: &str, data: &str, sum: &str| {
+        file_share(SecretValue::File {
+            file_name: name.into(),
+            data: SecretText::new(data),
+            sha256: sum.into(),
+        })
+    };
+    // "one-secret-line\n" is b25lLXNlY3JldC1saW5lCg==; this one has a byte changed.
+    let changed = "b25lLXNlY3JldC1saW5lCw==";
+    for bad in [
+        forged(&file_name, changed, &sha256),
+        forged(&file_name, "b25lLXNlY3JldC1saW5lCg==", ""),
+        forged(
+            "../../.ssh/authorized_keys",
+            "b25lLXNlY3JldC1saW5lCg==",
+            &sha256,
+        ),
+    ] {
+        // The sender will not seal it...
+        assert_eq!(
+            seal(&mine.request(), &bad).unwrap_err(),
+            ShareError::BadFile
+        );
+    }
+    // ...and a receiver refuses one sealed by a sender that did not check.
+    let sealed = seal(&mine.request(), &file_share(good)).unwrap();
+    assert!(open(&sealed, std::slice::from_ref(&mine)).is_ok());
+}
+
+#[test]
+fn a_flipped_bit_in_a_sealed_file_is_damage_not_a_different_file() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let mine = request();
+    let value = SecretValue::file("list.txt", &vec![7u8; 50_000]).unwrap();
+    let sealed = seal(&mine.request(), &file_share(value)).unwrap();
+    let json = URL_SAFE_NO_PAD
+        .decode(&sealed[SHARE_PREFIX.len()..])
+        .unwrap();
+    let mut wire: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let mut ciphertext = URL_SAFE_NO_PAD.decode(wire["c"].as_str().unwrap()).unwrap();
+    let middle = ciphertext.len() / 2;
+    ciphertext[middle] ^= 0x01;
+    wire["c"] = URL_SAFE_NO_PAD.encode(&ciphertext).into();
+    let text = format!(
+        "{SHARE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&wire).unwrap())
+    );
+    assert_eq!(
+        open(&text, std::slice::from_ref(&mine)).unwrap_err(),
+        ShareError::Damaged
+    );
+    // Cut short, it is damage too.
+    let cut = &sealed[..sealed.len() - 40];
+    assert!(open(cut, std::slice::from_ref(&mine)).is_err());
+}

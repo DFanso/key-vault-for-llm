@@ -40,6 +40,16 @@ const VALUE_DOMAIN: &[u8] = b"kv-share-value-v1";
 pub const MAX_TEXT_LEN: usize = 256 * 1024;
 /// Longest sealed payload, in bytes.
 pub const MAX_PAYLOAD_LEN: usize = 128 * 1024;
+/// Longest sealed payload of a file, in bytes: the largest file as base64
+/// and the room its name and checksum take.
+pub const MAX_FILE_PAYLOAD_LEN: usize = crate::secret::MAX_FILE_LEN / 3 * 4 + 4096;
+/// Longest share text that holds a file, in bytes: the payload sealed and
+/// written as base64 twice over. Such a share travels as a file, never
+/// as a pasted message.
+pub const MAX_FILE_TEXT_LEN: usize = MAX_FILE_PAYLOAD_LEN / 3 * 4 / 3 * 4 + 4096;
+
+// A share of the largest file has to fit a frame of the control socket.
+const _: () = assert!(MAX_FILE_TEXT_LEN + 1024 < crate::proto::MAX_FRAME_LEN);
 /// Longest note or name a request carries, in characters.
 const MAX_REQUEST_TEXT: usize = 300;
 
@@ -56,6 +66,9 @@ pub enum ShareError {
     /// The request's key is not a usable X25519 key.
     WeakKey,
     TooLarge,
+    /// The file in the share is not the one that was sent: its checksum
+    /// does not match, or its name is not a plain file name.
+    BadFile,
 }
 
 impl fmt::Display for ShareError {
@@ -72,6 +85,10 @@ impl fmt::Display for ShareError {
             }
             Self::WeakKey => "the request code holds a key kv cannot seal to",
             Self::TooLarge => "the share is too large",
+            Self::BadFile => {
+                "the file in the share does not match its checksum, or has an unsafe name, so kv \
+                 does not take it; ask for it again"
+            }
         })
     }
 }
@@ -256,8 +273,19 @@ struct ShareWire {
 /// Seals `secret` so that only the vault that made `request` can open it,
 /// and returns the text to send back.
 pub fn seal(request: &ShareRequest, secret: &SharedSecret) -> Result<String, ShareError> {
+    // A file is held to its checksum before it goes, so a sender never
+    // seals one the receiver would refuse.
+    secret
+        .value
+        .verify_file()
+        .map_err(|_| ShareError::BadFile)?;
     let plaintext = Zeroizing::new(serde_json::to_vec(secret).expect("a share serializes"));
-    if plaintext.len() > MAX_PAYLOAD_LEN {
+    let limit = if secret.value.kind() == SecretKind::File {
+        MAX_FILE_PAYLOAD_LEN
+    } else {
+        MAX_PAYLOAD_LEN
+    };
+    if plaintext.len() > limit {
         return Err(ShareError::TooLarge);
     }
     let mut raw = Zeroizing::new([0u8; 32]);
@@ -298,7 +326,8 @@ pub fn seal(request: &ShareRequest, secret: &SharedSecret) -> Result<String, Sha
 /// Opens a share found in `text` with whichever of `requests` it was sealed
 /// to. Returns that request's index and what the share carries.
 pub fn open(text: &str, requests: &[OpenRequest]) -> Result<(usize, SharedSecret), ShareError> {
-    let bytes = extract(text, SHARE_PREFIX).ok_or(ShareError::NotAShare)?;
+    let bytes =
+        extract_within(text, SHARE_PREFIX, MAX_FILE_TEXT_LEN).ok_or(ShareError::NotAShare)?;
     let wire: ShareWire = serde_json::from_slice(&bytes).map_err(|_| ShareError::NotAShare)?;
     let to = key_bytes(&wire.to).ok_or(ShareError::NotAShare)?;
     let ephemeral = key_bytes(&wire.e).ok_or(ShareError::Damaged)?;
@@ -334,6 +363,12 @@ pub fn open(text: &str, requests: &[OpenRequest]) -> Result<(usize, SharedSecret
         .map_err(|_| ShareError::Damaged)?;
     let shared: SharedSecret =
         serde_json::from_slice(&plaintext).map_err(|_| ShareError::Damaged)?;
+    // The encryption says the share is whole; the checksum says the file in
+    // it is the one the sender had, and its name stays inside a folder.
+    shared
+        .value
+        .verify_file()
+        .map_err(|_| ShareError::BadFile)?;
     Ok((index, shared))
 }
 
@@ -509,7 +544,12 @@ pub fn new_id() -> String {
 /// not, ending at the first character that cannot be part of it. Chat apps
 /// may wrap the text in quotes or code marks, or keep the message around it.
 fn extract(text: &str, prefix: &str) -> Option<Vec<u8>> {
-    if text.len() > MAX_TEXT_LEN {
+    extract_within(text, prefix, MAX_TEXT_LEN)
+}
+
+/// `extract`, for text up to `max` bytes.
+fn extract_within(text: &str, prefix: &str, max: usize) -> Option<Vec<u8>> {
+    if text.len() > max {
         return None;
     }
     let start = text.find(prefix)? + prefix.len();

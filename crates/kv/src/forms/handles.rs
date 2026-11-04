@@ -121,7 +121,7 @@ pub fn edit_policy(handle: &HandleInfo) -> Form {
                 .with_text(&handle.allowed_methods.join(", "))
                 .hint("comma-separated; empty allows any"),
         ]),
-        SecretKind::Env => fields.push(
+        SecretKind::Env | SecretKind::File => fields.push(
             Field::text("cmds", "Allowed commands")
                 .with_text(&handle.allowed_cmds.join(", "))
                 .hint("comma-separated; empty denies all"),
@@ -387,6 +387,7 @@ fn kind_name(kind: SecretKind) -> &'static str {
     match kind {
         SecretKind::Http => "http",
         SecretKind::Env => "env",
+        SecretKind::File => "file",
         SecretKind::Postgres => "postgres",
         SecretKind::Redis => "redis",
     }

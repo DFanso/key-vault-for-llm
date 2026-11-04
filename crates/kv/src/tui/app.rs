@@ -65,6 +65,9 @@ pub enum Effect {
     Dismiss(u64),
     /// Fetches the value of a handle that came from a share.
     Reveal(String),
+    /// Fetches the file a `file` handle received through a share holds.
+    /// Only kv's window asks.
+    ExportFile(String),
     /// Cancels a share request, or drops a received or sent record.
     Forget(String),
     /// Makes a share request for the user to send. Only kv's window asks.
@@ -95,6 +98,13 @@ pub enum Outcome {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// A received file, to save as it is. Only kv's window asks for one.
+    File {
+        handle: String,
+        file_name: String,
+        sha256: String,
+        data: SecretText,
     },
     /// What a share step from kv's window came to.
     Share(ShareDone),
@@ -315,7 +325,7 @@ impl App {
             Outcome::Audit(entries) => self.audit = entries,
             // `kv tui` never asks: a value drawn in a terminal stays in its
             // scrollback.
-            Outcome::Revealed { .. } => {}
+            Outcome::Revealed { .. } | Outcome::File { .. } => {}
             // Only kv's window shares by hand.
             Outcome::Share(_) => {}
             Outcome::Ended(reason) => {
