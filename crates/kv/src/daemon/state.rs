@@ -193,6 +193,7 @@ struct Pending {
     summary: String,
     detail: String,
     cwd: Option<String>,
+    env_vars: Vec<String>,
     client: Option<String>,
     session: Option<String>,
     /// Whether "allow for the session" may grant anything. Sending a share
@@ -221,6 +222,8 @@ struct Ask {
     summary: String,
     detail: String,
     cwd: Option<String>,
+    /// The variables the program would get, for `exec` and `run`.
+    env_vars: Vec<String>,
     grantable: bool,
     sent: Option<Sent>,
 }
@@ -474,6 +477,7 @@ impl Daemon {
             summary: summary.clone(),
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: false,
             sent: Some(sealed.sent),
         };
@@ -801,7 +805,22 @@ impl Daemon {
             request.allowed_hosts.clear();
         }
         if request.kind == SecretKind::Env {
-            request.env_vars = list(request.env_vars, &is_variable_name, 32);
+            request.env_vars = list(
+                request.env_vars,
+                &|name| envvars::name_problem(name).is_none(),
+                32,
+            );
+            // An agent picked these names, maybe on someone else's say-so:
+            // refused as a share's would be, so the user is not asked to
+            // fill in one that loads code into the program it is for.
+            let risky = envvars::risky(request.env_vars.iter());
+            if !risky.is_empty() {
+                return bad(format!(
+                    "{} change how a program runs or where it connects, so kv does not ask the \
+                     user for them; leave them out, or ask the user to add them in kv's window",
+                    envvars::list(&risky)
+                ));
+            }
             request.allowed_cmds = list(request.allowed_cmds, &|_| true, 16);
         } else {
             request.env_vars.clear();
@@ -931,6 +950,7 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1035,6 +1055,7 @@ impl Daemon {
         self.touch(now);
         let detail = serde_json::to_string(&call.argv).unwrap_or_default();
         let cwd = call.cwd.display().to_string();
+        let env_names: Vec<String> = env.iter().map(|(name, _)| name.clone()).collect();
         let job = Prepared::Exec(Box::new(ExecJob {
             handles: call.handles,
             argv: call.argv,
@@ -1056,6 +1077,7 @@ impl Daemon {
             summary,
             detail,
             cwd: Some(cwd),
+            env_vars: env_names,
             grantable: true,
             sent: None,
         };
@@ -1155,6 +1177,7 @@ impl Daemon {
             summary,
             detail,
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1241,6 +1264,7 @@ impl Daemon {
                 humantime::format_duration(ttl)
             ),
             cwd: None,
+            env_vars: Vec::new(),
             grantable: true,
             sent: None,
         };
@@ -1313,6 +1337,7 @@ impl Daemon {
                 .collect(),
             _ => Vec::new(),
         };
+        let job_env_names: Vec<String> = env.iter().map(|(name, _)| name.clone()).collect();
         let job = Prepared::Run(Box::new(RunJob {
             handle: handle.clone(),
             argv: secret.policy.run.clone().unwrap_or_default(),
@@ -1337,6 +1362,7 @@ impl Daemon {
             summary: program.clone(),
             detail: format!("starts {program}"),
             cwd: None,
+            env_vars: job_env_names,
             grantable: true,
             sent: None,
         };
@@ -1377,6 +1403,11 @@ impl Daemon {
             summary: ask.summary,
             detail: printable(&ask.detail, 300),
             cwd: ask.cwd.map(|cwd| printable(&cwd, 300)),
+            env_vars: ask
+                .env_vars
+                .iter()
+                .map(|name| envvars::shown(name))
+                .collect(),
             client,
             session: session.map(|s| s.id.clone()),
             grantable: ask.grantable,
@@ -1828,6 +1859,7 @@ impl Daemon {
                 handles: p.ask.clone(),
                 detail: p.detail.clone(),
                 cwd: p.cwd.clone(),
+                env_vars: p.env_vars.clone(),
                 can_grant: p.session.is_some() && p.grantable,
                 expires_in_secs: p.expires.saturating_duration_since(now).as_secs(),
             })
@@ -2351,7 +2383,14 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
         _ => {}
     }
     let risky = risky_vars(&secret.value);
-    if !risky.is_empty() {
+    if !risky.is_empty() && secret.from_share == Some(true) {
+        warnings.push(format!(
+            "{name} came from a share and sets {}, which change how a program runs or where it \
+             connects, so kv will not start programs with it until you take them out, or add \
+             it again as your own",
+            envvars::list(&risky)
+        ));
+    } else if !risky.is_empty() {
         warnings.push(format!(
             "{name} sets {}, which change how a program runs or where it connects; every program \
              kv starts with {name} gets them, and kv will not send or take them in a share",
@@ -2667,13 +2706,4 @@ fn agent_outcome(response: &AgentResponse) -> &'static str {
         AgentResponse::Error { .. } => "error",
         _ => "done",
     }
-}
-
-/// Letters, digits and `_`, not starting with a digit.
-fn is_variable_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
