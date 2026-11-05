@@ -1623,7 +1623,8 @@ async fn a_file_is_sent_as_a_kvshare_file_and_a_received_one_is_saved_as_it_arri
     assert!(sealed.starts_with("kv-share:v1:") && !sealed.contains("correct-horse"));
     let (_, opened) = open(&sealed, std::slice::from_ref(&theirs)).unwrap();
     let (name, back) = opened.value.file_parts().unwrap();
-    assert_eq!(name, "con:words.bin");
+    // The name was made safe when the handle was made: its `:` is gone.
+    assert_eq!(name, "con_words.bin");
     assert_eq!(&back[..], &bytes[..]);
     assert!(
         !pages

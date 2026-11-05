@@ -39,9 +39,11 @@ pub enum FileError {
     Altered,
 }
 
-/// The part of `name` after the last `/` or `\`: all a file handle keeps of
-/// where a file came from, and all a receiver is told, so a share can never
-/// carry a path that climbs out of the folder the file is saved in.
+/// The part of `name` after the last `/` or `\`, made safe to create on any
+/// system by `windows_safe_name`: all a file handle keeps of where a file
+/// came from, and all a receiver is told, so a share can never carry a path
+/// that climbs out of the folder the file is saved in, or a name Windows
+/// reads as a stream or a device.
 pub fn file_base_name(name: &str) -> Result<String, FileError> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
     if base.is_empty() {
@@ -53,7 +55,55 @@ pub fn file_base_name(name: &str) -> Result<String, FileError> {
     {
         return Err(FileError::BadName);
     }
-    Ok(base.to_owned())
+    let safe = windows_safe_name(base);
+    if safe.is_empty() || safe.len() > MAX_FILE_NAME_LEN {
+        return Err(FileError::BadName);
+    }
+    Ok(safe)
+}
+
+/// `name` with what Windows reads specially made harmless, on every
+/// platform so that a file named on one system can be saved on another:
+/// `< > : " | ? *` become `_` (a `:` starts an alternate data stream, `*`
+/// and `?` are wildcards), trailing dots and spaces go (Windows drops them),
+/// and a device name such as `CON` or `com1`, with or without an extension,
+/// gets a `_` in front. A name with none of these comes back as it was. It
+/// may come back empty, as `...` does.
+pub fn windows_safe_name(name: &str) -> String {
+    let replaced: String = name
+        .chars()
+        .map(|c| if "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    let trimmed = replaced.trim_end_matches(['.', ' ']);
+    if is_device_name(trimmed.split('.').next().unwrap_or_default()) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// Whether `stem`, a name up to its first dot, is a device name Windows
+/// reserves whatever the extension: CON, PRN, AUX, NUL, COM0 to COM9, LPT0
+/// to LPT9, the superscript digits COM and LPT also take, and CONIN$ and
+/// CONOUT$. Case does not matter, nor do spaces before the dot.
+fn is_device_name(stem: &str) -> bool {
+    let upper = stem.trim_end().to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|device| {
+        let Some(rest) = upper.strip_prefix(device) else {
+            return false;
+        };
+        let mut chars = rest.chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some(c), None) if c.is_ascii_digit() || matches!(c, '\u{b9}' | '\u{b2}' | '\u{b3}')
+        )
+    })
 }
 
 /// The variable that carries a `file` handle's path to a program kv
