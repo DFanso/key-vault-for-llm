@@ -105,10 +105,19 @@ pub fn edit_handle(handle: &HandleInfo) -> Form {
         fields.push(prefill(field, handle));
     }
     if handle.kind == SecretKind::Env {
-        fields.push(Field::text("remove", "Remove variables").hint(format!(
-            "comma-separated; has {}",
-            handle.env_vars.join(", ")
-        )));
+        // The window draws a row for each variable the handle has, by name;
+        // kv tui, which has no rows, takes the names to remove as text.
+        if let Some(vars) = fields.iter_mut().find(|f| f.key == "vars") {
+            vars.existing = handle.env_vars.clone();
+        }
+        fields.push(
+            Field::text("remove", "Remove variables")
+                .hint(format!(
+                    "comma-separated; has {}",
+                    handle.env_vars.join(", ")
+                ))
+                .tui_only(),
+        );
     }
     Form::new(format!("Edit {}", handle.name), fields)
 }
