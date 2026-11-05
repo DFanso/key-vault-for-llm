@@ -398,6 +398,10 @@ fn a_file_that_does_not_match_its_checksum_is_refused_on_both_sides() {
             "b25lLXNlY3JldC1saW5lCg==",
             &sha256,
         ),
+        // A name Windows reads as a stream or a device.
+        forged("a:b.txt", "b25lLXNlY3JldC1saW5lCg==", &sha256),
+        forged("CON", "b25lLXNlY3JldC1saW5lCg==", &sha256),
+        forged("nul.txt", "b25lLXNlY3JldC1saW5lCg==", &sha256),
     ] {
         // The sender will not seal it...
         assert_eq!(

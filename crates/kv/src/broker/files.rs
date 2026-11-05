@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use kv_core::crypto::fill_random;
 use zeroize::Zeroizing;
 
+use crate::sharefile::safe_file_name;
+
 /// A file a job needs on disk.
 pub struct JobFile {
     pub handle: String,
@@ -45,9 +47,11 @@ impl Staged {
         };
         // From here a failure drops `staged`, which removes what was written.
         for file in files {
-            let folder = staged.dir.join(&file.handle);
+            // A handle may be called `con` and a file `a:b`: both are made
+            // safe to create, on Windows above all.
+            let folder = staged.dir.join(safe_file_name(&file.handle));
             make_dir(&folder)?;
-            let path = folder.join(&file.file_name);
+            let path = folder.join(safe_file_name(&file.file_name));
             write_private(&path, &file.bytes)?;
             staged
                 .files
@@ -183,6 +187,46 @@ mod tests {
             paths[0].parent().unwrap().parent().unwrap().to_owned()
         };
         assert!(!dir.exists(), "the folder is gone with the staged files");
+    }
+
+    #[test]
+    fn a_name_windows_reads_specially_is_staged_under_a_safe_one() {
+        let parent = tempfile::tempdir().unwrap();
+        // A handle may be called `con`, and a stored name may hold a `:` or be a
+        // device name: none of that may reach the file system as it is.
+        let staged = Staged::write_in(
+            parent.path(),
+            &[
+                file("con", "a:b.txt", b"one"),
+                file("nul", "CON", b"two"),
+                file("aux", "\u{e9}\u{e9}", b"three"),
+            ],
+        )
+        .unwrap();
+        let paths: Vec<_> = staged.env().map(|(_, path)| path.to_owned()).collect();
+        let tail = |path: &Path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let folder = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (folder, name)
+        };
+        assert_eq!(tail(&paths[0]), ("_con".into(), "a_b.txt".into()));
+        assert_eq!(tail(&paths[1]), ("_nul".into(), "_CON".into()));
+        assert_eq!(tail(&paths[2]), ("_aux".into(), "\u{e9}\u{e9}".into()));
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"one");
+        assert_eq!(std::fs::read(&paths[1]).unwrap(), b"two");
+        assert_eq!(std::fs::read(&paths[2]).unwrap(), b"three");
+        // The placeholder still names the path the program is given.
+        assert!(
+            staged
+                .substitute("{file:con}")
+                .ends_with(&*paths[0].to_string_lossy())
+        );
     }
 
     #[test]
