@@ -36,6 +36,8 @@
     handleFilter: "all",
     // The kind tab chosen on the Handles screen: "all" or one of KIND_TABS.
     handleKind: "all",
+    // The kind tab chosen on the Shares screen, over Received and Sent.
+    shareKind: "all",
     auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
@@ -911,7 +913,7 @@
   }
 
   function drawShares(shares, handles) {
-    const shape = JSON.stringify([shares, handles.map((h) => h.name)]);
+    const shape = JSON.stringify([shares, handles.map((h) => h.name), page.shareKind]);
     if (shape === page.drawn.shares) return;
     page.drawn.shares = shape;
 
@@ -955,9 +957,19 @@
     const forget = (id, what) =>
       iconButton("trash-2", `Forget ${what}`, () => confirmThen(`Forget ${what}? This only clears the record.`, "Forget", { type: "forget", id }), "danger");
 
-    show($("no-received"), shares.received.length === 0);
+    // The kind tabs count what was received and sent together.
+    const logged = [...shares.received, ...shares.sent];
+    updateKindTabs("share-kinds", logged, page.shareKind);
+    show($("share-kinds"), logged.length > 0);
+    const ofKind = (item) => page.shareKind === "all" || item.kind === page.shareKind;
+    const received = shares.received.filter(ofKind);
+    const sent = shares.sent.filter(ofKind);
+    const kindWord = page.shareKind === "all" ? "" : ` ${kindLabel(page.shareKind)}`;
+
+    $("no-received").textContent = shares.received.length === 0 ? "Nothing received yet." : `No${kindWord} shares received.`;
+    show($("no-received"), received.length === 0);
     $("received-rows").replaceChildren(
-      ...shares.received
+      ...received
         .slice()
         .reverse()
         .map((r) => {
@@ -990,9 +1002,10 @@
         }),
     );
 
-    show($("no-sent"), shares.sent.length === 0);
+    $("no-sent").textContent = shares.sent.length === 0 ? "Nothing sent yet." : `No${kindWord} shares sent.`;
+    show($("no-sent"), sent.length === 0);
     $("sent-rows").replaceChildren(
-      ...shares.sent
+      ...sent
         .slice()
         .reverse()
         .map((s) =>
@@ -1984,6 +1997,10 @@
     buildKindTabs("handle-kinds", (kind) => {
       page.handleKind = kind;
       if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
+    });
+    buildKindTabs("share-kinds", (kind) => {
+      page.shareKind = kind;
+      if (page.overview) drawShares(page.overview.shares || { requests: [], received: [], sent: [] }, page.overview.handles);
     });
     wireFilter("audit-filter", (filter) => {
       page.auditFilter = filter;
