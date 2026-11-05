@@ -153,6 +153,7 @@
 
       <section id="handles" aria-labelledby="page-title" hidden>
         <div id="requests" class="stack"></div>
+        <div id="handle-kinds" class="kind-tabs" role="tablist" aria-label="Kind of handle" aria-controls="handle-rows"></div>
         <div class="toolbar">
           <label class="search"><span class="i i-search" aria-hidden="true"></span><span class="sr-only">Find a handle</span><input id="handle-search" type="search" placeholder="Find a handle" autocomplete="off" spellcheck="false"></label>
           <div class="segmented" role="radiogroup" aria-label="Show" id="handle-filter">
@@ -198,6 +199,7 @@
         <h2 class="section-title">Waiting for a share</h2>
         <p id="no-share-requests" class="muted small">No open requests. Request a secret to start one.</p>
         <div id="share-requests" class="stack"></div>
+        <div id="share-kinds" class="kind-tabs" role="tablist" aria-label="Kind of share" aria-controls="received-rows sent-rows"></div>
         <div class="columns">
           <div class="panel">
             <div class="panel-head"><h3><span class="i i-download" aria-hidden="true"></span>Received</h3></div>
@@ -308,6 +310,7 @@
       </div>
       <div class="field" data-for="send">
         <label for="share-handle">Handle to send</label>
+        <div id="share-handle-kinds" class="kind-tabs small" role="tablist" aria-label="Kind of handle" aria-controls="share-handle"></div>
         <select id="share-handle"></select>
       </div>
       <div class="field" data-for="send receive">
