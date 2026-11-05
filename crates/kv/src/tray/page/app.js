@@ -34,6 +34,8 @@
     // The longest wait each request has shown, to draw how much is left.
     lifetimes: new Map(),
     handleFilter: "all",
+    // The kind tab chosen on the Handles screen: "all" or one of KIND_TABS.
+    handleKind: "all",
     auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
@@ -112,7 +114,19 @@
     env: ["terminal", "tone-teal"],
     postgres: ["database", "tone-amber"],
     redis: ["layers", "tone-red"],
+    file: ["file", "tone-green"],
   };
+
+  // The tabs that sort handles by kind, in the order they show: All first,
+  // then every kind kv has (kv-core's SecretKind).
+  const KIND_TABS = [
+    ["all", "All"],
+    ["env", "Env"],
+    ["file", "Files"],
+    ["http", "HTTP"],
+    ["postgres", "Postgres"],
+    ["redis", "Redis"],
+  ];
 
   // How each mode reads, with its tone and icon.
   const MODES = {
@@ -843,15 +857,21 @@
 
   function drawHandles(handles, warnings) {
     const query = $("handle-search").value.trim().toLowerCase();
-    const shape = JSON.stringify([handles, warnings, query, page.handleFilter]);
+    const shape = JSON.stringify([handles, warnings, query, page.handleFilter, page.handleKind]);
     if (shape === page.drawn.handles) return;
     page.drawn.handles = shape;
+    updateKindTabs("handle-kinds", handles, page.handleKind);
+    show($("handle-kinds"), handles.length > 0);
     show($("no-handles"), handles.length === 0);
-    const shown = handles.filter(
+    const ofKind = handles.filter((h) => page.handleKind === "all" || h.kind === page.handleKind);
+    const shown = ofKind.filter(
       (h) =>
         (page.handleFilter === "all" || h.mode === page.handleFilter) &&
         (!query || `${h.name} ${h.description} ${h.kind}`.toLowerCase().includes(query)),
     );
+    // A tab with no handles of its kind says so, rather than "no match".
+    $("no-match").textContent =
+      ofKind.length === 0 ? `No ${kindLabel(page.handleKind)} handles yet.` : "No handle matches.";
     show($("no-match"), handles.length > 0 && shown.length === 0);
     show($("handle-rows"), shown.length > 0);
     const rows = shown.map((handle) => {
@@ -1795,6 +1815,61 @@
     }
   }
 
+  // A row of kind tabs (All, Env, Files, ...) that sorts a list by kind.
+  // Built once; updateKindTabs sets the counts and the chosen tab.
+  function buildKindTabs(groupId, onPick) {
+    const group = $(groupId);
+    const tabs = KIND_TABS.map(([kind, label]) => {
+      const count = el("span", "count");
+      const tab = el("button", null, kind === "all" ? null : icon((KINDS[kind] || ["key-round"])[0]), el("span", "label", label), count);
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.dataset.kind = kind;
+      tab.addEventListener("click", () => onPick(kind));
+      return tab;
+    });
+    // Arrow keys move along the row and pick, as in any tab row.
+    group.addEventListener("keydown", (event) => {
+      const at = tabs.indexOf(document.activeElement);
+      if (at < 0) return;
+      const to = { ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: tabs.length - 1 }[event.key];
+      if (to === undefined) return;
+      event.preventDefault();
+      const tab = tabs[(to + tabs.length) % tabs.length];
+      tab.focus();
+      onPick(tab.dataset.kind);
+    });
+    group.replaceChildren(...tabs);
+  }
+
+  // How many of `items` are of each kind, and in all.
+  function countKinds(items) {
+    const counts = { all: items.length };
+    for (const item of items) counts[item.kind] = (counts[item.kind] || 0) + 1;
+    return counts;
+  }
+
+  function updateKindTabs(groupId, items, chosen) {
+    const counts = countKinds(items);
+    for (const tab of $(groupId).querySelectorAll("button")) {
+      const kind = tab.dataset.kind;
+      const n = counts[kind] || 0;
+      const picked = kind === chosen;
+      tab.setAttribute("aria-selected", String(picked));
+      tab.tabIndex = picked ? 0 : -1;
+      tab.classList.toggle("none", n === 0 && kind !== "all");
+      const count = tab.querySelector(".count");
+      count.textContent = String(n);
+      show(count, n > 0);
+    }
+  }
+
+  // The tab's name for a kind, as it reads in a sentence ("No Files ...").
+  function kindLabel(kind) {
+    const tab = KIND_TABS.find(([k]) => k === kind);
+    return tab ? tab[1] : kind;
+  }
+
   function askQuit() {
     confirmThen(
       "Quit kv tray? Agents' requests then wait for kv tui or time out. Start it again with kv tray.",
@@ -1904,6 +1979,10 @@
     $("audit-search").addEventListener("input", drawAudit);
     wireFilter("handle-filter", (filter) => {
       page.handleFilter = filter;
+      if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
+    });
+    buildKindTabs("handle-kinds", (kind) => {
+      page.handleKind = kind;
       if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
     });
     wireFilter("audit-filter", (filter) => {
