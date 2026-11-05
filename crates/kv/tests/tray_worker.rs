@@ -1652,3 +1652,70 @@ async fn the_window_takes_the_move_and_focus_messages_itself() {
     assert!(desk.take().is_empty());
     assert_eq!(desk.notes(), Vec::<String>::new());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_edits_an_env_handles_rows_and_will_not_take_out_its_last() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    worker.model().await;
+    desk.take();
+    let open = |form| page(FromPage::OpenForm { form });
+    let submit = |pairs: &[(&str, &str)]| {
+        page(FromPage::SubmitForm {
+            values: values(pairs),
+        })
+    };
+    assert!(!worker.act(open(FormRequest::New)).await);
+    assert!(
+        !worker
+            .act(submit(&[
+                ("kind", "env"),
+                ("name", "demo-env"),
+                ("vars", "A_TOKEN=demo-a-value\nB_KEY=demo-b-value"),
+                ("cmds", "true"),
+            ]))
+            .await
+    );
+    assert!(desk.take().contains(&ToPage::FormDone));
+    worker.model().await;
+    desk.take();
+
+    let edit = || {
+        open(FormRequest::Edit {
+            name: "demo-env".into(),
+        })
+    };
+    // The rows come by name, never with a value.
+    assert!(!worker.act(edit()).await);
+    let pages = desk.take();
+    let Some(ToPage::Form { view }) = pages.last() else {
+        panic!("{pages:?}");
+    };
+    let vars = view.fields.iter().find(|f| f.key == "vars").unwrap();
+    assert_eq!(vars.existing, ["A_TOKEN", "B_KEY"]);
+    assert!(!format!("{pages:?}").contains("demo-a-value"));
+
+    // B_KEY's x: it goes, A_TOKEN stays as it was.
+    assert!(!worker.act(submit(&[("vars", "A_TOKEN=")])).await);
+    assert!(desk.take().contains(&ToPage::FormDone));
+    worker.model().await;
+    let (_, _, overview) = state(&desk.take());
+    let handle = overview
+        .unwrap()
+        .handles
+        .into_iter()
+        .find(|h| h.name == "demo-env")
+        .unwrap();
+    assert_eq!(handle.env_vars, ["A_TOKEN"]);
+
+    // The last one's x is refused, and says why.
+    desk.take();
+    assert!(!worker.act(edit()).await);
+    desk.take();
+    assert!(!worker.act(submit(&[("vars", "")])).await);
+    let pages = desk.take();
+    let Some(ToPage::FormError { message }) = pages.last() else {
+        panic!("{pages:?}");
+    };
+    assert!(message.contains("no variables left"), "{message}");
+}

@@ -213,3 +213,156 @@ fn a_requested_handle_puts_the_cursor_on_its_secret() {
     assert_eq!(field(&view, "name").value, "github");
     assert_eq!(field(&view, "hosts").value, "api.github.com");
 }
+
+#[test]
+fn a_requested_env_handle_offers_its_variables_and_commands_but_fills_no_value() {
+    let requested = RequestedHandle {
+        id: 4,
+        client: Some("claude-code".into()),
+        request: serde_json::from_str(
+            r#"{"name":"demo-admin","kind":"env","description":"Demo admin API key",
+                "env_vars":["DEMO_ADMIN_TOKEN","DEMO_URL"],"allowed_cmds":["python3"]}"#,
+        )
+        .unwrap(),
+    };
+    let form = forms::requested_handle(&requested);
+    let view = forms::describe(&form);
+    assert_eq!(view.focus.as_deref(), Some("vars"));
+    // A row each, with the name in: the user types only the values.
+    let vars = field(&view, "vars");
+    assert_eq!(vars.kind, FieldKind::Pairs);
+    assert_eq!(vars.suggested, ["DEMO_ADMIN_TOKEN", "DEMO_URL"]);
+    assert_eq!(vars.value, "");
+    // A program is offered, never allowed for the user.
+    let cmds = field(&view, "cmds");
+    assert_eq!(cmds.suggested, ["python3"]);
+    assert_eq!(cmds.value, "", "nothing is allowed until the user picks it");
+    // What the page sends with the names it drew and the value typed saves
+    // those variables, and only the commands the user chose.
+    let mut form = form;
+    forms::fill(
+        &mut form,
+        &values(&[
+            ("kind", "env"),
+            ("name", "demo-admin"),
+            ("description", "Demo admin API key"),
+            (
+                "vars",
+                "DEMO_ADMIN_TOKEN=demo-value-1\nDEMO_URL=https://demo.example.test",
+            ),
+            ("cmds", ""),
+            ("mode", "ask"),
+        ]),
+    )
+    .unwrap();
+    let Effect::Add(secret) = forms::submit(&Purpose::Add, &form).unwrap() else {
+        panic!("not an add");
+    };
+    let SecretValue::Env { vars } = &secret.value else {
+        panic!("not env: {:?}", secret.value.kind());
+    };
+    assert_eq!(
+        vars.keys().collect::<Vec<_>>(),
+        ["DEMO_ADMIN_TOKEN", "DEMO_URL"]
+    );
+    assert!(secret.policy.allowed_cmds.is_empty());
+}
+
+#[test]
+fn a_form_without_suggestions_sends_none_to_the_page() {
+    let view = forms::describe(&forms::new_handle());
+    let json = serde_json::to_string(&view).unwrap();
+    assert!(!json.contains("suggested"), "{json}");
+}
+
+/// The edit form of an env handle with demo variables A_TOKEN, B_URL and
+/// C_KEY, and what the handle looks like to the form.
+fn env_edit() -> (forms::Form, Purpose) {
+    let secret = kv_core::secret::Secret {
+        name: "demo-env".into(),
+        description: "Demo env".into(),
+        value: SecretValue::Env {
+            vars: values(&[
+                ("A_TOKEN", "demo-a-value"),
+                ("B_URL", "https://demo.example.test"),
+                ("C_KEY", "demo-c-value"),
+            ]),
+        },
+        policy: kv_core::policy::Policy::default(),
+        created_at: 0,
+        updated_at: 0,
+        from_share: None,
+    };
+    let info = secret.info();
+    (forms::edit_handle(&info), Purpose::Edit(info))
+}
+
+#[test]
+fn editing_an_env_handle_shows_its_variables_by_name_only() {
+    let (form, _) = env_edit();
+    let view = forms::describe(&form);
+    let vars = field(&view, "vars");
+    assert_eq!(vars.existing, ["A_TOKEN", "B_URL", "C_KEY"]);
+    // The window removes with each row's x, so it gets no Remove box.
+    assert!(view.fields.iter().all(|f| f.key != "remove"), "{view:?}");
+    let json = serde_json::to_string(&view).unwrap();
+    for value in ["demo-a-value", "demo.example.test", "demo-c-value"] {
+        assert!(!json.contains(value), "a value reached the form: {json}");
+    }
+}
+
+#[test]
+fn a_blank_row_keeps_a_variable_a_typed_one_replaces_it_and_a_missing_one_goes() {
+    let (mut form, purpose) = env_edit();
+    // A_TOKEN kept, B_URL changed, C_KEY's row taken out, D_NEW added.
+    forms::fill(
+        &mut form,
+        &values(&[(
+            "vars",
+            "A_TOKEN=\nB_URL=https://new.example.test\nD_NEW=demo-d-value",
+        )]),
+    )
+    .unwrap();
+    let Effect::EditVars {
+        name, set, remove, ..
+    } = forms::submit(&purpose, &form).unwrap()
+    else {
+        panic!("not an edit of variables");
+    };
+    assert_eq!(name, "demo-env");
+    assert_eq!(set.keys().collect::<Vec<_>>(), ["B_URL", "D_NEW"]);
+    assert_eq!(set["B_URL"].expose(), "https://new.example.test");
+    assert_eq!(remove, ["C_KEY"]);
+}
+
+#[test]
+fn every_row_left_blank_changes_nothing() {
+    let (mut form, purpose) = env_edit();
+    forms::fill(&mut form, &values(&[("vars", "A_TOKEN=\nB_URL=\nC_KEY=")])).unwrap();
+    assert_eq!(
+        forms::submit(&purpose, &form).unwrap_err(),
+        "nothing changed"
+    );
+}
+
+#[test]
+fn a_new_variable_needs_its_value() {
+    let (mut form, _) = env_edit();
+    let error = forms::fill(&mut form, &values(&[("vars", "A_TOKEN=\nD_NEW=")])).unwrap_err();
+    assert!(error.contains("type a value for D_NEW"), "{error}");
+    // As on a requested handle, where no name is one the handle has yet.
+    let requested = RequestedHandle {
+        id: 5,
+        client: None,
+        request: serde_json::from_str(
+            r#"{"name":"demo-admin","kind":"env","env_vars":["DEMO_ADMIN_TOKEN"]}"#,
+        )
+        .unwrap(),
+    };
+    let mut form = forms::requested_handle(&requested);
+    let error = forms::fill(&mut form, &values(&[("vars", "DEMO_ADMIN_TOKEN=")])).unwrap_err();
+    assert!(
+        error.contains("type a value for DEMO_ADMIN_TOKEN"),
+        "{error}"
+    );
+}
