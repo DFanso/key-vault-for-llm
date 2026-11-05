@@ -28,6 +28,9 @@ pub struct Field {
     pub text: Zeroizing<String>,
     pub choice: usize,
     pub pairs: Vec<(String, SecretText)>,
+    /// What an agent asked for here, offered and never filled in for the
+    /// user: variable names to give a value each, or programs to allow.
+    pub suggested: Vec<String>,
     /// Drawn dimmed after the field, e.g. what leaving it blank means.
     pub hint: String,
     /// Shown only while the choice field `.0` is set to one of `.1`.
@@ -43,6 +46,7 @@ impl Field {
             text: Zeroizing::new(String::new()),
             choice: 0,
             pairs: Vec::new(),
+            suggested: Vec::new(),
             hint: String::new(),
             when: None,
         }
@@ -269,6 +273,10 @@ pub struct FieldView {
     /// secrets and variables.
     pub value: String,
     pub hint: String,
+    /// What an agent asked for: for variables, a row each with the name in
+    /// and the value left to the user; for text, choices the user may add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested: Vec<String>,
     /// Shown only while each of these choice fields has one of its options:
     /// the field this one depends on, then the one that depends on, and so
     /// on, so a field is hidden along with the field it hangs from.
@@ -316,6 +324,7 @@ pub fn describe(form: &Form) -> FormView {
                     options,
                     value,
                     hint: field.hint.clone(),
+                    suggested: field.suggested.clone(),
                     when: conditions(form, field),
                 }
             })

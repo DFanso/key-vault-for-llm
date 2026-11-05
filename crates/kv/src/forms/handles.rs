@@ -66,18 +66,23 @@ pub fn requested_handle(requested: &RequestedHandle) -> Form {
     }
     form.field_mut("hosts").text = request.allowed_hosts.join(", ").into();
     // A program the agent names could be a shell that runs anything, so
-    // the user types the ones they allow.
+    // it is only offered: the user types or picks the ones they allow.
     if !request.allowed_cmds.is_empty() {
-        form.field_mut("cmds").hint = format!(
-            "asked for {}; type the ones you allow",
+        let cmds = form.field_mut("cmds");
+        cmds.hint = format!(
+            "asked for {}; type or pick the ones you allow",
             request.allowed_cmds.join(", ")
         );
+        cmds.suggested = request.allowed_cmds.clone();
     }
+    // The variables' names come in, so the user types only the values.
     if !request.env_vars.is_empty() {
-        form.field_mut("vars").hint = format!(
+        let vars = form.field_mut("vars");
+        vars.hint = format!(
             "NAME=value, Enter adds; asked for {}",
             request.env_vars.join(", ")
         );
+        vars.suggested = request.env_vars.clone();
     }
     form.focus_on(match kind {
         "http" => "token",
