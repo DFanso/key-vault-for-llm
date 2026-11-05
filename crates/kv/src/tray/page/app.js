@@ -1375,7 +1375,12 @@
     applyConditions();
     const dialog = $("form-dialog");
     if (!dialog.open) dialog.showModal();
-    const focus = view.focus && $(`field-${view.focus}`);
+    let focus = view.focus && $(`field-${view.focus}`);
+    // Variables whose names came with an agent's request: the value is
+    // what is left to type.
+    if (focus && focus.classList.contains("pair-name") && focus.value) {
+      focus = focus.closest(".pair").querySelector(".pair-value");
+    }
     if (focus) focus.focus();
   }
 
@@ -1394,7 +1399,7 @@
         input.addEventListener("change", applyConditions);
         break;
       case "pairs":
-        input = pairs(id);
+        input = pairs(id, spec.suggested || []);
         break;
       case "secret":
         input = el("input");
@@ -1411,30 +1416,52 @@
     input.dataset.key = spec.key;
     const label = el("label", null, spec.label);
     label.htmlFor = id;
-    const node = el("div", "field", label, input, spec.hint ? el("p", "hint", spec.hint) : null);
+    const offered = spec.kind === "text" && spec.suggested && spec.suggested.length ? suggestions(input, spec.suggested) : null;
+    const node = el("div", "field", label, input, offered, spec.hint ? el("p", "hint", spec.hint) : null);
     node.dataset.key = spec.key;
     node.dataset.kind = spec.kind;
     return node;
   }
 
+  // What an agent asked to be allowed, as chips: a click adds one to the
+  // comma-separated list in `input`. Nothing is in it until the user picks.
+  function suggestions(input, offered) {
+    const chips = el("div", "chips suggest");
+    for (const item of offered) {
+      const chip = button(item, () => {
+        const have = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!have.includes(item)) input.value = [...have, item].join(", ");
+        chip.disabled = true;
+        input.focus();
+      }, "chip-button", "plus");
+      chip.title = `Allow ${item}`;
+      chips.append(chip);
+    }
+    return chips;
+  }
+
   // Variables: a name and a value per row. The value is a password field,
-  // like every other secret.
-  function pairs(id) {
+  // like every other secret. Names an agent asked for come in a row each,
+  // for the user to give values; otherwise there is one empty row.
+  function pairs(id, names) {
     const rows = el("div", "pairs");
     const add = button("Add variable", () => {
-      rows.insertBefore(pair(null), add);
+      rows.insertBefore(pair(null, ""), add);
       rows.querySelector(".pair:last-of-type .pair-name").focus();
     }, "outline", "plus");
-    rows.append(pair(id), add);
+    const first = names.length ? names : [""];
+    first.forEach((name, i) => rows.append(pair(i === 0 ? id : null, name)));
+    rows.append(add);
     return rows;
   }
 
-  function pair(id) {
+  function pair(id, nameText) {
     const name = el("input", "pair-name");
     name.type = "text";
     name.placeholder = "NAME";
     name.spellcheck = false;
     name.autocomplete = "off";
+    name.value = nameText;
     if (id) name.id = id;
     const value = el("input", "pair-value");
     value.type = "password";

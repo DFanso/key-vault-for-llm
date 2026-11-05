@@ -213,3 +213,64 @@ fn a_requested_handle_puts_the_cursor_on_its_secret() {
     assert_eq!(field(&view, "name").value, "github");
     assert_eq!(field(&view, "hosts").value, "api.github.com");
 }
+
+#[test]
+fn a_requested_env_handle_offers_its_variables_and_commands_but_fills_no_value() {
+    let requested = RequestedHandle {
+        id: 4,
+        client: Some("claude-code".into()),
+        request: serde_json::from_str(
+            r#"{"name":"demo-admin","kind":"env","description":"Demo admin API key",
+                "env_vars":["DEMO_ADMIN_TOKEN","DEMO_URL"],"allowed_cmds":["python3"]}"#,
+        )
+        .unwrap(),
+    };
+    let form = forms::requested_handle(&requested);
+    let view = forms::describe(&form);
+    assert_eq!(view.focus.as_deref(), Some("vars"));
+    // A row each, with the name in: the user types only the values.
+    let vars = field(&view, "vars");
+    assert_eq!(vars.kind, FieldKind::Pairs);
+    assert_eq!(vars.suggested, ["DEMO_ADMIN_TOKEN", "DEMO_URL"]);
+    assert_eq!(vars.value, "");
+    // A program is offered, never allowed for the user.
+    let cmds = field(&view, "cmds");
+    assert_eq!(cmds.suggested, ["python3"]);
+    assert_eq!(cmds.value, "", "nothing is allowed until the user picks it");
+    // What the page sends with the names it drew and the value typed saves
+    // those variables, and only the commands the user chose.
+    let mut form = form;
+    forms::fill(
+        &mut form,
+        &values(&[
+            ("kind", "env"),
+            ("name", "demo-admin"),
+            ("description", "Demo admin API key"),
+            (
+                "vars",
+                "DEMO_ADMIN_TOKEN=demo-value-1\nDEMO_URL=https://demo.example.test",
+            ),
+            ("cmds", ""),
+            ("mode", "ask"),
+        ]),
+    )
+    .unwrap();
+    let Effect::Add(secret) = forms::submit(&Purpose::Add, &form).unwrap() else {
+        panic!("not an add");
+    };
+    let SecretValue::Env { vars } = &secret.value else {
+        panic!("not env: {:?}", secret.value.kind());
+    };
+    assert_eq!(
+        vars.keys().collect::<Vec<_>>(),
+        ["DEMO_ADMIN_TOKEN", "DEMO_URL"]
+    );
+    assert!(secret.policy.allowed_cmds.is_empty());
+}
+
+#[test]
+fn a_form_without_suggestions_sends_none_to_the_page() {
+    let view = forms::describe(&forms::new_handle());
+    let json = serde_json::to_string(&view).unwrap();
+    assert!(!json.contains("suggested"), "{json}");
+}
