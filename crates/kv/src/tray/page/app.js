@@ -1399,7 +1399,7 @@
         input.addEventListener("change", applyConditions);
         break;
       case "pairs":
-        input = pairs(id, spec.suggested || []);
+        input = pairs(id, spec.suggested || [], spec.existing || []);
         break;
       case "secret":
         input = el("input");
@@ -1441,21 +1441,23 @@
   }
 
   // Variables: a name and a value per row. The value is a password field,
-  // like every other secret. Names an agent asked for come in a row each,
-  // for the user to give values; otherwise there is one empty row.
-  function pairs(id, names) {
+  // like every other secret. A handle being edited shows a row for each
+  // variable it has, by name only: a blank value keeps it, a typed one
+  // replaces it, and its x removes it. Names an agent asked for come in a
+  // row each, for the user to give values; otherwise there is one empty row.
+  function pairs(id, names, existing) {
     const rows = el("div", "pairs");
     const add = button("Add variable", () => {
-      rows.insertBefore(pair(null, ""), add);
+      rows.insertBefore(pair(null, "", false), add);
       rows.querySelector(".pair:last-of-type .pair-name").focus();
     }, "outline", "plus");
-    const first = names.length ? names : [""];
-    first.forEach((name, i) => rows.append(pair(i === 0 ? id : null, name)));
+    const first = existing.length ? existing : names.length ? names : [""];
+    first.forEach((name, i) => rows.append(pair(i === 0 ? id : null, name, existing.length > 0)));
     rows.append(add);
     return rows;
   }
 
-  function pair(id, nameText) {
+  function pair(id, nameText, kept) {
     const name = el("input", "pair-name");
     name.type = "text";
     name.placeholder = "NAME";
@@ -1465,10 +1467,16 @@
     if (id) name.id = id;
     const value = el("input", "pair-value");
     value.type = "password";
-    value.placeholder = "value";
+    value.placeholder = kept ? "unchanged" : "value";
     value.autocomplete = "off";
-    const row = el("div", "pair", name, value);
-    row.append(iconButton("x", "Remove this variable", () => row.remove(), "danger"));
+    // A variable the handle has keeps its name: to rename one, remove it
+    // and add the new name.
+    if (kept) {
+      name.readOnly = true;
+      name.title = `${nameText} keeps its value unless you type a new one`;
+    }
+    const row = el("div", kept ? "pair existing" : "pair", name, value);
+    row.append(iconButton("x", kept ? `Remove ${nameText}` : "Remove this variable", () => row.remove(), "danger"));
     return row;
   }
 
