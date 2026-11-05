@@ -34,6 +34,12 @@
     // The longest wait each request has shown, to draw how much is left.
     lifetimes: new Map(),
     handleFilter: "all",
+    // The kind tab chosen on the Handles screen: "all" or one of KIND_TABS.
+    handleKind: "all",
+    // The kind tab chosen on the Shares screen, over Received and Sent.
+    shareKind: "all",
+    // The kind tab over the Send dialog's list of handles; All each time it opens.
+    sendKind: "all",
     auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
@@ -112,7 +118,19 @@
     env: ["terminal", "tone-teal"],
     postgres: ["database", "tone-amber"],
     redis: ["layers", "tone-red"],
+    file: ["file", "tone-green"],
   };
+
+  // The tabs that sort handles by kind, in the order they show: All first,
+  // then every kind kv has (kv-core's SecretKind).
+  const KIND_TABS = [
+    ["all", "All"],
+    ["env", "Env"],
+    ["file", "Files"],
+    ["http", "HTTP"],
+    ["postgres", "Postgres"],
+    ["redis", "Redis"],
+  ];
 
   // How each mode reads, with its tone and icon.
   const MODES = {
@@ -843,15 +861,21 @@
 
   function drawHandles(handles, warnings) {
     const query = $("handle-search").value.trim().toLowerCase();
-    const shape = JSON.stringify([handles, warnings, query, page.handleFilter]);
+    const shape = JSON.stringify([handles, warnings, query, page.handleFilter, page.handleKind]);
     if (shape === page.drawn.handles) return;
     page.drawn.handles = shape;
+    updateKindTabs("handle-kinds", handles, page.handleKind);
+    show($("handle-kinds"), handles.length > 0);
     show($("no-handles"), handles.length === 0);
-    const shown = handles.filter(
+    const ofKind = handles.filter((h) => page.handleKind === "all" || h.kind === page.handleKind);
+    const shown = ofKind.filter(
       (h) =>
         (page.handleFilter === "all" || h.mode === page.handleFilter) &&
         (!query || `${h.name} ${h.description} ${h.kind}`.toLowerCase().includes(query)),
     );
+    // A tab with no handles of its kind says so, rather than "no match".
+    $("no-match").textContent =
+      ofKind.length === 0 ? `No ${kindLabel(page.handleKind)} handles yet.` : "No handle matches.";
     show($("no-match"), handles.length > 0 && shown.length === 0);
     show($("handle-rows"), shown.length > 0);
     const rows = shown.map((handle) => {
@@ -891,7 +915,7 @@
   }
 
   function drawShares(shares, handles) {
-    const shape = JSON.stringify([shares, handles.map((h) => h.name)]);
+    const shape = JSON.stringify([shares, handles.map((h) => h.name), page.shareKind]);
     if (shape === page.drawn.shares) return;
     page.drawn.shares = shape;
 
@@ -935,9 +959,19 @@
     const forget = (id, what) =>
       iconButton("trash-2", `Forget ${what}`, () => confirmThen(`Forget ${what}? This only clears the record.`, "Forget", { type: "forget", id }), "danger");
 
-    show($("no-received"), shares.received.length === 0);
+    // The kind tabs count what was received and sent together.
+    const logged = [...shares.received, ...shares.sent];
+    updateKindTabs("share-kinds", logged, page.shareKind);
+    show($("share-kinds"), logged.length > 0);
+    const ofKind = (item) => page.shareKind === "all" || item.kind === page.shareKind;
+    const received = shares.received.filter(ofKind);
+    const sent = shares.sent.filter(ofKind);
+    const kindWord = page.shareKind === "all" ? "" : ` ${kindLabel(page.shareKind)}`;
+
+    $("no-received").textContent = shares.received.length === 0 ? "Nothing received yet." : `No${kindWord} shares received.`;
+    show($("no-received"), received.length === 0);
     $("received-rows").replaceChildren(
-      ...shares.received
+      ...received
         .slice()
         .reverse()
         .map((r) => {
@@ -970,9 +1004,10 @@
         }),
     );
 
-    show($("no-sent"), shares.sent.length === 0);
+    $("no-sent").textContent = shares.sent.length === 0 ? "Nothing sent yet." : `No${kindWord} shares sent.`;
+    show($("no-sent"), sent.length === 0);
     $("sent-rows").replaceChildren(
-      ...shares.sent
+      ...sent
         .slice()
         .reverse()
         .map((s) =>
@@ -1102,7 +1137,10 @@
       $("share-name-label").textContent = spec.name[0];
       $("share-name-hint").textContent = spec.name[1];
     }
-    if (step === "send") fillShareHandles();
+    if (step === "send") {
+      page.sendKind = "all";
+      fillShareHandles();
+    }
     clearShareFile();
     shareResult(false);
     shareBusy(false);
@@ -1113,9 +1151,13 @@
     if (first) first.querySelector("input, select").focus();
   }
 
-  // Every handle, the ones set to deny greyed out: kv will not share those.
+  // Every handle of the chosen kind, the ones set to deny greyed out: kv
+  // will not share those.
   function fillShareHandles() {
-    const handles = (page.overview && page.overview.handles) || [];
+    const all = (page.overview && page.overview.handles) || [];
+    updateKindTabs("share-handle-kinds", all, page.sendKind);
+    show($("share-handle-kinds"), all.length > 0);
+    const handles = all.filter((handle) => page.sendKind === "all" || handle.kind === page.sendKind);
     const options = handles.map((handle) => {
       const deny = handle.mode === "deny";
       const option = el("option", null, deny ? `${handle.name} (${handle.kind}) · set to deny` : `${handle.name} (${handle.kind})`);
@@ -1123,8 +1165,16 @@
       option.disabled = deny;
       return option;
     });
+    if (options.length === 0) {
+      const none = el("option", null, `No ${kindLabel(page.sendKind)} handles`);
+      none.value = "";
+      none.disabled = true;
+      options.push(none);
+    }
+    // Switching tabs keeps the handle picked when it is still in the list.
+    const kept = $("share-handle").value;
     $("share-handle").replaceChildren(...options);
-    const first = handles.find((handle) => handle.mode !== "deny");
+    const first = handles.find((handle) => handle.name === kept && handle.mode !== "deny") || handles.find((handle) => handle.mode !== "deny");
     $("share-handle").value = first ? first.name : "";
   }
 
@@ -1795,6 +1845,61 @@
     }
   }
 
+  // A row of kind tabs (All, Env, Files, ...) that sorts a list by kind.
+  // Built once; updateKindTabs sets the counts and the chosen tab.
+  function buildKindTabs(groupId, onPick) {
+    const group = $(groupId);
+    const tabs = KIND_TABS.map(([kind, label]) => {
+      const count = el("span", "count");
+      const tab = el("button", null, kind === "all" ? null : icon((KINDS[kind] || ["key-round"])[0]), el("span", "label", label), count);
+      tab.type = "button";
+      tab.setAttribute("role", "tab");
+      tab.dataset.kind = kind;
+      tab.addEventListener("click", () => onPick(kind));
+      return tab;
+    });
+    // Arrow keys move along the row and pick, as in any tab row.
+    group.addEventListener("keydown", (event) => {
+      const at = tabs.indexOf(document.activeElement);
+      if (at < 0) return;
+      const to = { ArrowLeft: at - 1, ArrowRight: at + 1, Home: 0, End: tabs.length - 1 }[event.key];
+      if (to === undefined) return;
+      event.preventDefault();
+      const tab = tabs[(to + tabs.length) % tabs.length];
+      tab.focus();
+      onPick(tab.dataset.kind);
+    });
+    group.replaceChildren(...tabs);
+  }
+
+  // How many of `items` are of each kind, and in all.
+  function countKinds(items) {
+    const counts = { all: items.length };
+    for (const item of items) counts[item.kind] = (counts[item.kind] || 0) + 1;
+    return counts;
+  }
+
+  function updateKindTabs(groupId, items, chosen) {
+    const counts = countKinds(items);
+    for (const tab of $(groupId).querySelectorAll("button")) {
+      const kind = tab.dataset.kind;
+      const n = counts[kind] || 0;
+      const picked = kind === chosen;
+      tab.setAttribute("aria-selected", String(picked));
+      tab.tabIndex = picked ? 0 : -1;
+      tab.classList.toggle("none", n === 0 && kind !== "all");
+      const count = tab.querySelector(".count");
+      count.textContent = String(n);
+      show(count, n > 0);
+    }
+  }
+
+  // The tab's name for a kind, as it reads in a sentence ("No Files ...").
+  function kindLabel(kind) {
+    const tab = KIND_TABS.find(([k]) => k === kind);
+    return tab ? tab[1] : kind;
+  }
+
   function askQuit() {
     confirmThen(
       "Quit kv tray? Agents' requests then wait for kv tui or time out. Start it again with kv tray.",
@@ -1905,6 +2010,18 @@
     wireFilter("handle-filter", (filter) => {
       page.handleFilter = filter;
       if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
+    });
+    buildKindTabs("handle-kinds", (kind) => {
+      page.handleKind = kind;
+      if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
+    });
+    buildKindTabs("share-kinds", (kind) => {
+      page.shareKind = kind;
+      if (page.overview) drawShares(page.overview.shares || { requests: [], received: [], sent: [] }, page.overview.handles);
+    });
+    buildKindTabs("share-handle-kinds", (kind) => {
+      page.sendKind = kind;
+      fillShareHandles();
     });
     wireFilter("audit-filter", (filter) => {
       page.auditFilter = filter;
