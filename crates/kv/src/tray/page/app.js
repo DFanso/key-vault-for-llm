@@ -38,6 +38,8 @@
     handleKind: "all",
     // The kind tab chosen on the Shares screen, over Received and Sent.
     shareKind: "all",
+    // The kind tab over the Send dialog's list of handles; All each time it opens.
+    sendKind: "all",
     auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
@@ -1135,7 +1137,10 @@
       $("share-name-label").textContent = spec.name[0];
       $("share-name-hint").textContent = spec.name[1];
     }
-    if (step === "send") fillShareHandles();
+    if (step === "send") {
+      page.sendKind = "all";
+      fillShareHandles();
+    }
     clearShareFile();
     shareResult(false);
     shareBusy(false);
@@ -1146,9 +1151,13 @@
     if (first) first.querySelector("input, select").focus();
   }
 
-  // Every handle, the ones set to deny greyed out: kv will not share those.
+  // Every handle of the chosen kind, the ones set to deny greyed out: kv
+  // will not share those.
   function fillShareHandles() {
-    const handles = (page.overview && page.overview.handles) || [];
+    const all = (page.overview && page.overview.handles) || [];
+    updateKindTabs("share-handle-kinds", all, page.sendKind);
+    show($("share-handle-kinds"), all.length > 0);
+    const handles = all.filter((handle) => page.sendKind === "all" || handle.kind === page.sendKind);
     const options = handles.map((handle) => {
       const deny = handle.mode === "deny";
       const option = el("option", null, deny ? `${handle.name} (${handle.kind}) · set to deny` : `${handle.name} (${handle.kind})`);
@@ -1156,8 +1165,16 @@
       option.disabled = deny;
       return option;
     });
+    if (options.length === 0) {
+      const none = el("option", null, `No ${kindLabel(page.sendKind)} handles`);
+      none.value = "";
+      none.disabled = true;
+      options.push(none);
+    }
+    // Switching tabs keeps the handle picked when it is still in the list.
+    const kept = $("share-handle").value;
     $("share-handle").replaceChildren(...options);
-    const first = handles.find((handle) => handle.mode !== "deny");
+    const first = handles.find((handle) => handle.name === kept && handle.mode !== "deny") || handles.find((handle) => handle.mode !== "deny");
     $("share-handle").value = first ? first.name : "";
   }
 
@@ -2001,6 +2018,10 @@
     buildKindTabs("share-kinds", (kind) => {
       page.shareKind = kind;
       if (page.overview) drawShares(page.overview.shares || { requests: [], received: [], sent: [] }, page.overview.handles);
+    });
+    buildKindTabs("share-handle-kinds", (kind) => {
+      page.sendKind = kind;
+      fillShareHandles();
     });
     wireFilter("audit-filter", (filter) => {
       page.auditFilter = filter;
