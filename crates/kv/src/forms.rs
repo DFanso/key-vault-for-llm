@@ -28,6 +28,17 @@ pub struct Field {
     pub text: Zeroizing<String>,
     pub choice: usize,
     pub pairs: Vec<(String, SecretText)>,
+    /// What an agent asked for here, offered and never filled in for the
+    /// user: variable names to give a value each, or programs to allow.
+    pub suggested: Vec<String>,
+    /// For variables being edited: the names the handle already has. The
+    /// window draws a row each with the value blank, which keeps it; a value
+    /// typed in replaces it, and a row taken out removes the variable.
+    /// Names only: a value never leaves the daemon for a form.
+    pub existing: Vec<String>,
+    /// Asked for by name where the window has its own control for it, so
+    /// only kv tui draws it (Remove variables, which the window's rows do).
+    pub tui_only: bool,
     /// Drawn dimmed after the field, e.g. what leaving it blank means.
     pub hint: String,
     /// Shown only while the choice field `.0` is set to one of `.1`.
@@ -43,6 +54,9 @@ impl Field {
             text: Zeroizing::new(String::new()),
             choice: 0,
             pairs: Vec::new(),
+            suggested: Vec::new(),
+            existing: Vec::new(),
+            tui_only: false,
             hint: String::new(),
             when: None,
         }
@@ -88,6 +102,12 @@ impl Field {
 
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = hint.into();
+        self
+    }
+
+    /// Drawn by kv tui only; see `tui_only`.
+    pub fn tui_only(mut self) -> Self {
+        self.tui_only = true;
         self
     }
 
@@ -269,6 +289,14 @@ pub struct FieldView {
     /// secrets and variables.
     pub value: String,
     pub hint: String,
+    /// What an agent asked for: for variables, a row each with the name in
+    /// and the value left to the user; for text, choices the user may add.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested: Vec<String>,
+    /// For variables being edited: the names already set, drawn as rows
+    /// whose blank value keeps what is there. Never a value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub existing: Vec<String>,
     /// Shown only while each of these choice fields has one of its options:
     /// the field this one depends on, then the one that depends on, and so
     /// on, so a field is hidden along with the field it hangs from.
@@ -298,6 +326,7 @@ pub fn describe(form: &Form) -> FormView {
         fields: form
             .fields
             .iter()
+            .filter(|field| !field.tui_only)
             .map(|field| {
                 let (kind, options, value) = match field.input {
                     Input::Text => (FieldKind::Text, Vec::new(), field.text.to_string()),
@@ -316,6 +345,8 @@ pub fn describe(form: &Form) -> FormView {
                     options,
                     value,
                     hint: field.hint.clone(),
+                    suggested: field.suggested.clone(),
+                    existing: field.existing.clone(),
                     when: conditions(form, field),
                 }
             })
@@ -371,16 +402,45 @@ pub fn fill(form: &mut Form, values: &BTreeMap<String, SecretText>) -> Result<()
             }
             Input::Pairs => {
                 let mut pairs: Vec<(String, SecretText)> = Vec::new();
+                // The names of the window's rows: an existing variable whose
+                // row is gone is one the user removed.
+                let mut kept: Vec<String> = Vec::new();
                 for line in value
                     .expose()
                     .lines()
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
                 {
+                    if let Some(name) = line.strip_suffix('=').map(str::trim)
+                        && is_variable_name(name)
+                    {
+                        // A row with no value: an existing variable stays
+                        // as it is; a new one needs its value.
+                        if field.existing.iter().any(|e| e == name) {
+                            kept.push(name.to_owned());
+                            continue;
+                        }
+                        return Err(format!(
+                            "{}: type a value for {name}, or remove its row",
+                            field.label
+                        ));
+                    }
                     let (name, value) = parse_pair(line)
                         .ok_or_else(|| format!("{}: one NAME=value per line", field.label))?;
+                    kept.push(name.clone());
                     pairs.retain(|(n, _)| *n != name);
                     pairs.push((name, value));
+                }
+                if !field.existing.is_empty()
+                    && let Some(remove) = form.fields.iter().position(|f| f.key == "remove")
+                {
+                    let gone: Vec<&str> = field
+                        .existing
+                        .iter()
+                        .filter(|name| !kept.contains(name))
+                        .map(String::as_str)
+                        .collect();
+                    updates.push((remove, Update::Text(Zeroizing::new(gone.join(", ")))));
                 }
                 Update::Pairs(pairs)
             }

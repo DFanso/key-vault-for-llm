@@ -1425,7 +1425,12 @@
     applyConditions();
     const dialog = $("form-dialog");
     if (!dialog.open) dialog.showModal();
-    const focus = view.focus && $(`field-${view.focus}`);
+    let focus = view.focus && $(`field-${view.focus}`);
+    // Variables whose names came with an agent's request: the value is
+    // what is left to type.
+    if (focus && focus.classList.contains("pair-name") && focus.value) {
+      focus = focus.closest(".pair").querySelector(".pair-value");
+    }
     if (focus) focus.focus();
   }
 
@@ -1444,7 +1449,7 @@
         input.addEventListener("change", applyConditions);
         break;
       case "pairs":
-        input = pairs(id);
+        input = pairs(id, spec.suggested || [], spec.existing || []);
         break;
       case "secret":
         input = el("input");
@@ -1461,37 +1466,67 @@
     input.dataset.key = spec.key;
     const label = el("label", null, spec.label);
     label.htmlFor = id;
-    const node = el("div", "field", label, input, spec.hint ? el("p", "hint", spec.hint) : null);
+    const offered = spec.kind === "text" && spec.suggested && spec.suggested.length ? suggestions(input, spec.suggested) : null;
+    const node = el("div", "field", label, input, offered, spec.hint ? el("p", "hint", spec.hint) : null);
     node.dataset.key = spec.key;
     node.dataset.kind = spec.kind;
     return node;
   }
 
+  // What an agent asked to be allowed, as chips: a click adds one to the
+  // comma-separated list in `input`. Nothing is in it until the user picks.
+  function suggestions(input, offered) {
+    const chips = el("div", "chips suggest");
+    for (const item of offered) {
+      const chip = button(item, () => {
+        const have = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+        if (!have.includes(item)) input.value = [...have, item].join(", ");
+        chip.disabled = true;
+        input.focus();
+      }, "chip-button", "plus");
+      chip.title = `Allow ${item}`;
+      chips.append(chip);
+    }
+    return chips;
+  }
+
   // Variables: a name and a value per row. The value is a password field,
-  // like every other secret.
-  function pairs(id) {
+  // like every other secret. A handle being edited shows a row for each
+  // variable it has, by name only: a blank value keeps it, a typed one
+  // replaces it, and its x removes it. Names an agent asked for come in a
+  // row each, for the user to give values; otherwise there is one empty row.
+  function pairs(id, names, existing) {
     const rows = el("div", "pairs");
     const add = button("Add variable", () => {
-      rows.insertBefore(pair(null), add);
+      rows.insertBefore(pair(null, "", false), add);
       rows.querySelector(".pair:last-of-type .pair-name").focus();
     }, "outline", "plus");
-    rows.append(pair(id), add);
+    const first = existing.length ? existing : names.length ? names : [""];
+    first.forEach((name, i) => rows.append(pair(i === 0 ? id : null, name, existing.length > 0)));
+    rows.append(add);
     return rows;
   }
 
-  function pair(id) {
+  function pair(id, nameText, kept) {
     const name = el("input", "pair-name");
     name.type = "text";
     name.placeholder = "NAME";
     name.spellcheck = false;
     name.autocomplete = "off";
+    name.value = nameText;
     if (id) name.id = id;
     const value = el("input", "pair-value");
     value.type = "password";
-    value.placeholder = "value";
+    value.placeholder = kept ? "unchanged" : "value";
     value.autocomplete = "off";
-    const row = el("div", "pair", name, value);
-    row.append(iconButton("x", "Remove this variable", () => row.remove(), "danger"));
+    // A variable the handle has keeps its name: to rename one, remove it
+    // and add the new name.
+    if (kept) {
+      name.readOnly = true;
+      name.title = `${nameText} keeps its value unless you type a new one`;
+    }
+    const row = el("div", kept ? "pair existing" : "pair", name, value);
+    row.append(iconButton("x", kept ? `Remove ${nameText}` : "Remove this variable", () => row.remove(), "danger"));
     return row;
   }
 
