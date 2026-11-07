@@ -184,6 +184,14 @@ pub enum FromPage {
     Reveal {
         handle: String,
     },
+    /// Show the value of any handle. Without `passphrase` the tray asks
+    /// Touch ID or Windows Hello, and the page hears `RevealAsk` if it
+    /// cannot; with it, the passphrase stands for the user.
+    RevealHandle {
+        handle: String,
+        #[serde(default)]
+        passphrase: Option<SecretText>,
+    },
     /// Cancel a share request, or drop a received or sent record.
     Forget {
         id: String,
@@ -388,6 +396,19 @@ pub enum ToPage {
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// A handle's value, which the user asked to see on the Handles screen
+    /// and confirmed they are here for.
+    HandleRevealed {
+        handle: String,
+        fields: Vec<RevealedField>,
+    },
+    /// Showing `handle` needs the passphrase: there is no device, or its
+    /// prompt was cancelled or failed, or a passphrase was wrong (`message`
+    /// says which).
+    RevealAsk {
+        handle: String,
+        message: Option<String>,
     },
     /// A share step the user took in the share dialog.
     Shared {

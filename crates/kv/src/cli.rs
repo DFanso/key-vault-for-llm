@@ -311,6 +311,18 @@ impl From<io::Error> for CliError {
 type Result<T> = std::result::Result<T, CliError>;
 
 pub fn main() -> ExitCode {
+    // kv.app opened as an app, with no arguments: from Finder, or by a click
+    // on one of its notifications after the tray quit. It is the tray.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().len() == 1 && crate::tray::bundle::running_from_app() {
+        return match tray(None) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("kv: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let cli = Cli::parse();
     if let Command::Tray { login } = cli.command {
         // The tray's event loop needs the main thread, so it runs before

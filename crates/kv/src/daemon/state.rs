@@ -70,6 +70,12 @@ const METHOD_OVERRIDES: [&str; 3] = [
 /// Open `kv tui` sessions kept at once; the oldest is dropped beyond this.
 const MAX_SESSIONS: usize = 16;
 
+/// How long after a client's last `notifying_overview` the daemon still
+/// counts on it to show new requests as notifications. `kv tray` asks every
+/// second; once it stops (it quit, or lost its session) the daemon goes
+/// back to posting its own.
+const NOTIFIER_FRESH: Duration = Duration::from_secs(5);
+
 /// Requests that may wait for approval at once. More are refused, so an
 /// agent cannot flood the approval list or the notifications.
 const MAX_PENDING: usize = 32;
@@ -170,6 +176,9 @@ pub struct Daemon {
     /// Programs started through `run`. All end when the vault locks; a
     /// handle's end when it changes.
     runs: Leases,
+    /// When a client that shows waiting requests as notifications of its
+    /// own last asked for the overview (see `has_notifier`).
+    notifier_seen: Option<Instant>,
 }
 
 /// A handle sealed to someone's request, not yet let out.
@@ -293,7 +302,17 @@ impl Daemon {
             runs: Leases::with_limit(MAX_RUNS),
             ended: BTreeMap::new(),
             grants: Vec::new(),
+            notifier_seen: None,
         }
+    }
+
+    /// Whether a client with a session is showing each new request as a
+    /// notification the user can answer, so the daemon need not post one.
+    pub fn has_notifier(&self, now: Instant) -> bool {
+        self.vault.is_some()
+            && self
+                .notifier_seen
+                .is_some_and(|seen| now.saturating_duration_since(seen) < NOTIFIER_FRESH)
     }
 
     pub fn is_unlocked(&self) -> bool {
@@ -1707,6 +1726,13 @@ impl Daemon {
         if let ControlCommand::Overview = command {
             return (self.overview(token.as_ref(), now), After::Continue);
         }
+        if let ControlCommand::NotifyingOverview = command {
+            let response = self.overview(token.as_ref(), now);
+            if matches!(response, ControlResponse::Overview { .. }) {
+                self.notifier_seen = Some(now);
+            }
+            return (response, After::Continue);
+        }
         self.scrubber = None;
         let (action, mut handle) = describe(&command);
         let mut after = After::Continue;
@@ -1763,6 +1789,13 @@ impl Daemon {
             ControlCommand::RevealShare { handle: name } => self
                 .authenticate(passphrase.as_ref(), device, token.as_ref(), now)
                 .and_then(|vault| reveal_share(vault, &name))
+                .map(|fields| ControlResponse::Revealed {
+                    handle: name.clone(),
+                    fields,
+                }),
+            ControlCommand::RevealHandle { handle: name } => self
+                .confirm(passphrase.as_ref(), device, token.as_ref(), now)
+                .and_then(|vault| reveal_handle(vault, &name))
                 .map(|fields| ControlResponse::Revealed {
                     handle: name.clone(),
                     fields,
@@ -1881,6 +1914,7 @@ impl Daemon {
         self.vault = None;
         self.scrubber = None;
         self.sessions.clear();
+        self.notifier_seen = None;
         self.grants.clear();
         self.role_checks.clear();
         self.leases.end_all();
@@ -2111,6 +2145,29 @@ impl Daemon {
             Err(e) => Err(internal(e)),
         }
     }
+
+    /// Checks that the user is here now: an open session, and with it the
+    /// passphrase or a device key, whatever the session already allows.
+    /// Wrong ones count toward the backoff, as for unlocking.
+    fn confirm(
+        &mut self,
+        passphrase: Option<&SecretText>,
+        device: Option<&DeviceCredential>,
+        token: Option<&SecretText>,
+        now: Instant,
+    ) -> Result<&mut Vault, Failure> {
+        if !token.is_some_and(|token| self.session_is_open(token)) {
+            return Err(fail(ControlErrorCode::SessionEnded, SESSION_ENDED));
+        }
+        if passphrase.is_none() && device.is_none() {
+            return Err(fail(
+                ControlErrorCode::PassphraseRequired,
+                "showing a value needs the passphrase, or Touch ID or Windows Hello, each time",
+            ));
+        }
+        // The session is open, so the vault is unlocked: this only checks.
+        self.authenticate(passphrase, device, None, now)
+    }
 }
 
 fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<String>, Failure> {
@@ -2159,9 +2216,11 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::Stop
         | ControlCommand::OpenSession
         | ControlCommand::Overview
+        | ControlCommand::NotifyingOverview
         | ControlCommand::Decide { .. }
         | ControlCommand::DismissRequest { .. }
         | ControlCommand::RevealShare { .. }
+        | ControlCommand::RevealHandle { .. }
         | ControlCommand::ExportFile { .. }
         | ControlCommand::ForgetShare { .. }
         | ControlCommand::RequestShare(_)
@@ -2623,12 +2682,13 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         }
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
-        ControlCommand::Overview => ("overview", None),
+        ControlCommand::Overview | ControlCommand::NotifyingOverview => ("overview", None),
         ControlCommand::Decide { .. } => ("decide", None),
         ControlCommand::DismissRequest { .. } => ("dismiss_request", None),
         ControlCommand::EnrollDevice { .. } => ("enroll_device", None),
         ControlCommand::RemoveDevice { .. } => ("remove_device", None),
         ControlCommand::RevealShare { handle } => ("reveal_share", Some(handle.clone())),
+        ControlCommand::RevealHandle { handle } => ("reveal_handle", Some(handle.clone())),
         ControlCommand::ExportFile { handle } => ("export_file", Some(handle.clone())),
         ControlCommand::ForgetShare { .. } => ("forget_share", None),
         ControlCommand::RequestShare(_) => ("request_share", None),
@@ -2655,11 +2715,29 @@ fn reveal_share(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure
             ),
         ));
     }
+    // The bytes of a received file are not shown: the window offers to save
+    // it as it arrived, which is `export_file`.
+    Ok(fields_of(&secret.value, false))
+}
+
+/// The longest file whose text `reveal_handle` shows, in bytes.
+const MAX_SHOWN_FILE: usize = 64 * 1024;
+
+/// Any handle's value, for the user to read. `confirm` has checked that
+/// they are here now.
+fn reveal_handle(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure> {
+    let secret = vault.get(name).ok_or_else(|| unknown(name))?;
+    Ok(fields_of(&secret.value, true))
+}
+
+/// `value` as labelled fields to show. A file shows what it is, and with
+/// `file_text` also what it holds, when that is text short enough to read.
+fn fields_of(value: &SecretValue, file_text: bool) -> Vec<RevealedField> {
     let field = |label: &str, value: &SecretText| RevealedField {
         label: label.to_owned(),
         value: value.clone(),
     };
-    Ok(match &secret.value {
+    match value {
         SecretValue::Http {
             token, base_url, ..
         } => {
@@ -2674,8 +2752,6 @@ fn reveal_share(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure
             .iter()
             .map(|(name, value)| field(name, value))
             .collect(),
-        // The bytes are not text to read: the window shows what the file is
-        // and offers to save it, which is `export_file`.
         value @ SecretValue::File { file_name, .. } => {
             let mut fields = vec![field("File", &SecretText::new(file_name.clone()))];
             if let Some(len) = value.file_len() {
@@ -2684,9 +2760,16 @@ fn reveal_share(vault: &Vault, name: &str) -> Result<Vec<RevealedField>, Failure
             if let Some(fingerprint) = value.file_fingerprint() {
                 fields.push(field("Fingerprint", &SecretText::new(fingerprint)));
             }
+            if file_text
+                && let Some((_, bytes)) = value.file_parts()
+                && bytes.len() <= MAX_SHOWN_FILE
+                && let Ok(text) = std::str::from_utf8(&bytes)
+            {
+                fields.push(field("Contents", &SecretText::new(text)));
+            }
             fields
         }
-    })
+    }
 }
 
 /// A file handle's bytes, for the user to save. Only a file kv received:

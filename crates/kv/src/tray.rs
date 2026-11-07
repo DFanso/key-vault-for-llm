@@ -3,9 +3,12 @@
 //! window, where the vault is unlocked and handles are managed without
 //! `kv tui`.
 
+#[cfg(target_os = "macos")]
+pub mod bundle;
 pub mod icon;
 pub mod login;
 pub mod model;
+pub mod notices;
 #[cfg(any(target_os = "macos", windows))]
 mod ui;
 pub mod window;
@@ -20,6 +23,14 @@ use crate::paths::Paths;
 pub fn run(paths: Paths) -> io::Result<()> {
     #[cfg(any(target_os = "macos", windows))]
     {
+        #[cfg(target_os = "macos")]
+        {
+            // Checked first, so a second `kv tray` leaves kv.app alone.
+            drop(lock_single(&paths)?);
+            if let Err(e) = bundle::enter(&paths) {
+                eprintln!("kv: cannot run from kv.app ({e}); notifications will have no buttons");
+            }
+        }
         let lock = lock_single(&paths)?;
         ui::run(paths, lock)
     }

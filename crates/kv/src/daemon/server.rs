@@ -131,15 +131,17 @@ async fn serve_agent(
         let asking = session.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             let mut daemon = lock(&shared);
-            let prepared = daemon.prepare_in(asking.as_ref(), request, Instant::now());
+            let now = Instant::now();
+            let prepared = daemon.prepare_in(asking.as_ref(), request, now);
             (
                 prepared,
                 daemon.take_request_notice(),
                 daemon.take_share_notice(),
+                daemon.has_notifier(now),
             )
         })
         .await;
-        let Ok((prepared, requested, shared)) = prepared else {
+        let Ok((prepared, requested, shared, notifier)) = prepared else {
             return;
         };
         if let Some(text) = shared
@@ -154,7 +156,8 @@ async fn serve_agent(
         }
         let prepared = match prepared {
             Prepared::Wait(waiting) => {
-                if notify {
+                // kv tray shows it with buttons to answer it; one is enough.
+                if notify && !notifier {
                     notify::approval_needed(waiting.notice.clone());
                 }
                 match wait_for_decision(&daemon, &mut stream, *waiting).await {

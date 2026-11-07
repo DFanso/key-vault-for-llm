@@ -110,6 +110,20 @@ fn what_the_page_sends_is_read() {
             },
         ),
         (
+            r#"{"type":"reveal_handle","handle":"openrouter"}"#,
+            FromPage::RevealHandle {
+                handle: "openrouter".into(),
+                passphrase: None,
+            },
+        ),
+        (
+            r#"{"type":"reveal_handle","handle":"openrouter","passphrase":"pw"}"#,
+            FromPage::RevealHandle {
+                handle: "openrouter".into(),
+                passphrase: Some(SecretText::new("pw")),
+            },
+        ),
+        (
             r#"{"type":"forget","id":"0a1b2c3d4e5f6071"}"#,
             FromPage::Forget {
                 id: "0a1b2c3d4e5f6071".into(),
@@ -162,6 +176,9 @@ fn anything_else_is_dropped() {
         r#"{"passphrase":"x"}"#,
         r#"{"type":"reveal"}"#,
         r#"{"type":"reveal","handle":"a","value":"x"}"#,
+        r#"{"type":"reveal_handle"}"#,
+        r#"{"type":"reveal_handle","handle":"a","value":"x"}"#,
+        r#"{"type":"reveal_handle","handle":"a","passphrase":7}"#,
         r#"{"type":"forget","id":7}"#,
         r#"{"type":"request_share","note":"x"}"#,
         r#"{"type":"send_share","request":"kv-request:v1:abc","handle":"a","name":"","from":"","note":"","value":"x"}"#,
@@ -177,6 +194,10 @@ fn a_passphrase_never_shows_in_debug_output() {
     assert!(!format!("{unlock:?}").contains("hunter2"), "{unlock:?}");
     let form = FromPage::parse(r#"{"type":"submit_form","values":{"token":"sk-12345"}}"#).unwrap();
     assert!(!format!("{form:?}").contains("sk-12345"), "{form:?}");
+    let reveal =
+        FromPage::parse(r#"{"type":"reveal_handle","handle":"a","passphrase":"hunter2-secret"}"#)
+            .unwrap();
+    assert!(!format!("{reveal:?}").contains("hunter2"), "{reveal:?}");
 }
 
 #[test]
@@ -309,6 +330,38 @@ fn a_revealed_value_reaches_the_page_only_as_json_data() {
         !format!("{revealed:?}").contains("sk-or-v1"),
         "{revealed:?}"
     );
+}
+
+#[test]
+fn a_handles_value_and_a_request_for_the_passphrase_reach_the_page_as_data() {
+    use kv_core::proto::RevealedField;
+    let data = |message: &ToPage| -> serde_json::Value {
+        let script = message.script();
+        serde_json::from_str(&script["kv.receive(".len()..script.len() - 1]).unwrap()
+    };
+    let revealed = ToPage::HandleRevealed {
+        handle: "aws".into(),
+        fields: vec![RevealedField {
+            label: "AWS_SECRET_ACCESS_KEY".into(),
+            value: SecretText::new("aws-secret-for-tests-only"),
+        }],
+    };
+    let parsed = data(&revealed);
+    assert_eq!(parsed["type"], "handle_revealed");
+    assert_eq!(parsed["handle"], "aws");
+    assert_eq!(parsed["fields"][0]["value"], "aws-secret-for-tests-only");
+    assert!(
+        !format!("{revealed:?}").contains("aws-secret-for"),
+        "{revealed:?}"
+    );
+
+    let ask = ToPage::RevealAsk {
+        handle: "aws".into(),
+        message: Some("Wrong passphrase".into()),
+    };
+    let parsed = data(&ask);
+    assert_eq!(parsed["type"], "reveal_ask");
+    assert_eq!(parsed["message"], "Wrong passphrase");
 }
 
 /// The appearance the user picked is kept in a file of its own; anything

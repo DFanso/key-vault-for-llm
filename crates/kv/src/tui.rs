@@ -47,6 +47,30 @@ pub struct DevicePrompt(tokio::sync::oneshot::Receiver<DeviceAnswer>);
 /// What came of a `DevicePrompt`, for `Driver::finish_device`.
 pub struct DeviceAnswer(Answer);
 
+impl DeviceAnswer {
+    /// The credential the user gave, or why there is none, in words that
+    /// end by offering the passphrase.
+    fn credential(self) -> Result<DeviceCredential, String> {
+        match self.0 {
+            Answer::NoDevice => Err("there is no biometric unlock here".into()),
+            Answer::Lost => Err("the biometric prompt stopped; type the passphrase".into()),
+            Answer::Asked(_, Some(Ok(credential))) => Ok(credential),
+            Answer::Asked(label, Some(Err(why))) => {
+                Err(format!("{label}: {why}; type the passphrase"))
+            }
+            Answer::Asked(label, None) => Err(format!(
+                "{label} unlock is not on for this vault: run `kv biometric enable`"
+            )),
+        }
+    }
+}
+
+/// What shows the user is here, for an action that asks every time.
+pub enum Proof {
+    Passphrase(SecretText),
+    Device(DeviceAnswer),
+}
+
 enum Answer {
     NoDevice,
     Asked(&'static str, Option<Result<DeviceCredential, String>>),
@@ -184,6 +208,16 @@ impl Driver {
 
     /// Shows the device's prompt, if there is a device, and returns at once.
     pub fn ask_device(&self) -> DevicePrompt {
+        self.prompt(self.reason.to_owned(), false)
+    }
+
+    /// Shows the device's prompt to confirm one action, such as showing a
+    /// value, and returns at once. `reason` finishes "kv is trying to ...".
+    pub fn confirm_device(&self, reason: String) -> DevicePrompt {
+        self.prompt(reason, true)
+    }
+
+    fn prompt(&self, reason: String, confirm: bool) -> DevicePrompt {
         let (tx, rx) = tokio::sync::oneshot::channel();
         match self.device.clone() {
             None => {
@@ -191,12 +225,15 @@ impl Driver {
             }
             Some(chosen) => {
                 let vault = self.paths.vault.clone();
-                let reason = self.reason;
                 // A plain thread, not the runtime's blocking pool, which
                 // would hold up quitting until the user answered.
                 std::thread::spawn(move || {
                     let label = chosen.kind().label();
-                    let asked = device::credential(&vault, chosen.as_ref(), reason);
+                    let asked = if confirm {
+                        device::confirmation(&vault, chosen.as_ref(), &reason)
+                    } else {
+                        device::credential(&vault, chosen.as_ref(), &reason)
+                    };
                     let _ = tx.send(DeviceAnswer(Answer::Asked(label, asked)));
                 });
             }
@@ -206,21 +243,24 @@ impl Driver {
 
     /// Opens a session with what the prompt returned.
     pub async fn finish_device(&mut self, answer: DeviceAnswer) -> Outcome {
-        match answer.0 {
-            Answer::NoDevice => Outcome::Failed("there is no biometric unlock here".into()),
-            Answer::Lost => {
-                Outcome::Failed("the biometric prompt stopped; type the passphrase".into())
-            }
-            Answer::Asked(_, Some(Ok(credential))) => {
-                self.open_session(None, Some(credential)).await
-            }
-            Answer::Asked(label, Some(Err(why))) => {
-                Outcome::Failed(format!("{label}: {why}; type the passphrase"))
-            }
-            Answer::Asked(label, None) => Outcome::Failed(format!(
-                "{label} unlock is not on for this vault: run `kv biometric enable`"
-            )),
+        match answer.credential() {
+            Ok(credential) => self.open_session(None, Some(credential)).await,
+            Err(why) => Outcome::Failed(why),
         }
+    }
+
+    /// The value of `handle`, which the daemon gives only with the session
+    /// and `proof` together.
+    pub async fn reveal_handle(&mut self, handle: String, proof: Proof) -> Outcome {
+        let (passphrase, device) = match proof {
+            Proof::Passphrase(passphrase) => (Some(passphrase), None),
+            Proof::Device(answer) => match answer.credential() {
+                Ok(credential) => (None, Some(credential)),
+                Err(why) => return Outcome::Failed(why),
+            },
+        };
+        self.send_with(passphrase, device, ControlCommand::RevealHandle { handle })
+            .await
     }
 
     async fn open_session(
@@ -247,8 +287,19 @@ impl Driver {
 
     /// Fetches what the screen shows. `None` without a session.
     pub async fn refresh(&mut self) -> Option<Outcome> {
+        self.refresh_for(false).await
+    }
+
+    /// As `refresh`; with `notifying`, the daemon hears that this client
+    /// shows each waiting request as a notification of its own.
+    pub async fn refresh_for(&mut self, notifying: bool) -> Option<Outcome> {
         self.token.as_ref()?;
-        Some(self.send(ControlCommand::Overview).await)
+        let command = if notifying {
+            ControlCommand::NotifyingOverview
+        } else {
+            ControlCommand::Overview
+        };
+        Some(self.send(command).await)
     }
 
     /// Reads the end of the audit log. The log holds no secret values, so
@@ -263,12 +314,23 @@ impl Driver {
     }
 
     async fn send(&mut self, command: ControlCommand) -> Outcome {
+        self.send_with(None, None, command).await
+    }
+
+    /// Sends `command` with the session, and with the passphrase or a
+    /// device key besides where the command asks for one every time.
+    async fn send_with(
+        &mut self,
+        passphrase: Option<SecretText>,
+        device: Option<DeviceCredential>,
+        command: ControlCommand,
+    ) -> Outcome {
         let Some(token) = self.token.clone() else {
             return Outcome::Ended("unlock first".into());
         };
         let request = ControlRequest {
-            passphrase: None,
-            device: None,
+            passphrase,
+            device,
             token: Some(token),
             command,
         };
