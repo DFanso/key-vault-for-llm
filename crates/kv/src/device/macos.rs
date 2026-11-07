@@ -19,6 +19,8 @@ use super::Device;
 
 const SERVICE: &str = "kv vault";
 const POLICY: LAPolicy = LAPolicy::DeviceOwnerAuthenticationWithBiometrics;
+/// Touch ID or the Mac's login password, for `confirm`.
+const OWNER: LAPolicy = LAPolicy::DeviceOwnerAuthentication;
 /// How long kv waits for a fingerprint.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -36,7 +38,7 @@ impl Device for TouchId {
     fn enroll(&self, id: &str) -> Result<(Vec<u8>, SymmetricKey), String> {
         let context = context()?;
         let fingerprints = fingerprints(&context)?;
-        ask(&context, "turn on Touch ID unlock for kv")?;
+        ask(&context, POLICY, "turn on Touch ID unlock for kv")?;
         let key = SymmetricKey::generate();
         set_generic_password(SERVICE, id, key.as_bytes())
             .map_err(|e| format!("could not save the key in the login keychain: {e}"))?;
@@ -45,23 +47,28 @@ impl Device for TouchId {
 
     fn unlock(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String> {
         let context = context()?;
-        if fingerprints(&context)? != slot.data {
-            return Err(
-                "the fingerprints on this Mac changed since Touch ID unlock was turned \
-                        on; run `kv biometric enable` again"
-                    .into(),
-            );
+        same_fingerprints(&context, slot)?;
+        ask(&context, POLICY, reason)?;
+        read_key(slot)
+    }
+
+    /// Touch ID, or the Mac's login password from the same sheet ("Use
+    /// Password…"), which also covers a Mac whose lid is closed. Where
+    /// Touch ID can be used, the fingerprints must still be the ones it was
+    /// set up with.
+    fn confirm(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String> {
+        let context = unsafe { LAContext::new() };
+        if unsafe { context.canEvaluatePolicy_error(POLICY) }.is_ok() {
+            same_fingerprints(&context, slot)?;
         }
-        ask(&context, reason)?;
-        let raw = get_generic_password(SERVICE, &slot.id)
-            .map(Zeroizing::new)
-            .map_err(|e| {
-                format!(
-                    "could not read the key from the login keychain ({e}); run `kv biometric \
-                     enable` again"
-                )
-            })?;
-        SymmetricKey::from_slice(&raw).map_err(|_| "the keychain item is damaged".into())
+        unsafe { context.canEvaluatePolicy_error(OWNER) }.map_err(|e| {
+            format!(
+                "neither Touch ID nor the login password can be asked for: {}",
+                e.localizedDescription()
+            )
+        })?;
+        ask(&context, OWNER, reason)?;
+        read_key(slot)
     }
 
     fn forget(&self, id: &str) {
@@ -76,6 +83,32 @@ fn context() -> Result<Retained<LAContext>, String> {
     Ok(context)
 }
 
+/// Refuses a slot set up before a finger was added or removed.
+fn same_fingerprints(context: &LAContext, slot: &DeviceSlot) -> Result<(), String> {
+    if fingerprints(context)? != slot.data {
+        return Err(
+            "the fingerprints on this Mac changed since Touch ID unlock was turned \
+                    on; run `kv biometric enable` again"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The key `kv biometric enable` saved for `slot`. Read only once macOS has
+/// confirmed the user.
+fn read_key(slot: &DeviceSlot) -> Result<SymmetricKey, String> {
+    let raw = get_generic_password(SERVICE, &slot.id)
+        .map(Zeroizing::new)
+        .map_err(|e| {
+            format!(
+                "could not read the key from the login keychain ({e}); run `kv biometric \
+                 enable` again"
+            )
+        })?;
+    SymmetricKey::from_slice(&raw).map_err(|_| "the keychain item is damaged".into())
+}
+
 /// The set of enrolled fingerprints, as an opaque value that changes when a
 /// finger is added or removed.
 #[allow(deprecated)]
@@ -85,8 +118,8 @@ fn fingerprints(context: &LAContext) -> Result<Vec<u8>, String> {
         .ok_or_else(|| "macOS did not report the enrolled fingerprints".into())
 }
 
-/// Shows the Touch ID prompt and waits for the answer.
-fn ask(context: &LAContext, reason: &str) -> Result<(), String> {
+/// Shows the Touch ID prompt for `policy` and waits for the answer.
+fn ask(context: &LAContext, policy: LAPolicy, reason: &str) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let reply = RcBlock::new(move |ok: Bool, error: *mut NSError| {
         let why = match unsafe { error.as_ref() } {
@@ -96,7 +129,7 @@ fn ask(context: &LAContext, reason: &str) -> Result<(), String> {
         let _ = tx.send(if ok.as_bool() { Ok(()) } else { Err(why) });
     });
     unsafe {
-        context.evaluatePolicy_localizedReason_reply(POLICY, &NSString::from_str(reason), &reply);
+        context.evaluatePolicy_localizedReason_reply(policy, &NSString::from_str(reason), &reply);
     }
     match rx.recv_timeout(PROMPT_TIMEOUT) {
         Ok(answer) => answer,

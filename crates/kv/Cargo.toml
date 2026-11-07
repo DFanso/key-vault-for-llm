@@ -42,9 +42,28 @@ block2 = "0.6"
 libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSColor", "NSEvent", "NSResponder", "NSScreen", "NSView", "NSWindow", "objc2-quartz-core"] }
-objc2-foundation = { version = "0.3", features = ["NSData", "NSError", "NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSBundle", "NSData", "NSError", "NSSet", "NSString", "NSURL"] }
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "objc2-core-foundation"] }
+# Notifications with buttons to answer a request, once kv tray runs from
+# kv.app. No default features: they pull in Core Location.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "bitflags",
+    "block2",
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+png = "0.18"
+sha2 = "0.11"
 security-framework = "3"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]

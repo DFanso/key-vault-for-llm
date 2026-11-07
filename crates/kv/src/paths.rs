@@ -52,6 +52,12 @@ impl Paths {
     }
 
     /// Held by the running `kv tray`, so a second one can tell.
+    /// kv.app, which `kv tray` runs from on macOS: in kv's data directory,
+    /// beside the audit log.
+    pub fn tray_app(&self) -> PathBuf {
+        self.audit.with_file_name("kv.app")
+    }
+
     pub fn tray_lock_file(&self) -> PathBuf {
         self.runtime.join("tray.lock")
     }

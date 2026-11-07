@@ -430,16 +430,35 @@
     <span class="stat-icon tone-amber"><span class="i i-eye" aria-hidden="true"></span></span>
     <h2 id="reveal-title"></h2>
   </div>
-  <div class="callout tone-amber">
-    <span class="i i-triangle-alert" aria-hidden="true"></span>
-    <p>Anyone who can see your screen can read these. They hide again after a minute.</p>
-  </div>
-  <div id="reveal-fields"></div>
-  <p id="reveal-status" class="muted" role="status" hidden></p>
-  <div class="actions">
-    <button type="button" id="reveal-show" class="outline" hidden><span class="i i-folder" aria-hidden="true"></span>Show in folder</button>
-    <button type="button" id="reveal-save" class="outline" hidden><span class="i i-download" aria-hidden="true"></span>Save file</button>
-    <button type="button" id="reveal-close" class="primary"><span class="i i-eye" aria-hidden="true"></span>Hide</button>
+  <!-- A handle's value shows only once the user confirms it is them, each time. -->
+  <form id="reveal-ask" hidden>
+    <p id="reveal-ask-text" class="muted"></p>
+    <p id="reveal-waiting" class="waiting" role="status" hidden></p>
+    <div id="reveal-pass" class="field" hidden>
+      <label for="reveal-passphrase">kv passphrase</label>
+      <div class="row">
+        <input id="reveal-passphrase" type="password" autocomplete="off" spellcheck="false">
+        <button type="submit" id="reveal-submit" class="primary"><span class="i i-eye" aria-hidden="true"></span>Show</button>
+      </div>
+    </div>
+    <p id="reveal-message" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="reveal-device" class="outline" hidden></button>
+      <button type="button" id="reveal-cancel" class="outline">Cancel</button>
+    </div>
+  </form>
+  <div id="reveal-shown">
+    <div class="callout tone-amber">
+      <span class="i i-triangle-alert" aria-hidden="true"></span>
+      <p>Anyone who can see your screen can read these. They hide again after a minute.</p>
+    </div>
+    <div id="reveal-fields"></div>
+    <p id="reveal-status" class="muted" role="status" hidden></p>
+    <div class="actions">
+      <button type="button" id="reveal-show" class="outline" hidden><span class="i i-folder" aria-hidden="true"></span>Show in folder</button>
+      <button type="button" id="reveal-save" class="outline" hidden><span class="i i-download" aria-hidden="true"></span>Save file</button>
+      <button type="button" id="reveal-close" class="primary"><span class="i i-eye" aria-hidden="true"></span>Hide</button>
+    </div>
   </div>
 </dialog>
 </body>

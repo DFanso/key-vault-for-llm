@@ -43,6 +43,22 @@ pub fn logo_rgba() -> Vec<u8> {
     draw(LOGO_SIZE, VIOLET, 1.0, false, false)
 }
 
+/// The mark as an app icon, `size` pixels square: the tile at the size
+/// macOS gives an icon's body (824 of 1024), centred on a clear square.
+pub fn app_icon_rgba(size: u32) -> Vec<u8> {
+    let body = size * 824 / 1024;
+    let tile = draw(body, VIOLET, 1.0, false, false);
+    let inset = (size - body) / 2;
+    let mut image = vec![0u8; (size * size * 4) as usize];
+    for row in 0..body {
+        let from = (row * body * 4) as usize;
+        let to = (((row + inset) * size + inset) * 4) as usize;
+        let len = (body * 4) as usize;
+        image[to..to + len].copy_from_slice(&tile[from..from + len]);
+    }
+    image
+}
+
 /// The tile `size` pixels square. A template keeps only the alpha: the
 /// tile with the key cut out.
 fn draw(size: u32, tile: ([u8; 3], [u8; 3]), alpha: f32, badged: bool, template: bool) -> Vec<u8> {
