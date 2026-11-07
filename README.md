@@ -226,13 +226,15 @@ button. Clicking the notification itself opens the request in kv's window.
 Once a request is answered anywhere, times out, or the vault locks, its
 notification goes. While the tray posts these, the daemon leaves out its own
 plain one, so no request shows twice. macOS gives notification buttons only
-to an app, so `kv tray` runs from `kv.app`, which it makes from its own
-binary in kv's data folder (`~/Library/Application Support/kv/kv.app`),
-signs, and makes again whenever the binary changes. The first time, macOS asks
-whether kv may send notifications; turn them on later in System Settings,
-Notifications, kv, where choosing the Alerts style keeps each one on screen
-until you answer it. `KV_TRAY_APP=off kv tray` runs the tray where it is,
-with plain notifications.
+to an app, so `kv tray` makes `kv.app` from its own binary in kv's data folder
+(`~/Library/Application Support/kv/kv.app`), signs it, makes it again whenever
+the binary changes, and runs it beside the tray as a helper that only posts
+notifications and passes your answers back; it holds no secret or session.
+The tray itself stays the `kv` you installed, which Touch ID and the keychain
+know. The first time, macOS asks whether kv may send notifications; turn them
+on later in System Settings, Notifications, kv, where choosing the Alerts style
+keeps each one on screen until you answer it. `KV_TRAY_APP=off kv tray` leaves
+`kv.app` out, with plain notifications.
 
 Clicking the icon opens a small menu beside it, like a flyout: what is
 waiting, then Open kv, Lock kv (or Unlock), Start at login and Quit kv tray.
@@ -490,9 +492,7 @@ fingerprint on the Mac also turns Touch ID off until you enable it again.
 
 kv keeps the Touch ID key in your login keychain, where only the `kv` binary
 that saved it can read it without your login password. After you install a
-new kv, macOS asks for that password once; choose Always Allow. On macOS
-`kv tray` runs from its own signed copy, `kv.app`, which macOS asks about
-separately, so the tray's first unlock after an upgrade asks once too. Set
+new kv, macOS asks for that password once; choose Always Allow. Set
 `KV_BIOMETRIC=off` to never use either method.
 
 An agent running commands as you can start a prompt too, by running one of

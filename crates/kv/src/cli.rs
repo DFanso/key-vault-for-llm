@@ -90,6 +90,9 @@ enum Command {
         )]
         login: Option<bool>,
     },
+    /// kv.app's notification helper, which `kv tray` starts on macOS.
+    #[command(hide = true)]
+    TrayNotices,
     /// Start a handle's run command with its variables set, on this
     /// process's stdin and stdout (for an MCP client that should talk to
     /// one server directly)
@@ -312,7 +315,8 @@ type Result<T> = std::result::Result<T, CliError>;
 
 pub fn main() -> ExitCode {
     // kv.app opened as an app, with no arguments: from Finder, or by a click
-    // on one of its notifications after the tray quit. It is the tray.
+    // on one of its notifications after the tray quit. It starts the tray,
+    // which is the binary kv.app was made from.
     #[cfg(target_os = "macos")]
     if std::env::args_os().len() == 1 && crate::tray::bundle::running_from_app() {
         return match tray(None) {
@@ -324,6 +328,16 @@ pub fn main() -> ExitCode {
         };
     }
     let cli = Cli::parse();
+    if let Command::TrayNotices = cli.command {
+        // Its event loop needs the main thread, as the tray's does.
+        return match crate::tray::run_notices() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("kv: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Command::Tray { login } = cli.command {
         // The tray's event loop needs the main thread, so it runs before
         // any runtime; its worker starts one of its own.
@@ -521,6 +535,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Run { .. } => unreachable!("main runs kv run before this"),
         Command::Tray { .. } => unreachable!("main runs kv tray before this"),
+        Command::TrayNotices => unreachable!("main runs kv tray-notices before this"),
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;

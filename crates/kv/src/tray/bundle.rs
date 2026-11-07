@@ -1,20 +1,20 @@
-//! macOS: `kv tray` runs from an app bundle, kv.app, which kv makes for
-//! itself beside its other files. macOS lets only an app post notifications
-//! with buttons (see `ui::notices`), and only one whose signature covers the
-//! bundle and that is not in a temporary folder, so the tray copies its own
-//! binary into kv.app, signs the bundle (ad hoc, as the linker signs kv),
-//! and runs from the copy. kv.app remembers the binary it came from and that
-//! binary's SHA-256: the login item keeps starting that one, and when it
-//! changes (an upgrade) kv.app is made again at the next start.
+//! macOS: kv.app, an app bundle kv makes for itself beside its other files,
+//! which `kv tray` starts as its notification helper (see `ui::notices`).
+//! macOS lets only an app post notifications with buttons, and only one
+//! whose signature covers the bundle and that is not in a temporary folder,
+//! so the tray copies its own binary into kv.app and signs the bundle (ad
+//! hoc, as the linker signs kv). The tray itself stays the plain binary:
+//! Touch ID and the keychain answer each app differently, and they were set
+//! up for that binary. kv.app remembers the binary it came from and that
+//! binary's SHA-256; when the binary changes (an upgrade) kv.app is made
+//! again at the next start.
 //!
-//! Set `KV_TRAY_APP=off` to run the tray where it is, with plain
-//! notifications.
+//! Set `KV_TRAY_APP=off` for plain notifications, without kv.app.
 
 use std::ffi::c_void;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -40,19 +40,18 @@ unsafe extern "C" {
     fn LSRegisterURL(url: *const c_void, update: u8) -> i32;
 }
 
-/// Runs the tray from kv.app, made or brought up to date from this binary
-/// first: this process becomes the copy's. Returns `Ok` without doing so
-/// when it is the copy already, or `KV_TRAY_APP=off` says not to, and `Err`
-/// when it cannot; either way the tray then runs where it is.
-pub fn enter(paths: &Paths) -> io::Result<()> {
-    if running_from_app() || off(std::env::var(OFF_ENV).ok().as_deref()) {
-        return Ok(());
+/// Makes kv.app from this binary, or brings it up to date, and returns its
+/// executable, for the tray to start as its notification helper. `None`
+/// when `KV_TRAY_APP=off` says not to.
+pub fn helper(paths: &Paths) -> io::Result<Option<PathBuf>> {
+    if off(std::env::var(OFF_ENV).ok().as_deref()) {
+        return Ok(None);
     }
     let exe = std::env::current_exe()?.canonicalize()?;
     let app = paths.tray_app();
     let bundled = update(&app, &exe, sign)?;
     register(&app);
-    Err(Command::new(&bundled).arg("tray").exec())
+    Ok(Some(bundled))
 }
 
 /// Whether this process runs from an app bundle's executable.
@@ -60,8 +59,7 @@ pub fn running_from_app() -> bool {
     std::env::current_exe().is_ok_and(|exe| contents(&exe).is_some())
 }
 
-/// The kv binary the login item should start: the one kv.app was made from
-/// when this is kv.app, else this one.
+/// The binary kv.app was made from, when this is kv.app; else this one.
 pub fn source_exe() -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     if let Some(contents) = contents(&exe)

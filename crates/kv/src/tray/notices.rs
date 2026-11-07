@@ -2,9 +2,17 @@
 //! with the same answers as the tray menu, free of the platform. The tray
 //! posts one per request while it holds a session, and takes it down once
 //! the request is answered anywhere, times out or the vault locks.
+//!
+//! On macOS a helper process posts them (see `ui::notices`), and this is
+//! also what the tray and the helper say to each other: one JSON message a
+//! line, over the helper's standard input and output. No secret is in it.
+
+use std::io::BufRead;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kv_core::crypto::fill_random;
 use kv_core::proto::{Approval, Verdict};
+use serde::{Deserialize, Serialize};
 
 use super::model::flat;
 
@@ -27,7 +35,7 @@ pub const ANSWERS: [(&str, &str, Verdict); 3] = [
 ];
 
 /// One waiting request's notification.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notice {
     /// Names the notification, to take it down and to tell which one the
     /// user answered: `kv-request-<id>-<nonce>`. The nonce is new for each
@@ -69,6 +77,49 @@ impl Notice {
             can_grant: approval.can_grant,
         }
     }
+}
+
+/// What the tray tells the notification helper.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToHelper {
+    Post(Notice),
+    Withdraw { keys: Vec<String> },
+}
+
+/// What the notification helper tells the tray.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FromHelper {
+    /// Whether the user lets kv post notifications, sent at the start and
+    /// whenever it changes.
+    Allowed { on: bool },
+    /// The user picked `verdict` on the notification `key`, or clicked the
+    /// notification itself (`None`).
+    Answer {
+        key: String,
+        verdict: Option<Verdict>,
+    },
+}
+
+/// Reads what the helper says until it stops, keeping `allowed` up to date
+/// and handing each answer to `answer`. A line that is not a message is
+/// skipped; once the helper is gone nothing can be posted, so `allowed`
+/// ends false.
+pub fn read_helper(
+    reader: impl BufRead,
+    allowed: &AtomicBool,
+    mut answer: impl FnMut(String, Option<Verdict>),
+) {
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        match serde_json::from_str(&line) {
+            Ok(FromHelper::Allowed { on }) => allowed.store(on, Ordering::Relaxed),
+            Ok(FromHelper::Answer { key, verdict }) => answer(key, verdict),
+            Err(_) => {}
+        }
+    }
+    allowed.store(false, Ordering::Relaxed);
 }
 
 /// The verdict behind the answer the platform handed back, by its id.
@@ -125,6 +176,44 @@ mod tests {
         let b = Notice::new(&approval());
         assert!(a.key.starts_with("kv-request-7-"), "{}", a.key);
         assert_ne!(a.key, b.key);
+    }
+
+    #[test]
+    fn the_helpers_messages_are_read_until_it_stops() {
+        let said = [
+            r#"{"type":"allowed","on":true}"#,
+            r#"{"type":"answer","key":"kv-request-7-00","verdict":"allow_once"}"#,
+            "not a message",
+            r#"{"type":"answer","key":"kv-request-8-00","verdict":null}"#,
+        ]
+        .join("\n");
+        let allowed = AtomicBool::new(false);
+        let mut answers = Vec::new();
+        read_helper(said.as_bytes(), &allowed, |key, verdict| {
+            answers.push((key, verdict));
+        });
+        assert_eq!(
+            answers,
+            [
+                ("kv-request-7-00".to_owned(), Some(Verdict::AllowOnce)),
+                ("kv-request-8-00".to_owned(), None),
+            ]
+        );
+        // The helper is gone: nothing can be posted any more.
+        assert!(!allowed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn what_the_tray_sends_reads_back_the_same() {
+        let post = ToHelper::Post(Notice::with_key(&approval(), "kv-request-7-00".into()));
+        let withdraw = ToHelper::Withdraw {
+            keys: vec!["kv-request-7-00".into()],
+        };
+        for message in [post, withdraw] {
+            let line = serde_json::to_string(&message).unwrap();
+            assert!(!line.contains('\n'), "{line}");
+            assert_eq!(serde_json::from_str::<ToHelper>(&line).unwrap(), message);
+        }
     }
 
     #[test]
