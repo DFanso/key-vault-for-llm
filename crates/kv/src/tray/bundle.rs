@@ -6,8 +6,15 @@
 //! hoc, as the linker signs kv). The tray itself stays the plain binary:
 //! Touch ID and the keychain answer each app differently, and they were set
 //! up for that binary. kv.app remembers the binary it came from and that
-//! binary's SHA-256; when the binary changes (an upgrade) kv.app is made
-//! again at the next start.
+//! binary's SHA-256.
+//!
+//! kv.app is made afresh, from the running binary, every time the tray
+//! starts, never reused: it sits in a folder any program running as the user
+//! can write to, and the tray acts on the answers it passes back. A copy
+//! changed there (by an agent running commands as the user) would otherwise
+//! answer every request with Allow, with no prompt to give it away; made
+//! afresh, it runs at most until the tray next starts from the binary the
+//! keychain knows.
 //!
 //! Set `KV_TRAY_APP=off` for plain notifications, without kv.app.
 
@@ -40,9 +47,9 @@ unsafe extern "C" {
     fn LSRegisterURL(url: *const c_void, update: u8) -> i32;
 }
 
-/// Makes kv.app from this binary, or brings it up to date, and returns its
-/// executable, for the tray to start as its notification helper. `None`
-/// when `KV_TRAY_APP=off` says not to.
+/// Makes kv.app afresh from this binary and returns its executable, for the
+/// tray to start as its notification helper. `None` when `KV_TRAY_APP=off`
+/// says not to.
 pub fn helper(paths: &Paths) -> io::Result<Option<PathBuf>> {
     if off(std::env::var(OFF_ENV).ok().as_deref()) {
         return Ok(None);
@@ -91,9 +98,9 @@ fn contents(exe: &Path) -> Option<&Path> {
         .then_some(contents)
 }
 
-/// Makes kv.app at `app` from the binary `exe`, or brings it up to date,
-/// and returns the path of its executable. `sign` signs the bundle once it
-/// is written.
+/// Makes kv.app at `app` afresh from the binary `exe`, whatever is there
+/// already, and returns the path of its executable. `sign` signs the bundle
+/// once it is written.
 pub fn update(
     app: &Path,
     exe: &Path,
@@ -108,14 +115,9 @@ pub fn update(
         exe.to_string_lossy(),
         hex::encode(Sha256::digest(&binary))
     );
-    let current = bundled.is_file()
-        && fs::read_to_string(resources.join(SOURCE)).is_ok_and(|r| r == record)
-        && fs::read_to_string(contents.join("Info.plist")).is_ok_and(|p| p == info_plist());
-    if current {
-        return Ok(bundled);
-    }
-    // Made afresh: a signature covers every file in the bundle, so nothing
-    // from an older one may stay behind.
+    // Never reused, even when it looks current: what is there may have been
+    // changed since (see the module's notes). A signature covers every file
+    // in the bundle, so nothing from an older one may stay behind either.
     match fs::remove_dir_all(app) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
         _ => {}
@@ -228,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn the_app_is_made_once_and_remade_when_the_binary_changes() {
+    fn the_app_is_made_afresh_each_time_so_a_changed_copy_never_runs_again() {
         let dir = tempfile::TempDir::new().unwrap();
         let exe = dir.path().join("kv");
         fs::write(&exe, b"first build").unwrap();
@@ -252,15 +254,20 @@ mod tests {
         let record = fs::read_to_string(app.join("Contents/Resources/source")).unwrap();
         assert_eq!(record.lines().next(), Some(&*exe.to_string_lossy()));
 
-        // Nothing changed: nothing is written or signed again, though signing
-        // changed the copy.
-        fs::write(&bundled, b"first build, signed").unwrap();
-        update(&app, &exe, count).unwrap();
-        assert_eq!(signed.get(), 1);
+        // The copy was changed in place (an agent's binary, signed ad hoc)
+        // and a file added, though the binary it came from is the same: the
+        // next start makes it again from that binary, and nothing added
+        // stays behind.
+        fs::write(&bundled, b"someone else's binary").unwrap();
+        fs::write(app.join("Contents/Resources/extra"), b"left behind").unwrap();
+        let bundled = update(&app, &exe, count).unwrap();
+        assert_eq!(fs::read(&bundled).unwrap(), b"first build");
+        assert!(!app.join("Contents/Resources/extra").exists());
+        assert_eq!(signed.get(), 2);
 
         fs::write(&exe, b"second build").unwrap();
         update(&app, &exe, count).unwrap();
         assert_eq!(fs::read(&bundled).unwrap(), b"second build");
-        assert_eq!(signed.get(), 2);
+        assert_eq!(signed.get(), 3);
     }
 }
