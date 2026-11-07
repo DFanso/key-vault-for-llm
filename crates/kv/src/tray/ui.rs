@@ -9,6 +9,8 @@
 //! Open kv grows it into kv's full window. The system menu is on the other
 //! button.
 
+#[cfg(target_os = "macos")]
+mod notices;
 mod webview;
 
 use std::fs::File;
@@ -24,6 +26,8 @@ use tray_icon::menu::{
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use super::model::{Action, Edit, IconState, Item, Model, edits};
+#[cfg(target_os = "macos")]
+use super::notices::Notice;
 use super::window::{Stays, Tab, ToPage};
 use super::worker::{Desktop, Worker};
 use super::{icon, login};
@@ -114,6 +118,8 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     let pages = proxy.clone();
     let system = System {
         proxy: proxy.clone(),
+        #[cfg(target_os = "macos")]
+        notices: start_helper(&paths, actions.clone()),
     };
     std::thread::spawn(move || {
         let worker = Worker::new(paths, device::platform().map(Arc::from), system);
@@ -482,9 +488,39 @@ fn no_window(error: &str) -> String {
     }
 }
 
+/// `kv tray-notices`: kv.app's notification helper.
+#[cfg(target_os = "macos")]
+pub fn run_notices() -> io::Result<()> {
+    notices::run_helper()
+}
+
+/// Makes kv.app and starts it as the notification helper. Without it the
+/// tray still runs, and the daemon's plain notifications stand.
+#[cfg(target_os = "macos")]
+fn start_helper(
+    paths: &Paths,
+    actions: tokio::sync::mpsc::UnboundedSender<Action>,
+) -> Option<notices::Helper> {
+    let exe = match super::bundle::helper(paths) {
+        Ok(exe) => exe?,
+        Err(e) => {
+            eprintln!("kv: cannot make kv.app ({e}); notifications will have no buttons");
+            return None;
+        }
+    };
+    notices::Helper::start(&exe, actions)
+        .inspect_err(|e| {
+            eprintln!("kv: cannot start kv.app ({e}); notifications will have no buttons");
+        })
+        .ok()
+}
+
 /// The real desktop: notifications, kv's window, the login item.
 struct System {
     proxy: EventLoopProxy<Message>,
+    /// kv.app, which posts notifications the user can answer.
+    #[cfg(target_os = "macos")]
+    notices: Option<notices::Helper>,
 }
 
 impl Desktop for System {
@@ -506,6 +542,25 @@ impl Desktop for System {
 
     fn set_login(&self, on: bool) -> io::Result<()> {
         login::set(on)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn can_notify(&self) -> bool {
+        self.notices.as_ref().is_some_and(notices::Helper::allowed)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn post(&self, notice: &Notice) {
+        if let Some(center) = &self.notices {
+            center.post(notice);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn withdraw(&self, keys: &[String]) {
+        if let Some(center) = &self.notices {
+            center.withdraw(keys);
+        }
     }
 }
 

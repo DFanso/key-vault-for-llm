@@ -58,6 +58,9 @@
     shareFile: null,
     // The received file handle the reveal dialog can save.
     revealFile: null,
+    // The handle whose value the user asked for on the Handles screen,
+    // while kv waits for them to confirm it is them.
+    revealAsking: null,
     // Whether a dialog is open, as the tray last heard.
     busy: false,
   };
@@ -352,7 +355,8 @@
         break;
       case "blurred":
         // The window stays up, but the user has left it: so does no value.
-        closeReveal();
+        // A request to show one stays: the device's prompt took the focus.
+        if (page.revealAsking === null) closeReveal();
         break;
       case "form":
         openForm(message.view);
@@ -369,7 +373,14 @@
         drawHome();
         break;
       case "revealed":
-        openReveal(message.handle, message.fields);
+        openReveal(message.handle, message.fields, true);
+        break;
+      case "handle_revealed":
+        // Only the value still asked for: one the user cancelled stays put away.
+        if (page.revealAsking === message.handle) openReveal(message.handle, message.fields, false);
+        break;
+      case "reveal_ask":
+        if (page.revealAsking === message.handle) askPassphrase(message.message);
         break;
       case "shared":
         shareDone(message.result);
@@ -735,6 +746,7 @@
       enroll_device: "Added a device",
       remove_device: "Removed a device",
       reveal_share: "Revealed a share",
+      reveal_handle: "Showed a value",
       forget_share: "Forgot a share",
       request_share: "Asked for a share",
       send_share: "Sent a share",
@@ -897,6 +909,8 @@
       );
       const remove = iconButton("trash-2", `Remove ${handle.name}`, () => confirmRemove(handle.name), "danger");
       remove.dataset.action = "remove";
+      const reveal = iconButton("eye", `Show the value of ${handle.name}`, () => askReveal(handle.name));
+      reveal.dataset.action = "reveal";
       return el(
         "li",
         "row-item",
@@ -905,6 +919,7 @@
         el(
           "div",
           "row-actions",
+          reveal,
           iconButton("pencil", `Edit ${handle.name}`, () => openRequest({ kind: "edit", name: handle.name })),
           iconButton("sliders-horizontal", `Policy for ${handle.name}`, () => openRequest({ kind: "policy", name: handle.name })),
           remove,
@@ -1028,16 +1043,73 @@
     );
   }
 
-  // A received value, drawn as text the user can select, and wiped when the
-  // dialog closes, the timer runs out, the window hides or the vault locks.
-  function openReveal(handle, fields) {
+  // Asks to show a handle's value: kv shows one only once the user confirms
+  // it is them, each time, with the device (whose prompt may also take the
+  // computer's own password) or the kv passphrase.
+  function askReveal(handle) {
+    closeReveal();
+    page.revealAsking = handle;
+    $("reveal-title").textContent = handle;
+    $("reveal-ask-text").textContent = page.device
+      ? `kv asks each time it shows a value. Confirm with ${page.device}, or type your kv passphrase.`
+      : "kv asks each time it shows a value. Type your kv passphrase.";
+    show($("reveal-shown"), false);
+    show($("reveal-ask"), true);
+    $("reveal-dialog").showModal();
+    if (page.device) askDevice();
+    else askPassphrase(null);
+  }
+
+  function askDevice() {
+    $("reveal-message").textContent = "";
+    $("reveal-waiting").textContent = `Waiting for ${page.device}…`;
+    show($("reveal-waiting"), true);
+    show($("reveal-pass"), false);
+    show($("reveal-device"), false);
+    send({ type: "reveal_handle", handle: page.revealAsking });
+  }
+
+  // The device cannot be used, its prompt was cancelled, or a passphrase was
+  // wrong: `message` says which.
+  function askPassphrase(message) {
+    $("reveal-message").textContent = message || "";
+    show($("reveal-waiting"), false);
+    show($("reveal-pass"), true);
+    $("reveal-submit").disabled = false;
+    const device = $("reveal-device");
+    device.replaceChildren(icon("fingerprint"), el("span", null, page.device ? `Use ${page.device}` : ""));
+    show(device, Boolean(page.device));
+    $("reveal-passphrase").focus();
+  }
+
+  function submitReveal(event) {
+    event.preventDefault();
+    const input = $("reveal-passphrase");
+    const passphrase = input.value;
+    input.value = "";
+    if (!passphrase || page.revealAsking === null) return;
+    $("reveal-message").textContent = "";
+    $("reveal-submit").disabled = true;
+    send({ type: "reveal_handle", handle: page.revealAsking, passphrase });
+  }
+
+  // A value, drawn as text the user can select, and wiped when the dialog
+  // closes, the timer runs out, the window hides or the vault locks. There
+  // is no Copy button: any program, an agent's too, can read the clipboard.
+  // `received` is a value that came from a share, which a file can be saved
+  // from.
+  function openReveal(handle, fields, received) {
+    page.revealAsking = null;
+    $("reveal-passphrase").value = "";
+    show($("reveal-ask"), false);
+    show($("reveal-shown"), true);
     $("reveal-title").textContent = handle;
     $("reveal-fields").replaceChildren(
       ...fields.map((f) => el("div", "field", el("label", null, f.label), el("div", "code-box secret-value", f.value))),
     );
     // A received file can be saved as it is; nothing else has a Save.
     const info = ((page.overview && page.overview.handles) || []).find((h) => h.name === handle);
-    page.revealFile = info && info.kind === "file" ? handle : null;
+    page.revealFile = received && info && info.kind === "file" ? handle : null;
     $("reveal-save").disabled = false;
     show($("reveal-save"), page.revealFile !== null);
     show($("reveal-show"), false);
@@ -1064,6 +1136,11 @@
   function closeReveal() {
     clearTimeout(page.revealTimer);
     page.revealTimer = null;
+    page.revealAsking = null;
+    $("reveal-passphrase").value = "";
+    $("reveal-message").textContent = "";
+    show($("reveal-ask"), false);
+    show($("reveal-shown"), true);
     $("reveal-fields").replaceChildren();
     $("reveal-title").textContent = "";
     page.revealFile = null;
@@ -2077,6 +2154,9 @@
     });
     $("confirm-cancel").addEventListener("click", closeConfirm);
     $("reveal-close").addEventListener("click", closeReveal);
+    $("reveal-cancel").addEventListener("click", closeReveal);
+    $("reveal-ask").addEventListener("submit", submitReveal);
+    $("reveal-device").addEventListener("click", askDevice);
     $("reveal-save").addEventListener("click", () => {
       if (!page.revealFile) return;
       $("reveal-save").disabled = true;

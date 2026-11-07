@@ -20,6 +20,7 @@ use kv_core::secret::{Secret, SecretText, SecretValue};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::model::{Action, Model, View};
+use super::notices::Notice;
 use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
 use crate::client;
 use crate::device::Device;
@@ -28,7 +29,7 @@ use crate::importing;
 use crate::paths::Paths;
 use crate::sharefile;
 use crate::tui::app::{Effect, Outcome, ShareDone};
-use crate::tui::{DeviceAnswer, Driver};
+use crate::tui::{DeviceAnswer, DevicePrompt, Driver, Proof};
 use kv_core::envvars;
 use kv_core::import::{self, Format, Imported};
 use kv_core::policy::Policy;
@@ -52,6 +53,16 @@ pub trait Desktop: Send {
     fn page(&self, message: ToPage);
     fn login_is_on(&self) -> bool;
     fn set_login(&self, on: bool) -> io::Result<()>;
+    /// Whether `post` shows a notification the user can answer from: the
+    /// platform has them and the user allows kv's.
+    fn can_notify(&self) -> bool {
+        false
+    }
+    /// Shows a waiting request as a notification with its answers. They
+    /// come back as `Action::Notice`.
+    fn post(&self, _notice: &Notice) {}
+    /// Takes down the notifications named by `keys`.
+    fn withdraw(&self, _keys: &[String]) {}
 }
 
 /// Who asked for something, and so hears how it went.
@@ -61,11 +72,19 @@ enum Asker {
     Window,
 }
 
+/// What a device prompt is for.
+enum Prompting {
+    /// A session, for `Asker` to hear about.
+    Unlock(Asker),
+    /// Showing a handle's value in the window.
+    Reveal(String),
+}
+
 /// What is left to do after an action.
 enum Next {
     Done,
-    /// A device prompt, then a session.
-    Prompt(Asker),
+    /// A device prompt, then what it was for.
+    Prompt(Prompting),
     Quit,
 }
 
@@ -83,8 +102,8 @@ pub struct Worker<D> {
     window: Option<Window>,
     /// The overview of the last tick, which the forms open from.
     overview: Option<Overview>,
-    /// Who is waiting on the device prompt `run` holds beside its loop.
-    prompting: Option<Asker>,
+    /// What the device prompt `run` holds beside its loop is for.
+    prompting: Option<Prompting>,
     /// How the window looks, as the user last picked it.
     theme: Theme,
     /// A file the window is importing, read but not yet saved.
@@ -96,6 +115,8 @@ pub struct Worker<D> {
     downloads: Option<PathBuf>,
     /// The file the window saved last, for it to show in the file manager.
     saved: Option<PathBuf>,
+    /// The notification on show for each waiting request, by request id.
+    posted: BTreeMap<u64, String>,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -112,6 +133,7 @@ impl<D: Desktop> Worker<D> {
             window: None,
             overview: None,
             prompting: None,
+            posted: BTreeMap::new(),
         }
     }
 
@@ -131,7 +153,8 @@ impl<D: Desktop> Worker<D> {
             _ => None,
         };
         let mut ended = None;
-        self.overview = match self.driver.refresh().await {
+        let notifying = self.desktop.can_notify();
+        self.overview = match self.driver.refresh_for(notifying).await {
             Some(Outcome::Overview(overview)) => Some(overview),
             Some(Outcome::Ended(message)) => {
                 ended = Some(message);
@@ -142,6 +165,7 @@ impl<D: Desktop> Worker<D> {
         if self.overview.is_none() {
             self.set_form(None);
         }
+        self.sync_notices(notifying);
         self.send_state();
         // After the locked state, so the reason shows on the unlock screen.
         if let Some(message) = ended {
@@ -163,12 +187,15 @@ impl<D: Desktop> Worker<D> {
     pub async fn act(&mut self, action: Action) -> bool {
         match self.begin(action).await {
             Next::Done => false,
-            Next::Prompt(asker) => {
-                let answer = self.driver.ask_device().await;
-                self.unlock(asker, answer).await;
+            Next::Prompt(purpose) => {
+                let answer = self.ask(&purpose).await;
+                self.finish_prompt(purpose, answer).await;
                 false
             }
-            Next::Quit => true,
+            Next::Quit => {
+                self.withdraw_all();
+                true
+            }
         }
     }
 
@@ -186,20 +213,32 @@ impl<D: Desktop> Worker<D> {
             tokio::select! {
                 answer = async { prompt.as_mut().expect("guarded").await }, if prompt.is_some() => {
                     prompt = None;
-                    let asker = self.prompting.take().unwrap_or(Asker::Menu);
-                    self.unlock(asker, answer).await;
+                    let purpose = self.prompting.take().unwrap_or(Prompting::Unlock(Asker::Menu));
+                    self.finish_prompt(purpose, answer).await;
                 }
                 action = actions.recv() => {
-                    let Some(action) = action else { return };
+                    let Some(action) = action else {
+                        self.withdraw_all();
+                        return;
+                    };
                     match self.begin(action).await {
                         Next::Done => {}
-                        Next::Prompt(asker) => {
+                        Next::Prompt(purpose) => {
                             if prompt.is_none() {
-                                prompt = Some(self.driver.ask_device());
-                                self.prompting = Some(asker);
+                                prompt = Some(self.ask(&purpose));
+                                self.prompting = Some(purpose);
+                            } else if let Prompting::Reveal(handle) = purpose {
+                                // One prompt at a time: the passphrase still works.
+                                self.desktop.page(ToPage::RevealAsk {
+                                    handle,
+                                    message: Some("Another prompt is open. Answer it first, or type your passphrase.".into()),
+                                });
                             }
                         }
-                        Next::Quit => return,
+                        Next::Quit => {
+                            self.withdraw_all();
+                            return;
+                        }
                     }
                 }
                 _ = tick.tick() => {}
@@ -208,20 +247,50 @@ impl<D: Desktop> Worker<D> {
         }
     }
 
+    /// Shows the device prompt `purpose` needs.
+    fn ask(&self, purpose: &Prompting) -> DevicePrompt {
+        match purpose {
+            Prompting::Unlock(_) => self.driver.ask_device(),
+            Prompting::Reveal(handle) => self
+                .driver
+                .confirm_device(format!("show the value of {handle}")),
+        }
+    }
+
+    async fn finish_prompt(&mut self, purpose: Prompting, answer: DeviceAnswer) {
+        match purpose {
+            Prompting::Unlock(asker) => self.unlock(asker, answer).await,
+            Prompting::Reveal(handle) => self.reveal(handle, Proof::Device(answer)).await,
+        }
+    }
+
     /// Does what `action` asks for, short of a device prompt.
     async fn begin(&mut self, action: Action) -> Next {
         match action {
-            Action::Unlock => return Next::Prompt(Asker::Menu),
+            Action::Unlock => return Next::Prompt(Prompting::Unlock(Asker::Menu)),
             Action::Decide { id, verdict } => {
                 let outcome = self.driver.run(Effect::Decide { id, verdict }).await;
                 self.report(Asker::Menu, outcome, None);
             }
             Action::Lock => self.lock(Asker::Menu).await,
-            Action::Open(tab) => {
-                let opening = self.open_window(tab);
-                // The window opens on its unlock screen, asking at once.
-                if opening && !self.driver.has_session() && self.driver.device().is_some() {
-                    return Next::Prompt(Asker::Window);
+            Action::Open(tab) => return self.open(tab),
+            Action::Notice { key, verdict } => {
+                let id = self
+                    .posted
+                    .iter()
+                    .find_map(|(id, posted)| (*posted == key).then_some(*id));
+                match (verdict, id) {
+                    (Some(verdict), Some(id)) => {
+                        // The platform took it down when it was answered.
+                        self.posted.remove(&id);
+                        let outcome = self.driver.run(Effect::Decide { id, verdict }).await;
+                        self.report(Asker::Menu, outcome, None);
+                    }
+                    (Some(_), None) => self
+                        .desktop
+                        .notify("That request is no longer waiting, so nothing was answered."),
+                    // The notification itself: the request in full.
+                    (None, _) => return self.open(Tab::Approvals),
                 }
             }
             // The menu offers Unlock; it does not ask by itself.
@@ -241,6 +310,16 @@ impl<D: Desktop> Worker<D> {
                 }
             }
             Action::Quit => return Next::Quit,
+        }
+        Next::Done
+    }
+
+    /// Opens kv's window on `tab`. A window that was closed opens on its
+    /// unlock screen, asking at once.
+    fn open(&mut self, tab: Tab) -> Next {
+        let opening = self.open_window(tab);
+        if opening && !self.driver.has_session() && self.driver.device().is_some() {
+            return Next::Prompt(Prompting::Unlock(Asker::Window));
         }
         Next::Done
     }
@@ -289,7 +368,7 @@ impl<D: Desktop> Worker<D> {
                 let outcome = self.driver.run(Effect::OpenSession(passphrase)).await;
                 self.report(Asker::Window, outcome, None);
             }
-            FromPage::DeviceUnlock => return Next::Prompt(Asker::Window),
+            FromPage::DeviceUnlock => return Next::Prompt(Prompting::Unlock(Asker::Window)),
             FromPage::Decide { id, verdict } => {
                 let outcome = self.driver.run(Effect::Decide { id, verdict }).await;
                 self.report(Asker::Window, outcome, Some(id));
@@ -317,6 +396,16 @@ impl<D: Desktop> Worker<D> {
                     self.desktop.page(ToPage::Revealed { handle, fields });
                 }
                 other => self.report(Asker::Window, other, None),
+            },
+            FromPage::RevealHandle { handle, passphrase } => match passphrase {
+                Some(passphrase) => self.reveal(handle, Proof::Passphrase(passphrase)).await,
+                None if self.driver.has_session() && self.driver.device().is_some() => {
+                    return Next::Prompt(Prompting::Reveal(handle));
+                }
+                None => self.desktop.page(ToPage::RevealAsk {
+                    handle,
+                    message: None,
+                }),
             },
             FromPage::Forget { id } => {
                 let outcome = self.driver.run(Effect::Forget(id)).await;
@@ -532,6 +621,67 @@ impl<D: Desktop> Worker<D> {
     async fn unlock(&mut self, asker: Asker, answer: DeviceAnswer) {
         let outcome = self.driver.finish_device(answer).await;
         self.report(asker, outcome, None);
+    }
+
+    /// Shows `handle`'s value in the window, if the daemon takes `proof`;
+    /// if not, the page asks for the passphrase and says why. Nothing is
+    /// asked of the daemon once the window has closed: there is nowhere to
+    /// show it.
+    async fn reveal(&mut self, handle: String, proof: Proof) {
+        if self.window.is_none() {
+            return;
+        }
+        match self.driver.reveal_handle(handle.clone(), proof).await {
+            Outcome::Revealed { handle, fields } => {
+                self.desktop.page(ToPage::HandleRevealed { handle, fields });
+            }
+            Outcome::Failed(message) => self.desktop.page(ToPage::RevealAsk {
+                handle,
+                message: Some(sentence(&message)),
+            }),
+            other => self.report(Asker::Window, other, None),
+        }
+    }
+
+    /// Brings the notifications on show in line with the waiting requests:
+    /// a new request gets one when `notifying`, and one whose request is
+    /// gone (answered anywhere, timed out, or the session ended) is taken
+    /// down.
+    fn sync_notices(&mut self, notifying: bool) {
+        let waiting = self
+            .overview
+            .as_ref()
+            .map(|overview| overview.approvals.as_slice())
+            .unwrap_or_default();
+        let gone: Vec<String> = self
+            .posted
+            .iter()
+            .filter(|(id, _)| !waiting.iter().any(|approval| approval.id == **id))
+            .map(|(_, key)| key.clone())
+            .collect();
+        if !gone.is_empty() {
+            self.posted.retain(|_, key| !gone.contains(key));
+            self.desktop.withdraw(&gone);
+        }
+        if !notifying {
+            return;
+        }
+        for approval in waiting {
+            if !self.posted.contains_key(&approval.id) {
+                let notice = Notice::new(approval);
+                self.desktop.post(&notice);
+                self.posted.insert(approval.id, notice.key);
+            }
+        }
+    }
+
+    /// Takes down every notification on show, as the tray quits: an answer
+    /// to one would have no one to hear it.
+    fn withdraw_all(&mut self) {
+        let keys: Vec<String> = std::mem::take(&mut self.posted).into_values().collect();
+        if !keys.is_empty() {
+            self.desktop.withdraw(&keys);
+        }
     }
 
     /// Reads a file the window picked and shows what it holds, by name.

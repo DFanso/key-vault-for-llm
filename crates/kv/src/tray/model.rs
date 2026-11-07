@@ -45,6 +45,12 @@ pub enum Action {
         id: u64,
         verdict: Verdict,
     },
+    /// The user answered the notification `key` with `verdict`, or clicked
+    /// the notification itself (`None`). Never on a menu.
+    Notice {
+        key: String,
+        verdict: Option<Verdict>,
+    },
 }
 
 impl Action {
@@ -68,6 +74,7 @@ impl Action {
             Action::Login(false) => "login:off".into(),
             Action::Quit => "quit".into(),
             Action::Decide { id, verdict } => format!("decide:{id}:{}", verdict_name(*verdict)),
+            Action::Notice { .. } => "notice".into(),
         }
     }
 
@@ -281,11 +288,16 @@ fn action(label: &str, action: Action) -> Item {
     }
 }
 
+/// `text` as a menu item: `flat`, with each `&` doubled, since menus read
+/// a single one as a keyboard shortcut marker and do not show it.
+pub fn one_line(text: &str, max: usize) -> String {
+    flat(text, max).replace('&', "&&")
+}
+
 /// `text` on one line of at most `max` characters: control characters and
 /// line breaks become spaces, runs of whitespace collapse, and a longer
-/// text ends in "…". Each `&` is then doubled, since menus read a single
-/// one as a keyboard shortcut marker and do not show it.
-pub fn one_line(text: &str, max: usize) -> String {
+/// text ends in "…".
+pub fn flat(text: &str, max: usize) -> String {
     let words: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || c.is_control())
         .filter(|word| !word.is_empty())
@@ -295,7 +307,7 @@ pub fn one_line(text: &str, max: usize) -> String {
         line = line.chars().take(max.saturating_sub(1)).collect();
         line.push('…');
     }
-    line.replace('&', "&&")
+    line
 }
 
 /// Whether two menus differ only in the text of their `Text` lines, such as

@@ -38,6 +38,13 @@ pub trait Device: Send + Sync {
     /// sentence "kv is trying to ..." on the prompt, where the platform
     /// shows one, so a prompt the user did not start says what it is for.
     fn unlock(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String>;
+    /// Asks the user to confirm they are here for one action, such as
+    /// showing a value, and returns the key for `slot` as `unlock` does.
+    /// The platform may take more than a fingerprint here: on macOS the
+    /// Mac's login password will also do.
+    fn confirm(&self, slot: &DeviceSlot, reason: &str) -> Result<SymmetricKey, String> {
+        self.unlock(slot, reason)
+    }
     /// Deletes what the platform keeps for `id`, if anything.
     fn forget(&self, id: &str);
 }
@@ -114,11 +121,29 @@ pub fn credential(
     device: &dyn Device,
     reason: &str,
 ) -> Option<Result<DeviceCredential, String>> {
+    slot_key(vault, device, |slot| device.unlock(slot, reason))
+}
+
+/// As `credential`, through the device's `confirm`: for one action the
+/// user takes, such as showing a value, rather than for unlocking.
+pub fn confirmation(
+    vault: &Path,
+    device: &dyn Device,
+    reason: &str,
+) -> Option<Result<DeviceCredential, String>> {
+    slot_key(vault, device, |slot| device.confirm(slot, reason))
+}
+
+fn slot_key(
+    vault: &Path,
+    device: &dyn Device,
+    ask: impl FnOnce(&DeviceSlot) -> Result<SymmetricKey, String>,
+) -> Option<Result<DeviceCredential, String>> {
     let slot = device_slots(vault)
         .ok()?
         .into_iter()
         .find(|slot| slot.kind == device.kind())?;
-    Some(device.unlock(&slot, reason).map(|key| DeviceCredential {
+    Some(ask(&slot).map(|key| DeviceCredential {
         id: slot.id,
         key: hex_secret(&key),
     }))

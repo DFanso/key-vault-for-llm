@@ -3,9 +3,12 @@
 //! window, where the vault is unlocked and handles are managed without
 //! `kv tui`.
 
+#[cfg(target_os = "macos")]
+pub mod bundle;
 pub mod icon;
 pub mod login;
 pub mod model;
+pub mod notices;
 #[cfg(any(target_os = "macos", windows))]
 mod ui;
 pub mod window;
@@ -20,6 +23,15 @@ use crate::paths::Paths;
 pub fn run(paths: Paths) -> io::Result<()> {
     #[cfg(any(target_os = "macos", windows))]
     {
+        // The tray is the plain binary, never kv.app's copy, which a login
+        // item or a shortcut from an older kv may still start.
+        #[cfg(target_os = "macos")]
+        if bundle::running_from_app() {
+            use std::os::unix::process::CommandExt;
+            return Err(std::process::Command::new(bundle::source_exe()?)
+                .arg("tray")
+                .exec());
+        }
         let lock = lock_single(&paths)?;
         ui::run(paths, lock)
     }
@@ -29,6 +41,21 @@ pub fn run(paths: Paths) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "kv tray runs on macOS and Windows only",
+        ))
+    }
+}
+
+/// `kv tray-notices`: kv.app's notification helper, which `kv tray` starts.
+pub fn run_notices() -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        ui::run_notices()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "kv tray-notices runs on macOS only",
         ))
     }
 }
