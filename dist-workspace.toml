@@ -24,3 +24,8 @@ install-updater = false
 "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803" # v6.1.0
 "actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9" # v7.0.2
 "actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333" # v8.0.2
+
+# GitHub retired the macos-14 runner that dist picks for Apple Silicon by
+# default ("The configuration 'macos-14-arm64-us-default' is not supported").
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
