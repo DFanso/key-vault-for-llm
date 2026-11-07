@@ -63,7 +63,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
 ] }
 png = "0.18"
-sha2 = "0.11"
 security-framework = "3"
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]

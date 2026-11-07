@@ -5,8 +5,7 @@
 //! so the tray copies its own binary into kv.app and signs the bundle (ad
 //! hoc, as the linker signs kv). The tray itself stays the plain binary:
 //! Touch ID and the keychain answer each app differently, and they were set
-//! up for that binary. kv.app remembers the binary it came from and that
-//! binary's SHA-256.
+//! up for that binary.
 //!
 //! kv.app is made afresh, from the running binary, every time the tray
 //! starts, never reused: it sits in a folder any program running as the user
@@ -14,7 +13,9 @@
 //! changed there (by an agent running commands as the user) would otherwise
 //! answer every request with Allow, with no prompt to give it away; made
 //! afresh, it runs at most until the tray next starts from the binary the
-//! keychain knows.
+//! keychain knows. For the same reason kv.app started any other way than by
+//! the tray runs nothing and starts no other binary (see `cli`): nothing in
+//! that folder says what to trust.
 //!
 //! Set `KV_TRAY_APP=off` for plain notifications, without kv.app.
 
@@ -27,7 +28,6 @@ use std::process::Command;
 
 use objc2::rc::Retained;
 use objc2_foundation::{NSString, NSURL};
-use sha2::{Digest, Sha256};
 
 use super::icon;
 use crate::paths::Paths;
@@ -37,10 +37,6 @@ use crate::paths::Paths;
 pub const BUNDLE_ID: &str = "dev.dfanso.kv";
 
 const OFF_ENV: &str = "KV_TRAY_APP";
-
-/// The file in kv.app's resources that names the binary it was made from,
-/// on its first line, and holds that binary's SHA-256 on the second.
-const SOURCE: &str = "source";
 
 #[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
@@ -64,19 +60,6 @@ pub fn helper(paths: &Paths) -> io::Result<Option<PathBuf>> {
 /// Whether this process runs from an app bundle's executable.
 pub fn running_from_app() -> bool {
     std::env::current_exe().is_ok_and(|exe| contents(&exe).is_some())
-}
-
-/// The binary kv.app was made from, when this is kv.app; else this one.
-pub fn source_exe() -> io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    if let Some(contents) = contents(&exe)
-        && let Ok(record) = fs::read_to_string(contents.join("Resources").join(SOURCE))
-        && let Some(source) = record.lines().next()
-        && Path::new(source).is_file()
-    {
-        return Ok(PathBuf::from(source));
-    }
-    Ok(exe)
 }
 
 fn off(setting: Option<&str>) -> bool {
@@ -110,11 +93,6 @@ pub fn update(
     let resources = contents.join("Resources");
     let bundled = contents.join("MacOS").join("kv");
     let binary = fs::read(exe)?;
-    let record = format!(
-        "{}\n{}\n",
-        exe.to_string_lossy(),
-        hex::encode(Sha256::digest(&binary))
-    );
     // Never reused, even when it looks current: what is there may have been
     // changed since (see the module's notes). A signature covers every file
     // in the bundle, so nothing from an older one may stay behind either.
@@ -128,7 +106,6 @@ pub fn update(
     fs::set_permissions(&bundled, fs::Permissions::from_mode(0o755))?;
     fs::write(contents.join("Info.plist"), info_plist())?;
     fs::write(resources.join("kv.icns"), icns()?)?;
-    fs::write(resources.join(SOURCE), record)?;
     sign(app)?;
     Ok(bundled)
 }
@@ -251,8 +228,6 @@ mod tests {
             u32::from_be_bytes(icns[4..8].try_into().unwrap()) as usize,
             icns.len()
         );
-        let record = fs::read_to_string(app.join("Contents/Resources/source")).unwrap();
-        assert_eq!(record.lines().next(), Some(&*exe.to_string_lossy()));
 
         // The copy was changed in place (an agent's binary, signed ad hoc)
         // and a file added, though the binary it came from is the same: the
