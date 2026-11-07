@@ -314,18 +314,17 @@ impl From<io::Error> for CliError {
 type Result<T> = std::result::Result<T, CliError>;
 
 pub fn main() -> ExitCode {
-    // kv.app opened as an app, with no arguments: from Finder, or by a click
-    // on one of its notifications after the tray quit. It starts the tray,
-    // which is the binary kv.app was made from.
+    // kv.app is kv tray's notification helper and nothing else: opened from
+    // Finder, by a click on a notification after the tray quit, or by any
+    // other program, it runs nothing, and starts no other binary.
     #[cfg(target_os = "macos")]
-    if std::env::args_os().len() == 1 && crate::tray::bundle::running_from_app() {
-        return match tray(None) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("kv: {e}");
-                ExitCode::FAILURE
-            }
-        };
+    if crate::tray::bundle::running_from_app()
+        && std::env::args_os()
+            .nth(1)
+            .is_none_or(|arg| arg != "tray-notices")
+    {
+        eprintln!("kv: kv.app only posts kv tray's notifications; start `kv tray` instead");
+        return ExitCode::FAILURE;
     }
     let cli = Cli::parse();
     if let Command::TrayNotices = cli.command {

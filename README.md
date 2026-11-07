@@ -231,7 +231,11 @@ to an app, so `kv tray` makes `kv.app` from its own binary in kv's data folder
 tray as a helper that only posts notifications and passes your answers back; it
 holds no secret or session. The tray makes `kv.app` afresh each time it starts
 and never reuses the one there: that folder is writable by any program running
-as you, and a changed copy could answer requests for you.
+as you, and a changed copy could answer requests for you. For the same reason
+`kv.app` started any other way does nothing. The Allow buttons work only while
+the Mac is unlocked. If the tray or its helper stops, the daemon posts its
+plain notifications again within about 5 seconds; a request that arrives in
+those seconds gets none, though it still waits for you.
 The tray itself stays the `kv` you installed, which Touch ID and the keychain
 know. The first time, macOS asks whether kv may send notifications; turn them
 on later in System Settings, Notifications, kv, where choosing the Alerts style
@@ -521,7 +525,9 @@ program running as you that can control other programs' windows can type
 into the TUI or click Allow in the tray's menu, window or notifications: on macOS only
 programs you have given the Accessibility permission, on Windows any program
 at the same integrity level. Lock the vault, or quit both, when agents run
-unattended.
+unattended. Likewise, while kv's window shows a value, a program you have
+given the Screen Recording or Accessibility permission can read it off the
+screen.
 
 Single-user, for macOS, Linux and Windows, written in Rust.
 
