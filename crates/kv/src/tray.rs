@@ -23,15 +23,6 @@ use crate::paths::Paths;
 pub fn run(paths: Paths) -> io::Result<()> {
     #[cfg(any(target_os = "macos", windows))]
     {
-        // The tray is the plain binary, never kv.app's copy, which a login
-        // item or a shortcut from an older kv may still start.
-        #[cfg(target_os = "macos")]
-        if bundle::running_from_app() {
-            use std::os::unix::process::CommandExt;
-            return Err(std::process::Command::new(bundle::source_exe()?)
-                .arg("tray")
-                .exec());
-        }
         let lock = lock_single(&paths)?;
         ui::run(paths, lock)
     }

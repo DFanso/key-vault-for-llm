@@ -343,10 +343,12 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
             .iter()
             .filter(|(.., verdict)| with_session || *verdict != Verdict::AllowSession)
             .map(|(id, label, verdict)| {
+                // An Allow works only on an unlocked Mac: a notification on the
+                // lock screen shows text an agent wrote, to anyone there.
                 let options = if *verdict == Verdict::Deny {
                     UNNotificationActionOptions::Destructive
                 } else {
-                    UNNotificationActionOptions::empty()
+                    UNNotificationActionOptions::AuthenticationRequired
                 };
                 UNNotificationAction::actionWithIdentifier_title_options(
                     &NSString::from_str(id),
