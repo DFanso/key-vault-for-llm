@@ -355,8 +355,7 @@
         break;
       case "blurred":
         // The window stays up, but the user has left it: so does no value.
-        // A request to show one stays: the device's prompt took the focus.
-        if (page.revealAsking === null) closeReveal();
+        blurred();
         break;
       case "form":
         openForm(message.view);
@@ -1131,6 +1130,13 @@
     $("reveal-status").textContent = `Saved to ${saved.path}`;
     show($("reveal-status"), true);
     show($("reveal-show"), true);
+  }
+
+  // The window lost the focus: a value on show goes. A request to show one
+  // stays, since the device's prompt (Touch ID's sheet) takes the focus
+  // while it asks; it holds no value.
+  function blurred() {
+    if (page.revealAsking === null) closeReveal();
   }
 
   function closeReveal() {
@@ -2029,7 +2035,7 @@
     wireDrag($("unlock"));
     // A value on show is put away whenever the window loses the focus, also
     // where the tray keeps the window up.
-    window.addEventListener("blur", closeReveal);
+    window.addEventListener("blur", blurred);
     // The system's file panel takes the focus: tell the tray first, so it
     // does not take that for the user going away and hide the window.
     document.addEventListener(
