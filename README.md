@@ -227,9 +227,11 @@ Once a request is answered anywhere, times out, or the vault locks, its
 notification goes. While the tray posts these, the daemon leaves out its own
 plain one, so no request shows twice. macOS gives notification buttons only
 to an app, so `kv tray` makes `kv.app` from its own binary in kv's data folder
-(`~/Library/Application Support/kv/kv.app`), signs it, makes it again whenever
-the binary changes, and runs it beside the tray as a helper that only posts
-notifications and passes your answers back; it holds no secret or session.
+(`~/Library/Application Support/kv/kv.app`), signs it, and runs it beside the
+tray as a helper that only posts notifications and passes your answers back; it
+holds no secret or session. The tray makes `kv.app` afresh each time it starts
+and never reuses the one there: that folder is writable by any program running
+as you, and a changed copy could answer requests for you.
 The tray itself stays the `kv` you installed, which Touch ID and the keychain
 know. The first time, macOS asks whether kv may send notifications; turn them
 on later in System Settings, Notifications, kv, where choosing the Alerts style
