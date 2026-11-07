@@ -34,9 +34,7 @@ mod macos {
     pub fn set(on: bool) -> io::Result<()> {
         let home = dirs::home_dir()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
-        // From kv.app, the binary it was made from: an upgrade of that one
-        // then reaches kv.app at the next login.
-        set_at(&home, &crate::tray::bundle::source_exe()?, on)
+        set_at(&home, &std::env::current_exe()?, on)
     }
 
     pub fn plist_path(home: &Path) -> PathBuf {

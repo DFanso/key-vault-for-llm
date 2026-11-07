@@ -119,7 +119,7 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     let system = System {
         proxy: proxy.clone(),
         #[cfg(target_os = "macos")]
-        notices: notices::Center::start(actions.clone()),
+        notices: start_helper(&paths, actions.clone()),
     };
     std::thread::spawn(move || {
         let worker = Worker::new(paths, device::platform().map(Arc::from), system);
@@ -488,12 +488,39 @@ fn no_window(error: &str) -> String {
     }
 }
 
+/// `kv tray-notices`: kv.app's notification helper.
+#[cfg(target_os = "macos")]
+pub fn run_notices() -> io::Result<()> {
+    notices::run_helper()
+}
+
+/// Makes kv.app and starts it as the notification helper. Without it the
+/// tray still runs, and the daemon's plain notifications stand.
+#[cfg(target_os = "macos")]
+fn start_helper(
+    paths: &Paths,
+    actions: tokio::sync::mpsc::UnboundedSender<Action>,
+) -> Option<notices::Helper> {
+    let exe = match super::bundle::helper(paths) {
+        Ok(exe) => exe?,
+        Err(e) => {
+            eprintln!("kv: cannot make kv.app ({e}); notifications will have no buttons");
+            return None;
+        }
+    };
+    notices::Helper::start(&exe, actions)
+        .inspect_err(|e| {
+            eprintln!("kv: cannot start kv.app ({e}); notifications will have no buttons");
+        })
+        .ok()
+}
+
 /// The real desktop: notifications, kv's window, the login item.
 struct System {
     proxy: EventLoopProxy<Message>,
-    /// Notifications the user can answer, while kv tray runs from kv.app.
+    /// kv.app, which posts notifications the user can answer.
     #[cfg(target_os = "macos")]
-    notices: Option<notices::Center>,
+    notices: Option<notices::Helper>,
 }
 
 impl Desktop for System {
@@ -519,7 +546,7 @@ impl Desktop for System {
 
     #[cfg(target_os = "macos")]
     fn can_notify(&self) -> bool {
-        self.notices.as_ref().is_some_and(notices::Center::allowed)
+        self.notices.as_ref().is_some_and(notices::Helper::allowed)
     }
 
     #[cfg(target_os = "macos")]
