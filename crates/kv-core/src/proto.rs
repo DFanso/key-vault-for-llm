@@ -474,6 +474,11 @@ pub enum ControlCommand {
     /// Status, handles and waiting requests in one reply, for `kv tui` to
     /// poll. Not counted as use of the vault and not audited.
     Overview,
+    /// `overview`, from a client that shows each waiting request as a
+    /// notification the user can answer, as `kv tray` does on macOS. While
+    /// one has asked within the last few seconds, the daemon posts no
+    /// notification of its own for a new request, so none shows twice.
+    NotifyingOverview,
     /// Answers a request waiting for approval.
     Decide {
         id: u64,
@@ -497,6 +502,12 @@ pub enum ControlCommand {
     },
     /// The value of a handle that came from a share, for the user to read.
     RevealShare {
+        handle: String,
+    },
+    /// The value of any handle, for the user to read. Needs a session token
+    /// and, every time, the passphrase or a device key as well: an unlocked
+    /// vault says only that the user was there once, not that they are now.
+    RevealHandle {
         handle: String,
     },
     /// The file a `file` handle received through a share holds, for the
@@ -548,7 +559,7 @@ pub enum ControlResponse {
     Overview {
         overview: Overview,
     },
-    /// A received handle's value, for the user.
+    /// A handle's value, for the user.
     Revealed {
         handle: String,
         fields: Vec<RevealedField>,

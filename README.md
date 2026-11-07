@@ -19,7 +19,8 @@ Protocol over stdio.
 Status: agents can make HTTP requests, run programs, and query or connect to
 Postgres and Redis with your secrets over MCP, `kv tui` or a menu bar icon
 (`kv tray`, with a window of its own) approves `--mode ask` requests as they
-arrive, and Touch ID or Windows Hello can stand in for the passphrase.
+arrive, on macOS also from a notification's buttons, and Touch ID or Windows
+Hello can stand in for the passphrase.
 
 ![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
@@ -187,8 +188,9 @@ asked for (the first screenshot above):
 - `D` deny, and set the handles to `--mode deny`
 
 The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
-their policy (`p`). Secret values are typed into hidden fields and never shown
-again; leave one blank when editing to keep it. Editing an env handle sets
+their policy (`p`). Secret values are typed into hidden fields and the TUI
+never shows them again (kv's window can, see below); leave one blank when
+editing to keep it. Editing an env handle sets
 the variables you type over its others and takes out the ones you list under
 Remove variables, so you never type the rest again. The Audit tab shows the
 newest entries of the audit log. `L` locks the vault, `q` quits.
@@ -217,6 +219,25 @@ TUI: Allow once, Allow for this session, Deny, and Deny and block. "Lock
 vault" locks the vault for every client. Anything the menu cannot do, such as
 answering a request that has already timed out, shows up as a notification.
 
+On macOS each waiting request also shows up as a notification of its own,
+with the agent, tool and handles, and the answers Allow once, Allow for this
+session (when the agent named its session) and Deny under its Options
+button. Clicking the notification itself opens the request in kv's window.
+Once a request is answered anywhere, times out, or the vault locks, its
+notification goes. While the tray posts these, the daemon leaves out its own
+plain one, so no request shows twice. macOS gives notification buttons only
+to an app, so `kv tray` makes `kv.app` from its own binary in kv's data folder
+(`~/Library/Application Support/kv/kv.app`), signs it, and runs it beside the
+tray as a helper that only posts notifications and passes your answers back; it
+holds no secret or session. The tray makes `kv.app` afresh each time it starts
+and never reuses the one there: that folder is writable by any program running
+as you, and a changed copy could answer requests for you.
+The tray itself stays the `kv` you installed, which Touch ID and the keychain
+know. The first time, macOS asks whether kv may send notifications; turn them
+on later in System Settings, Notifications, kv, where choosing the Alerts style
+keeps each one on screen until you answer it. `KV_TRAY_APP=off kv tray` leaves
+`kv.app` out, with plain notifications.
+
 Clicking the icon opens a small menu beside it, like a flyout: what is
 waiting, then Open kv, Lock kv (or Unlock), Start at login and Quit kv tray.
 The system menu is on the other button. A second click, Esc, or clicking
@@ -225,7 +246,7 @@ kv's window. The window does everything `kv tui`
 does without a terminal: Home shows what is waiting, your handles and shares,
 and the latest activity, with quick actions; Approvals has each waiting
 request in full; Handles is where you fill in agents' handle requests and
-add, edit, re-police or remove handles; then Shares (see sharing, below),
+add, edit, re-police, show or remove handles; then Shares (see sharing, below),
 Audit, and Settings, which picks a light or dark look (or follows the
 system), turns the login item on or off, locks the vault and quits the tray.
 The menu and the window share one session; hiding the window keeps it, and
@@ -239,13 +260,25 @@ when you click elsewhere, with three exceptions. Drag it by its title bar and
 it is yours: it stays where you put it, above other windows, until you hide it
 with the close button, Esc or the icon. It also stays up while a form or any
 other dialog is open, and while the system's file panel is open (Add file,
-Import file), so neither is lost when the focus moves. A value revealed on
-the Shares screen is the exception: it is put away whenever the window loses
-the focus, even where the window stays up. The small menu is always a flyout: if the window is hidden in the middle of a form, the form is
+Import file), so neither is lost when the focus moves. A value on show is the
+exception: it is put away whenever the window loses the focus, even where the
+window stays up. The small menu is always a flyout: if the window is hidden in the middle of a form, the form is
 cancelled when the menu opens, not left inside it.
 
 The login item takes effect at your next login. On Windows a console window
 may flash as it starts.
+
+The eye on each row of the Handles screen shows that handle's value: the
+token and base URL, the database URL, each variable of an env handle, or what
+a file is (with its text, for a text file up to 64 KiB). kv asks every time,
+however long ago you unlocked it: Touch ID (whose prompt also takes your
+Mac's login password) or Windows Hello where you set it up, or else the kv
+passphrase, which the daemon checks again; wrong ones count toward the same
+backoff as unlocking. Each showing is in the audit log, by handle, never with
+the value. The value goes after a minute, when you hide it, or when the
+window loses the focus or the vault locks. There is no Copy button, since any
+program, an agent's too, can read the clipboard: select the text and copy it
+yourself if you need to.
 
 ### When the agent needs a key you have not added
 
@@ -485,7 +518,7 @@ program you let a handle run does receive the secret.
 
 An unlocked `kv tui` or `kv tray` answers requests for whoever drives it. A
 program running as you that can control other programs' windows can type
-into the TUI or click Allow in the tray's menu or window: on macOS only
+into the TUI or click Allow in the tray's menu, window or notifications: on macOS only
 programs you have given the Accessibility permission, on Windows any program
 at the same integrity level. Lock the vault, or quit both, when agents run
 unattended.

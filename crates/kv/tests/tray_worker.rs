@@ -15,6 +15,7 @@ use kv::client;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
+use kv::tray::notices::Notice;
 use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
 use kv::tray::worker::{Desktop, Worker};
 use kv::tui::app::ShareDone;
@@ -23,7 +24,7 @@ use kv_core::proto::{
     SessionInfo, Verdict,
 };
 use kv_core::secret::{SecretKind, SecretText};
-use live::{Daemon, PASS};
+use live::{Daemon, PASS, TOKEN};
 use tempfile::TempDir;
 
 const REASON: &str = "open kv tray, where you approve agent requests";
@@ -34,6 +35,10 @@ struct Desk {
     windows: Arc<Mutex<Vec<Tab>>>,
     pages: Arc<Mutex<Vec<ToPage>>>,
     login: Arc<Mutex<bool>>,
+    /// Whether it posts notifications the user can answer.
+    notifying: Arc<Mutex<bool>>,
+    posted: Arc<Mutex<Vec<Notice>>>,
+    withdrawn: Arc<Mutex<Vec<String>>>,
 }
 
 impl Desktop for Desk {
@@ -56,6 +61,18 @@ impl Desktop for Desk {
     fn set_login(&self, on: bool) -> io::Result<()> {
         *self.login.lock().unwrap() = on;
         Ok(())
+    }
+
+    fn can_notify(&self) -> bool {
+        *self.notifying.lock().unwrap()
+    }
+
+    fn post(&self, notice: &Notice) {
+        self.posted.lock().unwrap().push(notice.clone());
+    }
+
+    fn withdraw(&self, keys: &[String]) {
+        self.withdrawn.lock().unwrap().extend_from_slice(keys);
     }
 }
 
@@ -1718,4 +1735,205 @@ async fn the_window_edits_an_env_handles_rows_and_will_not_take_out_its_last() {
         panic!("{pages:?}");
     };
     assert!(message.contains("no variables left"), "{message}");
+}
+
+/// The value a handle reveal sent to the page, if any.
+fn revealed(pages: &[ToPage]) -> Option<Vec<(String, String)>> {
+    pages.iter().find_map(|page| match page {
+        ToPage::HandleRevealed { fields, .. } => Some(
+            fields
+                .iter()
+                .map(|f| (f.label.clone(), f.value.expose().to_owned()))
+                .collect(),
+        ),
+        _ => None,
+    })
+}
+
+/// What the page was told when the passphrase is needed, if it was.
+fn asked(pages: &[ToPage]) -> Option<Option<String>> {
+    pages.iter().find_map(|page| match page {
+        ToPage::RevealAsk { message, .. } => Some(message.clone()),
+        _ => None,
+    })
+}
+
+fn reveal(handle: &str, passphrase: Option<&str>) -> Action {
+    page(FromPage::RevealHandle {
+        handle: handle.into(),
+        passphrase: passphrase.map(SecretText::new),
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_shows_in_the_window_once_touch_id_or_the_passphrase_confirms() {
+    let (_daemon, fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    desk.take();
+
+    // Touch ID, asked afresh for this, with what it is for.
+    assert!(!worker.act(reveal("api", None)).await);
+    assert_eq!(
+        fake.reasons.lock().unwrap().last().map(String::as_str),
+        Some("show the value of api")
+    );
+    let pages = desk.take();
+    assert_eq!(
+        revealed(&pages),
+        Some(vec![("Token".to_owned(), TOKEN.to_owned())]),
+        "{pages:?}"
+    );
+
+    // Cancelled: the page asks for the passphrase, saying why.
+    let keys = std::mem::take(&mut *fake.keys.lock().unwrap());
+    assert!(!worker.act(reveal("api", None)).await);
+    let pages = desk.take();
+    assert_eq!(revealed(&pages), None, "{pages:?}");
+    let why = asked(&pages).flatten().unwrap_or_default();
+    assert!(why.starts_with("Touch ID: "), "{why}");
+    *fake.keys.lock().unwrap() = keys;
+
+    assert!(!worker.act(reveal("api", Some("not it"))).await);
+    let pages = desk.take();
+    assert_eq!(revealed(&pages), None, "{pages:?}");
+    assert_eq!(asked(&pages), Some(Some("Wrong passphrase".to_owned())));
+
+    assert!(!worker.act(reveal("api", Some(PASS))).await);
+    assert_eq!(
+        revealed(&desk.take()),
+        Some(vec![("Token".to_owned(), TOKEN.to_owned())])
+    );
+
+    // A closed window asks nothing and shows nothing.
+    let asked_before = fake.reasons.lock().unwrap().len();
+    assert!(!worker.act(Action::WindowClosed).await);
+    assert!(!worker.act(reveal("api", None)).await);
+    assert!(!worker.act(reveal("api", Some(PASS))).await);
+    assert_eq!(fake.reasons.lock().unwrap().len(), asked_before);
+    assert_eq!(desk.take(), Vec::new());
+    assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_device_the_window_asks_for_the_passphrase() {
+    let daemon = Daemon::start().await;
+    let desk = Desk::default();
+    let mut worker = Worker::new(daemon.paths.clone(), None, desk.clone());
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    assert!(
+        !worker
+            .act(page(FromPage::Unlock {
+                passphrase: SecretText::new(PASS)
+            }))
+            .await
+    );
+    desk.take();
+    assert!(!worker.act(reveal("api", None)).await);
+    assert_eq!(asked(&desk.take()), Some(None));
+    assert!(!worker.act(reveal("api", Some(PASS))).await);
+    assert!(revealed(&desk.take()).is_some());
+}
+
+/// Models until the desk has posted `n` notifications in all.
+async fn posted(worker: &mut Worker<Desk>, desk: &Desk, n: usize) -> Vec<Notice> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        worker.model().await;
+        let posted = desk.posted.lock().unwrap().clone();
+        if posted.len() >= n {
+            return posted;
+        }
+        assert!(Instant::now() < deadline, "only {posted:?} was posted");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_waiting_request_is_a_notification_its_buttons_answer() {
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    *desk.notifying.lock().unwrap() = true;
+    let call = daemon.agent_call();
+    let notices = posted(&mut worker, &desk, 1).await;
+    let notice = &notices[0];
+    assert_eq!(notice.title, "approval test wants api");
+    assert_eq!(notice.subtitle, "HTTP request");
+    assert!(notice.body.starts_with("GET "), "{notice:?}");
+    assert!(notice.can_grant, "the agent named its session");
+    // Posted once, however often the tray looks.
+    worker.model().await;
+    assert_eq!(desk.posted.lock().unwrap().len(), 1);
+
+    assert!(
+        !worker
+            .act(Action::Notice {
+                key: notice.key.clone(),
+                verdict: Some(Verdict::AllowOnce),
+            })
+            .await
+    );
+    match call.await.unwrap() {
+        AgentResponse::Http(reply) => assert_eq!(reply.status, 200),
+        other => panic!("{other:?}"),
+    }
+    // The platform takes an answered one down itself.
+    worker.model().await;
+    assert_eq!(*desk.withdrawn.lock().unwrap(), Vec::<String>::new());
+
+    // A second answer to the same notification answers nothing.
+    assert!(
+        !worker
+            .act(Action::Notice {
+                key: notice.key.clone(),
+                verdict: Some(Verdict::AllowOnce),
+            })
+            .await
+    );
+    let notes = desk.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].starts_with("That request is no longer waiting"),
+        "{notes:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_notification_whose_request_went_is_taken_down() {
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    *desk.notifying.lock().unwrap() = true;
+    let call = daemon.agent_call();
+    let key = posted(&mut worker, &desk, 1).await[0].key.clone();
+
+    // Answered elsewhere: in the menu, the window or `kv tui`.
+    let deny = waiting(&mut worker, "Deny").await;
+    assert!(!worker.act(deny).await);
+    call.await.unwrap();
+    worker.model().await;
+    assert_eq!(*desk.withdrawn.lock().unwrap(), [key]);
+
+    // Locking takes down every one, and quitting the rest.
+    let _second = daemon.agent_call();
+    let key = posted(&mut worker, &desk, 2).await[1].key.clone();
+    assert!(!worker.act(Action::Lock).await);
+    worker.model().await;
+    assert_eq!(desk.withdrawn.lock().unwrap().last(), Some(&key));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clicking_a_notification_opens_its_request_and_none_are_posted_when_off() {
+    let (daemon, _fake, desk, mut worker) = unlocked().await;
+    let _call = daemon.agent_call();
+    // Off (no permission, or not kv.app): nothing posted, the daemon's own
+    // plain notification stands.
+    waiting(&mut worker, "Allow once").await;
+    assert_eq!(*desk.posted.lock().unwrap(), Vec::new());
+
+    *desk.notifying.lock().unwrap() = true;
+    let key = posted(&mut worker, &desk, 1).await[0].key.clone();
+    assert!(!worker.act(Action::Notice { key, verdict: None }).await);
+    assert_eq!(*desk.windows.lock().unwrap(), [Tab::Approvals]);
+    assert!(desk.take().contains(&ToPage::Show {
+        tab: Tab::Approvals
+    }));
+    assert!(worker.act(Action::Quit).await);
+    assert_eq!(desk.withdrawn.lock().unwrap().len(), 1);
 }
