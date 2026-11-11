@@ -153,7 +153,7 @@ pub fn edit_handle(handle: &HandleInfo) -> Form {
                 .tui_only(),
         );
     }
-    Form::new(format!("Edit {}", handle.name), fields)
+    Form::new(format!("Edit {}", handle.name), fields).editing(&handle.name)
 }
 
 pub fn edit_policy(handle: &HandleInfo) -> Form {
