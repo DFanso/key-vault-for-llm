@@ -486,6 +486,17 @@ fn field_line(field: &Field, focused: bool) -> Line<'static> {
                 };
                 spans.push(Span::styled(format!(" {option} "), style));
             }
+            // What the option means, so a kind can be picked without
+            // knowing kv's words for them; the whole of it while the user
+            // is choosing, the title otherwise.
+            if let Some(about) = field.about_chosen() {
+                let text = if focused {
+                    format!("  {}: {}", about.title, about.detail)
+                } else {
+                    format!("  {}", about.title)
+                };
+                spans.push(Span::raw(text));
+            }
         }
         Input::Pairs => {
             let names: Vec<&str> = field.pairs.iter().map(|(name, _)| name.as_str()).collect();
