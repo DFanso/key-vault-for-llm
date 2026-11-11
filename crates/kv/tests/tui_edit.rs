@@ -174,6 +174,31 @@ fn a_new_http_handle_never_shows_its_token() {
     assert_eq!(secret.policy.mode, Mode::Ask);
 }
 
+/// The kind is said in terms of what the agent will do: the whole of what
+/// the chosen kind means while it is being chosen, its title after.
+#[test]
+fn the_kind_says_what_each_option_is_for() {
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    let drawn = screen(&app);
+    assert!(
+        drawn.contains("Call a web API: An API key or token"),
+        "{drawn}"
+    );
+    assert!(drawn.contains("can't be changed"), "{drawn}");
+    press(&mut app, KeyCode::Right);
+    let drawn = screen(&app);
+    assert!(
+        drawn.contains("Run a program or CLI: Environment"),
+        "{drawn}"
+    );
+    assert!(drawn.contains("such as AWS keys"), "{drawn}");
+    focus(&mut app, "name");
+    let drawn = screen(&app);
+    assert!(drawn.contains("Run a program or CLI"), "{drawn}");
+    assert!(!drawn.contains("such as AWS keys"), "{drawn}");
+}
+
 #[test]
 fn a_query_token_hides_the_header_fields() {
     let mut app = handles(Vec::new());

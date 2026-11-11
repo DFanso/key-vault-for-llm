@@ -7,10 +7,42 @@ use kv_core::policy::{Mode, Policy};
 use kv_core::proto::{PolicyPatch, RequestedHandle};
 use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText, SecretValue};
 
-use super::{Field, Form};
+use super::{Explained, Field, Form};
 use crate::tui::app::Effect;
 
 const KINDS: &[&str] = &["http", "env", "postgres", "redis"];
+
+/// The kinds in the words of what an agent will do with the secret: someone
+/// adding their first handle knows they have "an OpenAI key", not that it
+/// is an http handle. A handle's kind cannot be changed after it is added.
+const KINDS_EXPLAINED: &[Explained] = &[
+    Explained {
+        value: "http",
+        title: "Call a web API",
+        detail: "An API key or token for a service such as OpenAI, GitHub or Stripe. \
+                 Agents call the service with http_request, and kv sends the token \
+                 only to the hosts you allow.",
+    },
+    Explained {
+        value: "env",
+        title: "Run a program or CLI",
+        detail: "Environment variables a program reads, such as AWS keys for aws or \
+                 terraform, or an MCP server's password. Agents run the commands you \
+                 allow with exec.",
+    },
+    Explained {
+        value: "postgres",
+        title: "Query a Postgres database",
+        detail: "A postgres:// connection URL. Agents run SQL with db_query or \
+                 db_connect, and the handle can be made read only.",
+    },
+    Explained {
+        value: "redis",
+        title: "Use a Redis server",
+        detail: "A redis:// connection URL. Agents run commands with db_query or \
+                 db_connect, and the handle can be made read only.",
+    },
+];
 const MODES: &[&str] = &["ask", "auto", "deny"];
 const NO_YES: &[&str] = &["no", "yes"];
 
@@ -23,7 +55,9 @@ pub enum Purpose {
 
 pub fn new_handle() -> Form {
     let mut fields = vec![
-        Field::choice("kind", "Kind", KINDS),
+        Field::choice("kind", "Kind", KINDS)
+            .explained(KINDS_EXPLAINED)
+            .hint("can't be changed after the handle is added"),
         Field::text("name", "Name"),
         Field::text("description", "Description"),
     ];
