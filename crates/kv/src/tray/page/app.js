@@ -1501,14 +1501,65 @@
 
   function openForm(view) {
     page.form = view;
-    $("form-title").textContent = view.title;
     $("form-error").textContent = "";
     const fields = view.fields.map(field);
     $("form-fields").replaceChildren(...fields);
     applyConditions();
     const dialog = $("form-dialog");
     if (!dialog.open) dialog.showModal();
-    let focus = view.focus && $(`field-${view.focus}`);
+    // A new handle starts by asking what the agent will use it for. One an
+    // agent asked for comes with its kind, and opens on the secret.
+    const kind = view.fields.find(explainedChoice);
+    if (kind && view.focus === kind.key) {
+      showPicker(kind);
+      return;
+    }
+    showFields(view.focus);
+  }
+
+  // A choice whose options the tray explains: the kind of a new handle.
+  function explainedChoice(spec) {
+    return spec.kind === "choice" && Array.isArray(spec.explained) && spec.explained.length > 0;
+  }
+
+  // The first step of a new handle: a card for each kind, in the tray's
+  // words, then the ways that start from a file.
+  function showPicker(spec) {
+    $("form-title").textContent = "What will the agent use it for?";
+    const picks = spec.explained.map((option) => {
+      const [kindIcon, tone] = KINDS[option.value] || ["key-round", "tone-accent"];
+      const pick = el(
+        "button",
+        "pick",
+        el("span", `stat-icon ${tone}`, icon(kindIcon)),
+        el("span", "pick-text", el("strong", null, option.title), el("span", "muted small", option.detail)),
+      );
+      pick.type = "button";
+      pick.dataset.value = option.value;
+      pick.addEventListener("click", () => {
+        $(`field-${spec.key}`).value = option.value;
+        refreshChoice(spec.key);
+        showFields("name");
+      });
+      return pick;
+    });
+    $("form-picks").replaceChildren(...picks);
+    show($("form-picker"), true);
+    show($("form-fields"), false);
+    show($("form-save"), false);
+    const chosen = $(`field-${spec.key}`).value;
+    (picks.find((p) => p.dataset.value === chosen) || picks[0]).focus();
+  }
+
+  // The form's fields, with the cursor in `focusKey` if it is shown.
+  function showFields(focusKey) {
+    $("form-title").textContent = page.form.title;
+    show($("form-picker"), false);
+    show($("form-fields"), true);
+    show($("form-save"), true);
+    $("form-picks").replaceChildren();
+    let focus = focusKey && $(`field-${focusKey}`);
+    if (focus && focus.closest(".field").hidden) focus = null;
     // Variables whose names came with an agent's request: the value is
     // what is left to type.
     if (focus && focus.classList.contains("pair-name") && focus.value) {
@@ -1520,6 +1571,7 @@
   function field(spec) {
     const id = `field-${spec.key}`;
     let input;
+    if (explainedChoice(spec)) return explainedField(spec, id);
     switch (spec.kind) {
       case "choice":
         input = el("select");
@@ -1554,6 +1606,58 @@
     node.dataset.key = spec.key;
     node.dataset.kind = spec.kind;
     return node;
+  }
+
+  // An explained choice inside the form: what the chosen option means, and
+  // a Change button back to the cards. The value sits in a hidden select,
+  // which the conditions and Save read like any other choice.
+  function explainedField(spec, id) {
+    const select = el("select");
+    for (const option of spec.options) {
+      const node = el("option", null, option);
+      node.value = option;
+      select.append(node);
+    }
+    select.value = spec.value;
+    select.id = id;
+    select.dataset.key = spec.key;
+    select.hidden = true;
+    const change = button("Change", () => showPicker(spec), "link", "pencil");
+    change.setAttribute("aria-label", `Change ${spec.label.toLowerCase()}`);
+    const node = el(
+      "div",
+      "field",
+      el("span", "label", spec.label),
+      el("div", "explained", el("span", "stat-icon"), el("span", "pick-text", el("strong"), el("span", "muted small")), change),
+      select,
+      spec.hint ? el("p", "hint", spec.hint) : null,
+    );
+    node.dataset.key = spec.key;
+    node.dataset.kind = spec.kind;
+    node.dataset.explained = "true";
+    describeChoice(node, spec);
+    return node;
+  }
+
+  // Draws what the chosen option of an explained choice means.
+  function describeChoice(node, spec) {
+    const value = node.querySelector("select").value;
+    const about = spec.explained.find((o) => o.value === value) || { title: value, detail: "" };
+    const [kindIcon, tone] = KINDS[value] || ["key-round", "tone-accent"];
+    const box = node.querySelector(".explained");
+    box.querySelector(".stat-icon").className = `stat-icon ${tone}`;
+    box.querySelector(".stat-icon").replaceChildren(icon(kindIcon));
+    box.querySelector("strong").textContent = about.title;
+    box.querySelector(".muted").textContent = about.detail;
+  }
+
+  // After a choice is set from a card: its summary and the fields that hang
+  // from it.
+  function refreshChoice(key) {
+    const node = document.querySelector(`.field[data-key="${CSS.escape(key)}"]`);
+    const spec = page.form && page.form.fields.find((f) => f.key === key);
+    if (node && spec && node.dataset.explained) describeChoice(node, spec);
+    applyConditions();
   }
 
   // What an agent asked to be allowed, as chips: a click adds one to the
@@ -1668,6 +1772,10 @@
     page.form = null;
     $("form").reset();
     $("form-fields").replaceChildren();
+    $("form-picks").replaceChildren();
+    show($("form-picker"), false);
+    show($("form-fields"), true);
+    show($("form-save"), true);
     if (dialog.open) dialog.close();
     if (tell) send({ type: "close_form" });
   }
@@ -2075,7 +2183,16 @@
       send({ type: "login", on: page.login });
     });
     $("add").addEventListener("click", () => openRequest({ kind: "new" }));
-    $("import").addEventListener("click", pickImport);
+    // The New handle picker's file cards leave the form for their own
+    // dialogs, which start with the system's file panel.
+    $("pick-file").addEventListener("click", () => {
+      closeForm(true);
+      pickFile();
+    });
+    $("pick-import").addEventListener("click", () => {
+      closeForm(true);
+      pickImport();
+    });
     $("import-file").addEventListener("change", readImport);
     $("import-form").addEventListener("submit", submitImport);
     $("import-all").addEventListener("click", () => tickImport(true));
@@ -2086,7 +2203,6 @@
       event.preventDefault();
       closeImport(true);
     });
-    $("add-file").addEventListener("click", pickFile);
     $("add-file-input").addEventListener("change", readFile);
     $("file-form").addEventListener("submit", submitFile);
     $("file-cancel").addEventListener("click", () => closeFile(true));

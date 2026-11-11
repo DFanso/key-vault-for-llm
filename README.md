@@ -250,7 +250,9 @@ kv's window. The window does everything `kv tui`
 does without a terminal: Home shows what is waiting, your handles and shares,
 and the latest activity, with quick actions; Approvals has each waiting
 request in full; Handles is where you fill in agents' handle requests and
-add, edit, re-police, show or remove handles; then Shares (see sharing, below),
+add, edit, re-police, show or remove handles (New handle starts by asking what
+the agent will use the secret for: a web API, a program or CLI, a Postgres or
+Redis database, or a file, so you need not know kv's kinds); then Shares (see sharing, below),
 Audit, and Settings, which picks a light or dark look (or follows the
 system), turns the login item on or off, locks the vault and quits the tray.
 The menu and the window share one session; hiding the window keeps it, and
@@ -263,8 +265,8 @@ The window has no frame, so it opens beside the icon like the menu and hides
 when you click elsewhere, with three exceptions. Drag it by its title bar and
 it is yours: it stays where you put it, above other windows, until you hide it
 with the close button, Esc or the icon. It also stays up while a form or any
-other dialog is open, and while the system's file panel is open (Add file,
-Import file), so neither is lost when the focus moves. A value on show is the
+other dialog is open, and while the system's file panel is open (New handle's
+file cards), so neither is lost when the focus moves. A value on show is the
 exception: it is put away whenever the window loses the focus, even where the
 window stays up. The small menu is always a flyout: if the window is hidden in the middle of a form, the form is
 cancelled when the menu opens, not left inside it.
@@ -394,9 +396,9 @@ A JSON file's nested keys become names joined with `__`, as .NET reads them
 Variables that change how a program runs or where it connects, such as
 `PATH` or `NODE_OPTIONS`, start unticked; kv will not send them in a share
 anyway. `kv import` notes what it skipped or could not read, such as `${VAR}`
-references, which it keeps as written. On the Handles tab, **Import file**
-does the same in the window (on a Mac, press Command-Shift-Period in the file
-panel to see `.env`).
+references, which it keeps as written. In the window, **New handle**, then
+**Import a .env or settings file**, does the same (on a Mac, press
+Command-Shift-Period in the file panel to see `.env`).
 
 Don't share a handle made from a settings file such as `appsettings.json`
 yet. Besides secrets, those files set addresses (a database host, an API's
