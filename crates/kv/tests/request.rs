@@ -222,3 +222,36 @@ fn a_request_names_at_most_four_hosts() {
     request.allowed_hosts = (0..5).map(|i| format!("api-{i}.example.com")).collect();
     assert!(refused(ask(&mut f, None, request)).contains("4 hosts"));
 }
+
+#[test]
+fn a_login_request_keeps_its_hosts_and_commands_and_nothing_else() {
+    let mut f = Fixture::new();
+    let token = f.token();
+    let request = HandleRequest {
+        name: "jira".into(),
+        kind: SecretKind::Login,
+        description: "Jira bot".into(),
+        reason: "to read the sprint board".into(),
+        auth: Some(AuthPlacement::Header {
+            name: "x-api-key".into(),
+            template: "{}".into(),
+        }),
+        base_url: true,
+        allowed_hosts: vec!["jira.example.com".into()],
+        env_vars: vec!["SOMETHING".into()],
+        allowed_cmds: vec!["curl".into()],
+    };
+    assert!(matches!(
+        ask(&mut f, Some(&session("s1")), request),
+        AgentResponse::Requested { .. }
+    ));
+    let waiting = f.overview(&token).handle_requests.remove(0).request;
+    assert_eq!(waiting.kind, SecretKind::Login);
+    assert_eq!(waiting.allowed_hosts, ["jira.example.com"]);
+    assert_eq!(waiting.allowed_cmds, ["curl"]);
+    // Basic auth is where a login goes, and its variables are named after
+    // the handle, so the agent picks neither.
+    assert_eq!(waiting.auth, None);
+    assert!(!waiting.base_url);
+    assert!(waiting.env_vars.is_empty());
+}

@@ -45,7 +45,7 @@ fn a_described_form_never_carries_a_secret() {
 
     let kind = field(&view, "kind");
     assert_eq!(kind.kind, FieldKind::Choice);
-    assert_eq!(kind.options, ["http", "env", "postgres", "redis"]);
+    assert_eq!(kind.options, ["http", "env", "postgres", "redis", "login"]);
     assert_eq!(kind.value, "http");
     let header = field(&view, "header");
     assert_eq!(header.value, "Authorization");
@@ -406,4 +406,96 @@ fn a_new_variable_needs_its_value() {
         error.contains("type a value for DEMO_ADMIN_TOKEN"),
         "{error}"
     );
+}
+
+fn login_info() -> kv_core::secret::HandleInfo {
+    kv_core::secret::Secret {
+        name: "jira".into(),
+        description: "Jira bot".into(),
+        value: SecretValue::Login {
+            username: SecretText::new("svc-reports"),
+            password: SecretText::new("w0rd-pass-0123456789"),
+        },
+        policy: kv_core::policy::Policy {
+            allowed_hosts: vec!["jira.example.com".into()],
+            allowed_cmds: vec!["curl".into()],
+            ..kv_core::policy::Policy::default()
+        },
+        created_at: 0,
+        updated_at: 0,
+        from_share: None,
+    }
+    .info()
+}
+
+#[test]
+fn a_new_login_takes_a_username_a_password_hosts_and_commands() {
+    let mut form = forms::new_handle();
+    forms::fill(
+        &mut form,
+        &values(&[
+            ("kind", "login"),
+            ("name", "jira"),
+            ("username", " svc-reports "),
+            ("password", "w0rd-pass-0123456789"),
+            ("hosts", "jira.example.com"),
+            ("cmds", "curl"),
+        ]),
+    )
+    .unwrap();
+    let view = forms::describe(&form);
+    assert!(matches!(field(&view, "password").kind, FieldKind::Secret));
+    assert_eq!(field(&view, "password").value, "");
+    let Effect::Add(secret) = forms::submit(&Purpose::Add, &form).unwrap() else {
+        panic!("expected a new handle");
+    };
+    assert_eq!(
+        secret.value,
+        SecretValue::Login {
+            username: SecretText::new("svc-reports"),
+            password: SecretText::new("w0rd-pass-0123456789"),
+        }
+    );
+    assert_eq!(secret.policy.allowed_hosts, ["jira.example.com"]);
+    assert_eq!(secret.policy.allowed_cmds, ["curl"]);
+
+    let mut blank = forms::new_handle();
+    forms::fill(&mut blank, &values(&[("kind", "login"), ("name", "jira")])).unwrap();
+    assert_eq!(
+        forms::submit(&Purpose::Add, &blank).unwrap_err(),
+        "the username and password are required"
+    );
+}
+
+#[test]
+fn a_login_edit_sends_only_the_half_that_was_typed() {
+    let info = login_info();
+    let mut form = forms::edit_handle(&info);
+    let purpose = Purpose::Edit(info.clone());
+    assert_eq!(
+        forms::submit(&purpose, &form).unwrap_err(),
+        "nothing changed"
+    );
+    forms::fill(&mut form, &values(&[("password", "a-new-password-4567")])).unwrap();
+    let Effect::Update { value, .. } = forms::submit(&purpose, &form).unwrap() else {
+        panic!("expected an update");
+    };
+    // The daemon keeps the username the handle has for the blank one.
+    assert_eq!(
+        value,
+        Some(SecretValue::Login {
+            username: SecretText::new(""),
+            password: SecretText::new("a-new-password-4567"),
+        })
+    );
+}
+
+#[test]
+fn a_login_policy_has_both_hosts_and_commands() {
+    let view = forms::describe(&forms::edit_policy(&login_info()));
+    assert_eq!(field(&view, "hosts").value, "jira.example.com");
+    assert_eq!(field(&view, "cmds").value, "curl");
+    for key in ["plain_http", "methods", "grant_ttl", "mode"] {
+        field(&view, key);
+    }
 }

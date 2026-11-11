@@ -44,6 +44,7 @@ kv add openrouter --kind http --host openrouter.ai --mode auto
 kv add aws --kind env --var AWS_ACCESS_KEY_ID --var AWS_SECRET_ACCESS_KEY \
   --cmd terraform             # mode ask: each use waits for you in kv tui
 kv add prod-db --kind postgres --read-only true   # prompts for the postgres:// URL
+kv add jira --kind login --host jira.example.com  # prompts for the username and password
 
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
@@ -53,7 +54,8 @@ The agent then sees these tools:
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
 - `exec`: runs a program (never a shell) with an `env` handle's variables set,
-  or with a `file` handle's file written for it to read (see below).
+  a `login` handle's username and password, or a `file` handle's file written
+  for it to read (see below).
 - `db_query`: runs SQL on a `postgres` handle or a command on a `redis`
   handle (see below).
 - `db_connect`: a connection URL on this machine for tools that need their own
@@ -79,6 +81,30 @@ from everything it gets back:
 ```sh
 kv add dokploy --kind http --base-url --header x-api-key --template '{}' --mode auto
 ```
+
+### Usernames and passwords
+
+A `login` handle keeps a username and password together, such as a service
+account's sign-in. The agent never sees either; kv uses them in two ways:
+
+- `http_request` sends them as HTTP Basic auth (`Authorization: Basic ...`),
+  only to the hosts you allow with `--host`.
+- `exec` gives them to the programs you allow with `--cmd`, as
+  `<NAME>_USERNAME` and `<NAME>_PASSWORD`: `JIRA_USERNAME` and `JIRA_PASSWORD`
+  for a handle named `jira` (a name that starts with a digit gets `KV_` in
+  front). `list_handles` tells the agent both names.
+
+```sh
+kv add jira --kind login --host jira.example.com --cmd curl
+```
+
+The username, the password and the Basic auth value made from them are all
+scrubbed from what the agent gets back. A username cannot contain a colon,
+since Basic auth ends the username at the first one. To change one half,
+edit the handle in the window or `kv tui` and leave the other blank: it
+keeps its value. A login can be shared like any handle (see sharing, below):
+it arrives in ask mode with the sender's allowed hosts, and without any
+programs. kv before this version cannot open a shared login.
 
 ### MCP servers with secrets
 
@@ -253,8 +279,9 @@ request in full; Handles is where you fill in agents' handle requests and
 add, edit, re-police, show or remove handles (each handle's ⋯ menu holds Show
 value, Edit, Access policy and Remove, and Edit can also show and copy the
 current value after the same confirmation; New handle starts by asking what
-the agent will use the secret for: a web API, a program or CLI, a Postgres or
-Redis database, or a file, so you need not know kv's kinds); then Shares (see sharing, below),
+the agent will use the secret for: a web API, signing in with a username and
+password, a program or CLI, a Postgres or Redis database, or a file, so you
+need not know kv's kinds); then Shares (see sharing, below),
 Audit, and Settings, which picks a light or dark look (or follows the
 system), turns the login item on or off, locks the vault and quits the tray.
 The menu and the window share one session; hiding the window keeps it, and
