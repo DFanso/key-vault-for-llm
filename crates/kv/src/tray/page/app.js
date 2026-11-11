@@ -33,7 +33,10 @@
     drawn: { cards: "", requests: "", handles: "", shares: "", home: "", audit: "" },
     // The longest wait each request has shown, to draw how much is left.
     lifetimes: new Map(),
+    // The mode the Handles screen shows: "all", or ask, auto or deny.
     handleFilter: "all",
+    // The ⋯ menu open on a handle's row: the button it hangs from.
+    rowMenu: null,
     // The kind tab chosen on the Handles screen: "all" or one of KIND_TABS.
     handleKind: "all",
     // The kind tab chosen on the Shares screen, over Received and Sent.
@@ -324,6 +327,7 @@
         if (typeof message.login === "boolean") page.login = message.login;
         if (message.theme) setTheme(message.theme);
         if (page.locked) {
+          closeRowMenu(false);
           closeForm(false);
           closeConfirm();
           closeReveal();
@@ -875,8 +879,12 @@
     const shape = JSON.stringify([handles, warnings, query, page.handleFilter, page.handleKind]);
     if (shape === page.drawn.handles) return;
     page.drawn.handles = shape;
+    closeRowMenu(false);
     updateKindTabs("handle-kinds", handles, page.handleKind);
+    // With nothing to find or sort, only New handle stays in the toolbar.
     show($("handle-kinds"), handles.length > 0);
+    show($("handle-find"), handles.length > 0);
+    show($("handle-mode-filter"), handles.length > 0);
     show($("no-handles"), handles.length === 0);
     const ofKind = handles.filter((h) => page.handleKind === "all" || h.kind === page.handleKind);
     const shown = ofKind.filter(
@@ -898,34 +906,94 @@
       const [modeText, modeTone, modeIcon, modeHint] = MODES[handle.mode] || [handle.mode, "tone-grey", "info", ""];
       const mode = chip(modeText, modeTone, modeIcon);
       mode.title = modeHint;
+      // The kind is the icon (and the tab); its name is the icon's tooltip.
+      const kindTile = el("span", `stat-icon ${tone}`, icon(kindIcon));
+      kindTile.title = kindLabel(handle.kind);
       const info = el(
         "div",
         "grow",
-        el("div", "chips", el("span", "name", handle.name), chip(handle.kind, "tone-grey"), mode, handle.read_only ? chip("read only", "tone-teal", "eye") : null),
+        el("div", "chips", el("span", "name", handle.name), mode, handle.read_only ? chip("read only", "tone-teal", "eye") : null),
         handle.description ? el("span", "desc", handle.description) : null,
         allows && allows.length > 0 ? el("span", "allows", allows.join(" · ")) : null,
         warnings[handle.name] ? el("div", "warning", icon("triangle-alert"), warnings[handle.name]) : null,
       );
-      const remove = iconButton("trash-2", `Remove ${handle.name}`, () => confirmRemove(handle.name), "danger");
-      remove.dataset.action = "remove";
-      const reveal = iconButton("eye", `Show the value of ${handle.name}`, () => askReveal(handle.name));
-      reveal.dataset.action = "reveal";
-      return el(
-        "li",
-        "row-item",
-        el("span", `stat-icon ${tone}`, icon(kindIcon)),
-        info,
-        el(
-          "div",
-          "row-actions",
-          reveal,
-          iconButton("pencil", `Edit ${handle.name}`, () => openRequest({ kind: "edit", name: handle.name })),
-          iconButton("sliders-horizontal", `Policy for ${handle.name}`, () => openRequest({ kind: "policy", name: handle.name })),
-          remove,
-        ),
-      );
+      const more = iconButton("ellipsis", `Actions for ${handle.name}`, (event) => openRowMenu(event.currentTarget, handle.name), "row-menu-button");
+      more.setAttribute("aria-haspopup", "menu");
+      more.setAttribute("aria-expanded", "false");
+      return el("li", "row-item", kindTile, info, more);
     });
     $("handle-rows").replaceChildren(...rows);
+  }
+
+  // A handle's actions, in one menu under its row's ⋯ button: the row
+  // stays a name to read, and what can be done to it is one click away.
+  const ROW_ACTIONS = [
+    ["Show value", "eye", (name) => askReveal(name)],
+    ["Edit", "pencil", (name) => openRequest({ kind: "edit", name })],
+    ["Access policy", "sliders-horizontal", (name) => openRequest({ kind: "policy", name })],
+    null,
+    ["Remove", "trash-2", (name) => confirmRemove(name), "danger"],
+  ];
+
+  function openRowMenu(anchor, name) {
+    const menu = $("row-menu");
+    const wasOpen = page.rowMenu && page.rowMenu.anchor === anchor;
+    closeRowMenu(false);
+    if (wasOpen) return;
+    const items = ROW_ACTIONS.map((action) => {
+      if (!action) return el("div", "separator");
+      const [label, iconName, act, className] = action;
+      const item = el("button", className || null, icon(iconName), el("span", "text", label));
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      item.tabIndex = -1;
+      item.addEventListener("click", () => {
+        closeRowMenu(false);
+        act(name);
+      });
+      return item;
+    });
+    menu.replaceChildren(...items);
+    menu.setAttribute("aria-label", `Actions for ${name}`);
+    show(menu, true);
+    // Under the button, its right edge on the button's; above it when there
+    // is no room below.
+    const at = anchor.getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    const below = at.bottom + 4 + box.height <= window.innerHeight - 8;
+    menu.style.top = `${below ? at.bottom + 4 : Math.max(8, at.top - 4 - box.height)}px`;
+    menu.style.left = `${Math.max(8, at.right - box.width)}px`;
+    anchor.setAttribute("aria-expanded", "true");
+    page.rowMenu = { anchor };
+    menu.querySelector("button").focus();
+  }
+
+  // `refocus` puts the cursor back on the ⋯ button, as after Esc.
+  function closeRowMenu(refocus) {
+    const open = page.rowMenu;
+    if (!open) return;
+    page.rowMenu = null;
+    show($("row-menu"), false);
+    $("row-menu").replaceChildren();
+    open.anchor.setAttribute("aria-expanded", "false");
+    if (refocus && open.anchor.isConnected) open.anchor.focus();
+  }
+
+  // Arrow keys move through the menu, Esc and Tab close it.
+  function rowMenuKey(event) {
+    const items = [...$("row-menu").querySelectorAll("button")];
+    const at = items.indexOf(document.activeElement);
+    const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: items.length - 1 }[event.key];
+    if (to !== undefined) {
+      event.preventDefault();
+      items[(to + items.length) % items.length].focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeRowMenu(true);
+    } else if (event.key === "Tab") {
+      closeRowMenu(false);
+    }
   }
 
   function drawShares(shares, handles) {
@@ -1137,6 +1205,7 @@
   // while it asks; it holds no value.
   function blurred() {
     if (page.revealAsking === null) closeReveal();
+    closeRowMenu(false);
   }
 
   function closeReveal() {
@@ -2241,10 +2310,24 @@
     }
     $("handle-search").addEventListener("input", () => page.overview && drawHandles(page.overview.handles, page.overview.role_warnings || {}));
     $("audit-search").addEventListener("input", drawAudit);
-    wireFilter("handle-filter", (filter) => {
-      page.handleFilter = filter;
+    $("handle-mode").addEventListener("change", () => {
+      page.handleFilter = $("handle-mode").value;
       if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});
     });
+    $("row-menu").addEventListener("keydown", rowMenuKey);
+    // A press anywhere else closes the menu; its own button toggles it.
+    document.addEventListener(
+      "mousedown",
+      (event) => {
+        if (!page.rowMenu) return;
+        if ($("row-menu").contains(event.target) || page.rowMenu.anchor.contains(event.target)) return;
+        closeRowMenu(false);
+      },
+      true,
+    );
+    // The menu is placed by the button; when the list moves, it goes.
+    document.querySelector(".scroll").addEventListener("scroll", () => closeRowMenu(false), { passive: true });
+    window.addEventListener("resize", () => closeRowMenu(false));
     buildKindTabs("handle-kinds", (kind) => {
       page.handleKind = kind;
       if (page.overview) drawHandles(page.overview.handles, page.overview.role_warnings || {});

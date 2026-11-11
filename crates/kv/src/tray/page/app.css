@@ -564,6 +564,36 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .row-item .desc { color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
 .row-item .allows { color: var(--muted); font-size: 12px; font-family: var(--mono); overflow-wrap: anywhere; }
 .row-actions { display: flex; gap: 2px; }
+/* The Handles toolbar: search, the mode to show, and New handle. */
+.mode-filter { flex: none; }
+/* Alone in the toolbar (no handles yet), New handle still sits on the right. */
+#add { margin-left: auto; }
+.mode-filter select { width: auto; min-width: 128px; padding-right: 30px; }
+#handles .kind-tabs { margin-top: -2px; }
+#handles .row-item .grow .chips { row-gap: 4px; }
+.row-menu-button { flex: none; align-self: center; }
+.row-menu-button[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent); }
+/* A handle's actions, opened from its ⋯ button. */
+.row-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 190px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.row-menu button { justify-content: flex-start; width: 100%; min-height: 32px; padding: 5px 10px; border-radius: 9px; font-weight: 600; color: var(--text); }
+.row-menu button .i { color: var(--text-2); }
+.row-menu button:hover, .row-menu button:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
+.row-menu button:hover .i, .row-menu button:focus-visible .i { color: currentColor; }
+.row-menu button.danger, .row-menu button.danger .i { color: var(--red); }
+.row-menu button.danger:hover, .row-menu button.danger:focus-visible { background: var(--red-soft); color: var(--red); }
+.row-menu .separator { height: 1px; margin: 4px 6px; background: var(--line); }
 .warning {
   display: flex;
   gap: 6px;
@@ -867,6 +897,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .i-x { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M18 6 6 18'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E"); }
 .i-clock { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpolyline points='12 6 12 12 16 14'/%3E%3C/svg%3E"); }
 .i-copy { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Crect width='14' height='14' x='8' y='8' rx='2' ry='2'/%3E%3Cpath d='M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'/%3E%3C/svg%3E"); }
+.i-ellipsis { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Ccircle cx='12' cy='12' r='1'/%3E%3Ccircle cx='19' cy='12' r='1'/%3E%3Ccircle cx='5' cy='12' r='1'/%3E%3C/svg%3E"); }
 .i-eye { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E"); }
 .i-pencil { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z'/%3E%3Cpath d='m15 5 4 4'/%3E%3C/svg%3E"); }
 .i-trash-2 { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M3 6h18'/%3E%3Cpath d='M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6'/%3E%3Cpath d='M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2'/%3E%3Cline x1='10' x2='10' y1='11' y2='17'/%3E%3Cline x1='14' x2='14' y1='11' y2='17'/%3E%3C/svg%3E"); }

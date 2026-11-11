@@ -153,23 +153,25 @@
 
       <section id="handles" aria-labelledby="page-title" hidden>
         <div id="requests" class="stack"></div>
-        <div id="handle-kinds" class="kind-tabs" role="tablist" aria-label="Kind of handle" aria-controls="handle-rows"></div>
         <div class="toolbar">
-          <label class="search"><span class="i i-search" aria-hidden="true"></span><span class="sr-only">Find a handle</span><input id="handle-search" type="search" placeholder="Find a handle" autocomplete="off" spellcheck="false"></label>
-          <div class="segmented" role="radiogroup" aria-label="Show" id="handle-filter">
-            <button type="button" role="radio" data-filter="all" aria-checked="true">All</button>
-            <button type="button" role="radio" data-filter="ask" aria-checked="false">Ask</button>
-            <button type="button" role="radio" data-filter="auto" aria-checked="false">Auto</button>
-            <button type="button" role="radio" data-filter="deny" aria-checked="false">Deny</button>
-          </div>
+          <label class="search" id="handle-find"><span class="i i-search" aria-hidden="true"></span><span class="sr-only">Find a handle</span><input id="handle-search" type="search" placeholder="Find a handle" autocomplete="off" spellcheck="false"></label>
+          <label class="mode-filter" id="handle-mode-filter"><span class="sr-only">Mode</span>
+            <select id="handle-mode">
+              <option value="all">Any mode</option>
+              <option value="ask">Ask</option>
+              <option value="auto">Auto</option>
+              <option value="deny">Deny</option>
+            </select>
+          </label>
           <input id="import-file" type="file" hidden>
           <input id="add-file-input" type="file" hidden>
           <button id="add" type="button" class="primary"><span class="i i-plus" aria-hidden="true"></span>New handle</button>
         </div>
+        <div id="handle-kinds" class="kind-tabs" role="tablist" aria-label="Kind of handle" aria-controls="handle-rows"></div>
         <div id="no-handles" class="empty">
           <span class="empty-icon tone-accent"><span class="i i-key-round" aria-hidden="true"></span></span>
           <strong>No handles yet</strong>
-          <span class="muted">A handle is a name agents use for a secret they never see. Add one, or wait for an agent to ask.</span>
+          <span class="muted">A handle is a name agents use for a secret they never see. Choose New handle, or wait for an agent to ask.</span>
         </div>
         <p id="no-match" class="muted center" hidden>No handle matches.</p>
         <ul id="handle-rows" class="list panel flush"></ul>
@@ -271,6 +273,9 @@
     <button type="button" class="ghost" data-quit><span class="i i-power" aria-hidden="true"></span>Quit</button>
   </footer>
 </div>
+
+<!-- A handle's actions, opened from its row's ⋯ button. -->
+<div id="row-menu" class="row-menu" role="menu" hidden></div>
 
 <dialog id="form-dialog" aria-labelledby="form-title">
   <form id="form">
