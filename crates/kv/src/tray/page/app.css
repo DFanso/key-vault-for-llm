@@ -666,6 +666,15 @@ dialog::backdrop { background: rgba(20, 16, 14, 0.5); }
 .field:last-child { margin-bottom: 0; }
 #share-about:not(:empty) { margin-bottom: 14px; }
 .field label, .field > .label { display: block; margin-bottom: 5px; font-weight: 600; color: var(--text-2); }
+/* An edit form's current value, behind Show value's check. */
+.current-value { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 8px 8px 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.current-value > .i { color: var(--accent); }
+.current-value .grow { flex: 1; min-width: 0; }
+button.small { min-height: 28px; padding: 3px 12px; font-size: 12.5px; }
+button.small .i { width: 14px; height: 14px; }
+/* A revealed value and its Copy button. */
+.reveal-value { display: flex; align-items: flex-start; gap: 8px; }
+.reveal-value .code-box { flex: 1; min-width: 0; }
 /* New handle, first step: a card per kind, in words of what it is for. */
 #form-picker > .muted:first-child { margin: 0 0 12px; }
 .picks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }

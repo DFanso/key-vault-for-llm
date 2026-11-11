@@ -299,6 +299,12 @@
         </button>
       </div>
     </div>
+    <!-- An edit form: the value it has now, shown only once the user confirms it is them. -->
+    <div id="form-current" class="current-value" hidden>
+      <span class="i i-key-round" aria-hidden="true"></span>
+      <span class="grow muted small">Fields left blank keep the current value.</span>
+      <button type="button" id="form-reveal" class="outline small"><span class="i i-eye" aria-hidden="true"></span>View or copy current value</button>
+    </div>
     <div id="form-fields"></div>
     <p id="form-error" class="message" role="alert"></p>
     <div class="actions">
