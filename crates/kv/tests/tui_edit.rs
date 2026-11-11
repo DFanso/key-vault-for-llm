@@ -43,6 +43,16 @@ fn screen(app: &App) -> String {
         .join("\n")
 }
 
+/// The screen's words in order, without borders or line breaks, so a
+/// sentence wrapped across lines still reads as one.
+fn words(app: &App) -> String {
+    screen(app)
+        .replace(['│', '┌', '┐', '└', '┘', '─'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Moves the focus to the field with this key.
 fn focus(app: &mut App, field: &str) {
     for _ in 0..30 {
@@ -180,21 +190,21 @@ fn a_new_http_handle_never_shows_its_token() {
 fn the_kind_says_what_each_option_is_for() {
     let mut app = handles(Vec::new());
     key(&mut app, 'n');
-    let drawn = screen(&app);
+    let drawn = words(&app);
     assert!(
         drawn.contains("Call a web API: An API key or token"),
         "{drawn}"
     );
     assert!(drawn.contains("can't be changed"), "{drawn}");
     press(&mut app, KeyCode::Right);
-    let drawn = screen(&app);
+    let drawn = words(&app);
     assert!(
         drawn.contains("Run a program or CLI: Environment"),
         "{drawn}"
     );
     assert!(drawn.contains("such as AWS keys"), "{drawn}");
     focus(&mut app, "name");
-    let drawn = screen(&app);
+    let drawn = words(&app);
     assert!(drawn.contains("Run a program or CLI"), "{drawn}");
     assert!(!drawn.contains("such as AWS keys"), "{drawn}");
 }
@@ -752,4 +762,46 @@ fn a_read_only_handle_whose_role_can_write_is_flagged() {
     assert!(line.contains("the role can write"), "{shown}");
     let other = shown.lines().find(|l| l.contains("openrouter")).unwrap();
     assert!(!other.contains("role can write"), "{shown}");
+}
+
+/// A login is the last kind on offer; its password is typed hidden, and
+/// the handle it saves takes hosts and commands.
+#[test]
+fn a_new_login_takes_a_hidden_password() {
+    let mut app = handles(Vec::new());
+    key(&mut app, 'n');
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Right);
+    }
+    let drawn = words(&app);
+    assert!(
+        drawn.contains("Sign in with a username and password"),
+        "{drawn}"
+    );
+    focus(&mut app, "name");
+    type_text(&mut app, "jira");
+    focus(&mut app, "username");
+    type_text(&mut app, "svc-reports");
+    focus(&mut app, "password");
+    type_text(&mut app, "w0rd-pass-0123456789");
+    let drawn = screen(&app);
+    assert!(drawn.contains("svc-reports"), "{drawn}");
+    assert!(!drawn.contains("w0rd-pass"), "{drawn}");
+    focus(&mut app, "hosts");
+    type_text(&mut app, "jira.example.com");
+    focus(&mut app, "cmds");
+    type_text(&mut app, "curl");
+    let Some(Effect::Add(secret)) = save(&mut app) else {
+        panic!("expected a new handle");
+    };
+    assert_eq!(secret.kind(), SecretKind::Login);
+    assert_eq!(
+        secret.value,
+        SecretValue::Login {
+            username: SecretText::new("svc-reports"),
+            password: SecretText::new("w0rd-pass-0123456789"),
+        }
+    );
+    assert_eq!(secret.policy.allowed_hosts, ["jira.example.com"]);
+    assert_eq!(secret.policy.allowed_cmds, ["curl"]);
 }

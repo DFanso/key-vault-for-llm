@@ -125,6 +125,7 @@
     postgres: ["database", "tone-amber"],
     redis: ["layers", "tone-red"],
     file: ["file", "tone-green"],
+    login: ["user-round", "tone-violet"],
   };
 
   // The tabs that sort handles by kind, in the order they show: All first,
@@ -134,6 +135,7 @@
     ["env", "Env"],
     ["file", "Files"],
     ["http", "HTTP"],
+    ["login", "Logins"],
     ["postgres", "Postgres"],
     ["redis", "Redis"],
   ];
@@ -849,7 +851,10 @@
     page.drawn.requests = shape;
     const cards = requests.map((requested) => {
       const r = requested.request;
-      const allows = r.kind === "env" ? r.env_vars : r.allowed_hosts;
+      const allows = {
+        env: r.env_vars,
+        login: [...r.allowed_hosts, ...r.allowed_cmds],
+      }[r.kind] || r.allowed_hosts;
       const [kindIcon, tone] = KINDS[r.kind] || ["key-round", "tone-accent"];
       return el(
         "article",
@@ -901,6 +906,7 @@
       const allows = {
         http: [...handle.allowed_hosts, ...handle.allowed_methods],
         env: handle.allowed_cmds,
+        login: [...handle.allowed_hosts, ...handle.allowed_cmds],
       }[handle.kind];
       const [kindIcon, tone] = KINDS[handle.kind] || ["key-round", "tone-accent"];
       const [modeText, modeTone, modeIcon, modeHint] = MODES[handle.mode] || [handle.mode, "tone-grey", "info", ""];
