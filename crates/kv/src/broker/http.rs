@@ -7,7 +7,7 @@ use std::time::Duration;
 use kv_core::policy::{Decision, Operation, evaluate};
 use kv_core::proto::{AgentErrorCode, AgentResponse, HttpReply, MAX_OUTPUT_LEN};
 use kv_core::scrub::Scrubber;
-use kv_core::secret::{AuthPlacement, SecretValue};
+use kv_core::secret::AuthPlacement;
 use reqwest::header::{CONTENT_ENCODING, HeaderValue};
 use reqwest::{Client, Method, Request, Response, StatusCode, redirect};
 
@@ -53,11 +53,11 @@ pub async fn send(client: &Client, job: HttpJob) -> AgentResponse {
 }
 
 async fn exchange(client: &Client, job: &HttpJob) -> Result<AgentResponse, AgentResponse> {
-    let SecretValue::Http {
-        token, placement, ..
-    } = &job.secret.value
-    else {
-        return Err(error(AgentErrorCode::BadRequest, "not an http handle"));
+    let Some((token, placement)) = job.secret.value.http_auth() else {
+        return Err(error(
+            AgentErrorCode::BadRequest,
+            "not an http or login handle",
+        ));
     };
     let mut method = Method::from_bytes(job.call.method.to_ascii_uppercase().as_bytes())
         .map_err(|_| error(AgentErrorCode::BadRequest, "invalid method"))?;
@@ -74,7 +74,7 @@ async fn exchange(client: &Client, job: &HttpJob) -> Result<AgentResponse, Agent
         let Some(mut next) = redirect_target(&response, &url) else {
             return reply(&job.scrubber, response).await;
         };
-        if let AuthPlacement::Query { param } = placement {
+        if let AuthPlacement::Query { param } = &placement {
             remove_param(&mut next, param);
         }
         let allowed = !matches!(
@@ -119,14 +119,14 @@ fn build(
     body: Option<&str>,
     with_auth: bool,
 ) -> Result<Request, AgentResponse> {
-    let SecretValue::Http {
-        token, placement, ..
-    } = &job.secret.value
-    else {
-        return Err(error(AgentErrorCode::BadRequest, "not an http handle"));
+    let Some((token, placement)) = job.secret.value.http_auth() else {
+        return Err(error(
+            AgentErrorCode::BadRequest,
+            "not an http or login handle",
+        ));
     };
     let mut url = url.clone();
-    if let (true, AuthPlacement::Query { param }) = (with_auth, placement) {
+    if let (true, AuthPlacement::Query { param }) = (with_auth, &placement) {
         remove_param(&mut url, param);
         url.query_pairs_mut().append_pair(param, token.expose());
     }
@@ -134,7 +134,7 @@ fn build(
     for (name, value) in &job.call.headers {
         builder = builder.header(name, value);
     }
-    if let (true, AuthPlacement::Header { name, template }) = (with_auth, placement) {
+    if let (true, AuthPlacement::Header { name, template }) = (with_auth, &placement) {
         let mut value =
             HeaderValue::from_str(&template.replace("{}", token.expose())).map_err(|_| {
                 error(

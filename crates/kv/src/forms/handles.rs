@@ -10,7 +10,7 @@ use kv_core::secret::{AuthPlacement, HandleInfo, Secret, SecretKind, SecretText,
 use super::{Explained, Field, Form};
 use crate::tui::app::Effect;
 
-const KINDS: &[&str] = &["http", "env", "postgres", "redis"];
+const KINDS: &[&str] = &["http", "env", "postgres", "redis", "login"];
 
 /// The kinds in the words of what an agent will do with the secret: someone
 /// adding their first handle knows they have "an OpenAI key", not that it
@@ -42,6 +42,13 @@ const KINDS_EXPLAINED: &[Explained] = &[
         detail: "A redis:// connection URL. Agents run commands with db_query or \
                  db_connect, and the handle can be made read only.",
     },
+    Explained {
+        value: "login",
+        title: "Sign in with a username and password",
+        detail: "A service account's username and password. Agents sign requests to \
+                 the hosts you allow with it, or pass it to the programs you allow, and \
+                 never see it.",
+    },
 ];
 const MODES: &[&str] = &["ask", "auto", "deny"];
 const NO_YES: &[&str] = &["no", "yes"];
@@ -65,10 +72,10 @@ pub fn new_handle() -> Form {
     fields.extend([
         Field::text("hosts", "Allowed hosts")
             .hint("comma-separated, e.g. api.example.com")
-            .when("kind", &["http"]),
+            .when("kind", &["http", "login"]),
         Field::text("cmds", "Allowed commands")
             .hint("comma-separated, e.g. terraform, aws")
-            .when("kind", &["env"]),
+            .when("kind", &["env", "login"]),
         Field::choice("mode", "Mode", MODES),
     ]);
     Form::new("New handle", fields)
@@ -120,6 +127,7 @@ pub fn requested_handle(requested: &RequestedHandle) -> Form {
     }
     form.focus_on(match kind {
         "http" => "token",
+        "login" => "username",
         "env" => "vars",
         _ => "url",
     });
@@ -169,11 +177,20 @@ pub fn edit_policy(handle: &HandleInfo) -> Form {
                 .with_text(&handle.allowed_methods.join(", "))
                 .hint("comma-separated; empty allows any"),
         ]),
-        SecretKind::Env | SecretKind::File => fields.push(
-            Field::text("cmds", "Allowed commands")
-                .with_text(&handle.allowed_cmds.join(", "))
-                .hint("comma-separated; empty denies all"),
-        ),
+        SecretKind::Env | SecretKind::File => fields.push(cmds_field(handle)),
+        // A login goes on requests to its hosts and to the programs it is
+        // given to, so it has both.
+        SecretKind::Login => fields.extend([
+            Field::text("hosts", "Allowed hosts")
+                .with_text(&handle.allowed_hosts.join(", "))
+                .hint("comma-separated; empty denies http_request"),
+            Field::choice("plain_http", "Allow plain http://", NO_YES)
+                .with_choice(yes_no(handle.allow_plain_http)),
+            Field::text("methods", "Allowed methods")
+                .with_text(&handle.allowed_methods.join(", "))
+                .hint("comma-separated; empty allows any"),
+            cmds_field(handle).hint("comma-separated; empty denies exec"),
+        ]),
         SecretKind::Postgres | SecretKind::Redis => fields.push(
             Field::choice("read_only", "Read only", NO_YES).with_choice(yes_no(handle.read_only)),
         ),
@@ -184,6 +201,12 @@ pub fn edit_policy(handle: &HandleInfo) -> Form {
             .hint("how long allow for session lasts, e.g. 15m or 1h"),
     );
     Form::new(format!("Policy for {}", handle.name), fields)
+}
+
+fn cmds_field(handle: &HandleInfo) -> Field {
+    Field::text("cmds", "Allowed commands")
+        .with_text(&handle.allowed_cmds.join(", "))
+        .hint("comma-separated; empty denies all")
 }
 
 /// The effect to send, or what is wrong with the form.
@@ -215,6 +238,8 @@ fn value_fields() -> Vec<Field> {
             .hint("NAME=value, Enter adds")
             .when("kind", &["env"]),
         Field::hidden("url", "URL").when("kind", &["postgres", "redis"]),
+        Field::text("username", "Username").when("kind", &["login"]),
+        Field::hidden("password", "Password").when("kind", &["login"]),
     ]
 }
 
@@ -224,6 +249,8 @@ fn prefill(field: Field, handle: &HandleInfo) -> Field {
     match (field.key, &handle.auth) {
         ("token", _) => field.hint("blank keeps the current token"),
         ("url", _) => field.hint("blank keeps the current URL"),
+        ("username", _) => field.hint("blank keeps the current username"),
+        ("password", _) => field.hint("blank keeps the current password"),
         ("base_url", _) => field.hint("blank keeps the current one"),
         ("vars", _) => field.hint("NAME=value, Enter adds or changes one; the others stay"),
         ("placement", Some(AuthPlacement::Query { .. })) => field.with_choice("query"),
@@ -242,6 +269,7 @@ fn add(form: &Form) -> Result<Effect, String> {
     let kind = form.chosen("kind");
     let value = value(form, kind)?.ok_or_else(|| match kind {
         "http" => "the token is required".to_owned(),
+        "login" => "the username and password are required".to_owned(),
         "env" => "add at least one variable: NAME=value, then Enter".to_owned(),
         _ => "the URL is required".to_owned(),
     })?;
@@ -335,6 +363,19 @@ fn value(form: &Form, kind: &str) -> Result<Option<SecretValue>, String> {
                 token: SecretText::new(token),
                 placement: placement(form),
                 base_url: (!base_url.is_empty()).then(|| base_url.to_owned()),
+            })
+        }
+        // On an edit, a blank half keeps what the handle has; a new handle
+        // needs both, which the daemon checks.
+        "login" => {
+            let username = form.text("username");
+            let password = form.field("password").text.as_str();
+            if username.is_empty() && password.is_empty() {
+                return Ok(None);
+            }
+            Some(SecretValue::Login {
+                username: SecretText::new(username),
+                password: SecretText::new(password),
             })
         }
         "env" => {
@@ -438,6 +479,7 @@ fn kind_name(kind: SecretKind) -> &'static str {
         SecretKind::File => "file",
         SecretKind::Postgres => "postgres",
         SecretKind::Redis => "redis",
+        SecretKind::Login => "login",
     }
 }
 

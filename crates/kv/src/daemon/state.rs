@@ -800,12 +800,13 @@ impl Daemon {
         }
         // Few enough to read in full in the form, which is where the user
         // decides where the token may go.
-        if request.kind == SecretKind::Http && request.allowed_hosts.len() > MAX_REQUESTED_HOSTS {
+        let takes_hosts = matches!(request.kind, SecretKind::Http | SecretKind::Login);
+        if takes_hosts && request.allowed_hosts.len() > MAX_REQUESTED_HOSTS {
             return bad(format!(
                 "ask for at most {MAX_REQUESTED_HOSTS} hosts; the user can add more"
             ));
         }
-        if request.kind == SecretKind::Http
+        if takes_hosts
             && let Some(host) = request
                 .allowed_hosts
                 .iter()
@@ -836,10 +837,13 @@ impl Daemon {
                     param: printable(&param, 100),
                 },
             });
-            request.allowed_hosts = list(request.allowed_hosts, &|_| true, MAX_REQUESTED_HOSTS);
         } else {
             request.auth = None;
             request.base_url = false;
+        }
+        if takes_hosts {
+            request.allowed_hosts = list(request.allowed_hosts, &|_| true, MAX_REQUESTED_HOSTS);
+        } else {
             request.allowed_hosts.clear();
         }
         if request.kind == SecretKind::Env {
@@ -859,6 +863,10 @@ impl Daemon {
                     envvars::list(&risky)
                 ));
             }
+            request.allowed_cmds = list(request.allowed_cmds, &|_| true, 16);
+        } else if request.kind == SecretKind::Login {
+            // A login's two variables are named after the handle.
+            request.env_vars.clear();
             request.allowed_cmds = list(request.allowed_cmds, &|_| true, 16);
         } else {
             request.env_vars.clear();
@@ -1082,23 +1090,21 @@ impl Daemon {
                     );
                 }
             }
-            if let SecretValue::Env { vars } = &secret.value {
-                for (var, value) in vars {
-                    let key = if cfg!(windows) {
-                        var.to_ascii_uppercase()
+            for (var, value) in secret.value.exec_vars(name) {
+                let key = if cfg!(windows) {
+                    var.to_ascii_uppercase()
+                } else {
+                    var.clone()
+                };
+                if let Some(other) = set_by.insert(key, name) {
+                    let message = if other == name.as_str() {
+                        format!("{name} is listed twice")
                     } else {
-                        var.clone()
+                        format!("{other} and {name} both set {var}")
                     };
-                    if let Some(other) = set_by.insert(key, name) {
-                        let message = if other == name.as_str() {
-                            format!("{name} is listed twice")
-                        } else {
-                            format!("{other} and {name} both set {var}")
-                        };
-                        return refuse(self, "invalid", bad(&message));
-                    }
-                    env.push((var.clone(), value.clone()));
+                    return refuse(self, "invalid", bad(&message));
                 }
+                env.push((var, value));
             }
             if let Some((file_name, bytes)) = secret.value.file_parts() {
                 let env_var = file_env_var(name);
@@ -2307,6 +2313,22 @@ fn update(
         {
             *base_url = Some(old.clone());
         }
+        // A login's edit may change one half: a blank one keeps its value.
+        if let (
+            SecretValue::Login { username, password },
+            SecretValue::Login {
+                username: old_username,
+                password: old_password,
+            },
+        ) = (&mut value, &previous.value)
+        {
+            if username.expose().is_empty() {
+                *username = old_username.clone();
+            }
+            if password.expose().is_empty() {
+                *password = old_password.clone();
+            }
+        }
         validate_value(&value)?;
         updated.value = value;
     }
@@ -2375,6 +2397,7 @@ fn kind_name(kind: SecretKind) -> &'static str {
         SecretKind::Redis => "redis",
         SecretKind::Env => "env",
         SecretKind::File => "file",
+        SecretKind::Login => "login",
     }
 }
 
@@ -2545,6 +2568,29 @@ fn validate_value(value: &SecretValue) -> Result<(), Failure> {
                 return invalid(&why.to_string());
             }
         }
+        SecretValue::Login { username, password } => {
+            let (username, password) = (username.expose(), password.expose());
+            if username.is_empty() {
+                return invalid("the username is empty");
+            }
+            if password.is_empty() {
+                return invalid("the password is empty");
+            }
+            if username.len() > MAX_VALUE_LEN || password.len() > MAX_VALUE_LEN {
+                return invalid(TOO_LONG);
+            }
+            // HTTP Basic auth ends the username at its first colon.
+            if username.contains(':') {
+                return invalid("a username cannot contain a colon");
+            }
+            if username
+                .chars()
+                .chain(password.chars())
+                .any(char::is_control)
+            {
+                return invalid("a username or password cannot contain line breaks or tabs");
+            }
+        }
         SecretValue::Env { vars } => {
             if vars.len() > MAX_ENV_VARS {
                 return invalid("an env handle holds at most 256 variables");
@@ -2596,6 +2642,9 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
     let mut short_values: Vec<String> = Vec::new();
     match &secret.value {
         SecretValue::Http { token, .. } if short(token) => short_values.push(name.clone()),
+        SecretValue::Login { password, .. } if short(password) => {
+            short_values.push(format!("{name}'s password"))
+        }
         SecretValue::Postgres { url } | SecretValue::Redis { url } if short(url) => {
             short_values.push(name.clone())
         }
@@ -2642,6 +2691,15 @@ fn warnings_for(secret: &Secret) -> Vec<String> {
         }
         // A server's secrets are meant for its run command alone; suggesting
         // `--cmd` would let `exec` give them to other programs too.
+        SecretValue::Login { .. }
+            if secret.policy.allowed_hosts.is_empty() && secret.policy.allowed_cmds.is_empty() =>
+        {
+            warnings.push(format!(
+                "{name} has no allowed hosts or commands, so every use of it is denied; add a \
+                 host with `kv policy {name} --host <host>` or a program with `kv policy {name} \
+                 --cmd <program>`"
+            ));
+        }
         SecretValue::Env { .. }
             if secret.policy.allowed_cmds.is_empty() && secret.policy.run.is_none() =>
         {
@@ -2748,6 +2806,9 @@ fn fields_of(value: &SecretValue, file_text: bool) -> Vec<RevealedField> {
             fields
         }
         SecretValue::Postgres { url } | SecretValue::Redis { url } => vec![field("URL", url)],
+        SecretValue::Login { username, password } => {
+            vec![field("Username", username), field("Password", password)]
+        }
         SecretValue::Env { vars } => vars
             .iter()
             .map(|(name, value)| field(name, value))
@@ -2984,11 +3045,8 @@ fn check_method(method: &str) -> Result<(), String> {
 }
 
 fn check_headers(secret: &Secret, headers: &BTreeMap<String, String>) -> Result<(), String> {
-    let auth_header = match &secret.value {
-        SecretValue::Http {
-            placement: AuthPlacement::Header { name, .. },
-            ..
-        } => Some(name.as_str()),
+    let auth_header = match secret.value.http_auth() {
+        Some((_, AuthPlacement::Header { name, .. })) => Some(name),
         _ => None,
     };
     for (name, value) in headers {
@@ -3000,7 +3058,10 @@ fn check_headers(secret: &Secret, headers: &BTreeMap<String, String>) -> Result<
         if RESERVED_HEADERS.contains(&lower.as_str()) {
             return Err(format!("the {name} header is set by kv"));
         }
-        if auth_header.is_some_and(|auth| auth.eq_ignore_ascii_case(name)) {
+        if auth_header
+            .as_ref()
+            .is_some_and(|auth| auth.eq_ignore_ascii_case(name))
+        {
             return Err(format!(
                 "the {name} header carries this handle's credential and is set by kv"
             ));

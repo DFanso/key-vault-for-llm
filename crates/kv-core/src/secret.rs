@@ -112,6 +112,26 @@ pub fn file_env_var(handle: &str) -> String {
     format!("KV_FILE_{}", handle.to_ascii_uppercase().replace('-', "_"))
 }
 
+/// The variables that carry a `login` handle's username and password to a
+/// program kv starts: the handle's name in capitals with `_USERNAME` and
+/// `_PASSWORD`, such as `JIRA_USERNAME`. A name that starts with a digit
+/// gets `KV_` in front, since a variable cannot.
+pub fn login_env_vars(handle: &str) -> [String; 2] {
+    let mut stem = handle.to_ascii_uppercase().replace('-', "_");
+    if stem.starts_with(|c: char| c.is_ascii_digit()) {
+        stem.insert_str(0, "KV_");
+    }
+    [format!("{stem}_USERNAME"), format!("{stem}_PASSWORD")]
+}
+
+/// Where a `login` handle's credential goes on a request: HTTP Basic auth.
+fn basic_auth() -> AuthPlacement {
+    AuthPlacement::Header {
+        name: "Authorization".into(),
+        template: "Basic {}".into(),
+    }
+}
+
 /// A secret string. Zeroed on drop; `Debug` never shows it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -141,6 +161,7 @@ pub enum SecretKind {
     Redis,
     Env,
     File,
+    Login,
 }
 
 /// Where an HTTP token goes on the outgoing request.
@@ -189,6 +210,14 @@ pub enum SecretValue {
         #[serde(default)]
         sha256: String,
     },
+    /// A username and password, such as a service account's sign-in.
+    /// Agents use it with `http_request` (as HTTP Basic auth, to the
+    /// allowed hosts) or `exec` (as two variables, to the allowed
+    /// programs), and never see either.
+    Login {
+        username: SecretText,
+        password: SecretText,
+    },
 }
 
 impl SecretValue {
@@ -199,6 +228,47 @@ impl SecretValue {
             Self::Redis { .. } => SecretKind::Redis,
             Self::Env { .. } => SecretKind::Env,
             Self::File { .. } => SecretKind::File,
+            Self::Login { .. } => SecretKind::Login,
+        }
+    }
+
+    /// What `http_request` attaches, and where: an `http` handle's token
+    /// as its placement says, or a `login` handle's `username:password`
+    /// in base64 as HTTP Basic auth. `None` for kinds that never go on a
+    /// request.
+    pub fn http_auth(&self) -> Option<(SecretText, AuthPlacement)> {
+        match self {
+            Self::Http {
+                token, placement, ..
+            } => Some((token.clone(), placement.clone())),
+            Self::Login { username, password } => {
+                let pair = Zeroizing::new(format!("{}:{}", username.expose(), password.expose()));
+                Some((
+                    SecretText::new(STANDARD.encode(pair.as_bytes())),
+                    basic_auth(),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The variables `exec` sets for a handle named `handle`: an `env`
+    /// handle's own, or a `login` handle's username and password under
+    /// `login_env_vars`. None for other kinds.
+    pub fn exec_vars(&self, handle: &str) -> Vec<(String, SecretText)> {
+        match self {
+            Self::Env { vars } => vars
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            Self::Login { username, password } => {
+                let [user_var, password_var] = login_env_vars(handle);
+                vec![
+                    (user_var, username.clone()),
+                    (password_var, password.clone()),
+                ]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -330,12 +400,10 @@ impl Secret {
         let env_vars = match &self.value {
             SecretValue::Env { vars } => vars.keys().cloned().collect(),
             SecretValue::File { .. } => vec![file_env_var(&self.name)],
+            SecretValue::Login { .. } => login_env_vars(&self.name).into(),
             _ => Vec::new(),
         };
-        let auth = match &self.value {
-            SecretValue::Http { placement, .. } => Some(placement.clone()),
-            _ => None,
-        };
+        let auth = self.value.http_auth().map(|(_, placement)| placement);
         HandleInfo {
             name: self.name.clone(),
             kind: self.kind(),
@@ -367,8 +435,9 @@ impl Secret {
 
     /// Every string that must never appear in output: the token or URL, for
     /// connection URLs the password both as written and percent-decoded and
-    /// the host unless it is loopback, and for an http `base_url` the URL
-    /// and its host.
+    /// the host unless it is loopback, for an http `base_url` the URL and
+    /// its host, and for a login its username, password and Basic auth
+    /// value.
     pub fn sensitive_values(&self) -> Vec<Zeroizing<String>> {
         let mut out = Vec::new();
         match &self.value {
@@ -424,6 +493,15 @@ impl Secret {
                 out.extend(vars.values().map(|v| Zeroizing::new(v.expose().to_owned())));
             }
             SecretValue::File { .. } => out.extend(self.file_lines()),
+            // The username too: it is half of the credential, and the
+            // Basic auth value would give both away.
+            SecretValue::Login { username, password } => {
+                out.push(Zeroizing::new(username.expose().to_owned()));
+                out.push(Zeroizing::new(password.expose().to_owned()));
+                if let Some((basic, _)) = self.value.http_auth() {
+                    out.push(Zeroizing::new(basic.expose().to_owned()));
+                }
+            }
         }
         out
     }

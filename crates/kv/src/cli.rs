@@ -214,26 +214,30 @@ enum Kind {
     Redis,
     Env,
     File,
+    /// A username and password: sent as HTTP Basic auth to --host, or set
+    /// as <NAME>_USERNAME and <NAME>_PASSWORD for --cmd programs
+    Login,
 }
 
 #[derive(Args)]
 struct PolicyArgs {
     #[arg(long, value_enum)]
     mode: Option<ModeArg>,
-    /// http: host or host:port the token may be sent to (repeat; "" clears)
+    /// http, login: host or host:port the credential may be sent to
+    /// (repeat; "" clears)
     #[arg(long = "host", value_name = "HOST")]
     hosts: Vec<String>,
-    /// http: allow plain http:// URLs
+    /// http, login: allow plain http:// URLs
     #[arg(long, value_name = "BOOL")]
     allow_plain_http: Option<bool>,
-    /// http: allowed method (repeat; "" clears, meaning any method)
+    /// http, login: allowed method (repeat; "" clears, meaning any method)
     #[arg(long = "method", value_name = "METHOD")]
     methods: Vec<String>,
     /// postgres/redis: refuse writes
     #[arg(long, value_name = "BOOL")]
     read_only: Option<bool>,
-    /// env: program allowed to receive the variables, a bare name or an
-    /// absolute path (repeat; "" clears)
+    /// env, file, login: program allowed to receive the variables, a bare
+    /// name or an absolute path (repeat; "" clears)
     #[arg(long = "cmd", value_name = "PROGRAM")]
     cmds: Vec<String>,
     /// How long "allow for session" approvals last
@@ -986,6 +990,10 @@ fn read_value(args: &AddArgs, input: &mut Input) -> Result<SecretValue> {
             }
             SecretValue::Env { vars }
         }
+        Kind::Login => SecretValue::Login {
+            username: trimmed(input.line(&format!("Username for {name}: "))?),
+            password: input.secret(&format!("Password for {name}: "))?,
+        },
         Kind::File => {
             let path = args
                 .file
@@ -1077,6 +1085,19 @@ impl Input {
         if self.interactive {
             return rpassword::prompt_password(prompt).map(SecretText::new);
         }
+        self.read_line(prompt)
+    }
+
+    /// Like `secret`, but a terminal shows what is typed: for a username,
+    /// which is easier to get right when seen.
+    fn line(&mut self, prompt: &str) -> io::Result<SecretText> {
+        if self.interactive {
+            eprint!("{prompt}");
+        }
+        self.read_line(prompt)
+    }
+
+    fn read_line(&mut self, prompt: &str) -> io::Result<SecretText> {
         let mut line = Zeroizing::new(String::new());
         if io::stdin().lock().read_line(&mut line)? == 0 {
             return Err(io::Error::new(
