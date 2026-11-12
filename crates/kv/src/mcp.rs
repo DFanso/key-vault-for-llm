@@ -47,7 +47,9 @@ pub struct HttpRequestArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecArgs {
-    /// env handles whose variables the program receives.
+    /// env handles whose variables the program receives; login handles,
+    /// which set the two variables list_handles names for them, such as
+    /// JIRA_USERNAME and JIRA_PASSWORD; and file handles.
     handles: Vec<String>,
     /// The program and its arguments, such as ["terraform", "plan"]. Never
     /// run through a shell.
@@ -88,7 +90,8 @@ pub struct DbConnectArgs {
 pub struct RequestHandleArgs {
     /// Handle name: lowercase letters, digits, - and _, such as prod-db.
     name: String,
-    /// http, env, postgres or redis.
+    /// http, login, env, postgres or redis. login is a username and
+    /// password, used as HTTP Basic auth or as two variables for a program.
     kind: String,
     /// Shown to agents in list_handles, such as "Staging Dokploy API".
     #[serde(default)]
@@ -109,13 +112,15 @@ pub struct RequestHandleArgs {
     /// then send paths and the user enters the base URL.
     #[serde(default)]
     base_url: bool,
-    /// http: hosts the token may be sent to, such as api.example.com.
+    /// http, login: hosts the credential may be sent to, such as
+    /// api.example.com.
     #[serde(default)]
     allowed_hosts: Vec<String>,
     /// env: names of the variables the handle should set.
     #[serde(default)]
     env_vars: Vec<String>,
-    /// env: programs allowed to receive them, such as terraform.
+    /// env, login: programs allowed to receive the variables, such as
+    /// terraform.
     #[serde(default)]
     allowed_cmds: Vec<String>,
 }
@@ -256,7 +261,7 @@ impl KvServer {
     }
 
     #[tool(
-        description = "Run a program with the variables of one or more env handles set. Returns the exit code, stdout and stderr (each at most 256 KiB), with secrets replaced by [kv:<handle>]. If a handle's mode is ask, this waits up to 60 s for the user to approve it in kv tui."
+        description = "Run a program with the variables of one or more env or login handles set. Returns the exit code, stdout and stderr (each at most 256 KiB), with secrets replaced by [kv:<handle>]. If a handle's mode is ask, this waits up to 60 s for the user to approve it in kv tui."
     )]
     async fn exec(
         &self,
@@ -332,12 +337,13 @@ impl KvServer {
     ) -> Result<CallToolResult, ErrorData> {
         let kind = match args.kind.as_str() {
             "http" => SecretKind::Http,
+            "login" => SecretKind::Login,
             "env" => SecretKind::Env,
             "postgres" => SecretKind::Postgres,
             "redis" => SecretKind::Redis,
             _ => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "bad_request: kind must be http, env, postgres or redis",
+                    "bad_request: kind must be http, login, env, postgres or redis",
                 )]));
             }
         };

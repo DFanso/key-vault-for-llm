@@ -181,12 +181,15 @@ pub fn evaluate(secret: &Secret, op: &Operation<'_>) -> Decision {
     let kind = secret.kind();
     let kind_ok = matches!(
         (op, kind),
-        (Operation::Http { .. }, SecretKind::Http)
+        (Operation::Http { .. }, SecretKind::Http | SecretKind::Login)
             | (
                 Operation::DbQuery | Operation::DbConnect,
                 SecretKind::Postgres | SecretKind::Redis
             )
-            | (Operation::Exec { .. }, SecretKind::Env | SecretKind::File)
+            | (
+                Operation::Exec { .. },
+                SecretKind::Env | SecretKind::File | SecretKind::Login
+            )
             | (Operation::Run, SecretKind::Env)
     );
     if !kind_ok {
