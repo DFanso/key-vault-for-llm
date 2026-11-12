@@ -164,6 +164,9 @@ pub struct Form {
     pub(crate) fields: Vec<Field>,
     /// `fields.len()` is the Save row.
     pub(crate) focus: usize,
+    /// The handle an edit form changes, so the window can offer to show
+    /// its current value (after the user confirms it is them).
+    handle: Option<String>,
 }
 
 impl Form {
@@ -172,6 +175,7 @@ impl Form {
             title: title.into(),
             fields,
             focus: 0,
+            handle: None,
         };
         if !form.is_shown(0) {
             form.move_focus(1);
@@ -179,8 +183,19 @@ impl Form {
         form
     }
 
+    /// Marks the form as editing `name`'s value.
+    pub fn editing(mut self, name: &str) -> Self {
+        self.handle = Some(name.to_owned());
+        self
+    }
+
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The handle whose value the form edits, if it does.
+    pub fn handle(&self) -> Option<&str> {
+        self.handle.as_deref()
     }
 
     /// The key of the focused field, or `None` on the Save row.
@@ -301,6 +316,11 @@ pub struct FormView {
     pub fields: Vec<FieldView>,
     /// The field to put the cursor in.
     pub focus: Option<String>,
+    /// The handle an edit form changes: the window offers to show and copy
+    /// its current value, through the same check as Show value. Its name
+    /// only; the value never comes with a form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,6 +388,7 @@ pub fn describe(form: &Form) -> FormView {
     FormView {
         title: form.title().to_owned(),
         focus: form.focused().map(str::to_owned),
+        handle: form.handle().map(str::to_owned),
         fields: form
             .fields
             .iter()

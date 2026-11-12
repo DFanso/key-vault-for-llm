@@ -317,6 +317,27 @@ fn env_edit() -> (forms::Form, Purpose) {
     (forms::edit_handle(&info), Purpose::Edit(info))
 }
 
+/// An edit form names its handle, so the window can offer to show its
+/// current value; other forms name none, and none carries a value.
+#[test]
+fn only_an_edit_form_names_its_handle() {
+    let (form, _) = env_edit();
+    let view = forms::describe(&form);
+    assert_eq!(view.handle.as_deref(), Some("demo-env"));
+    assert!(
+        !serde_json::to_string(&view)
+            .unwrap()
+            .contains("demo-a-value")
+    );
+
+    let new = serde_json::to_string(&forms::describe(&forms::new_handle())).unwrap();
+    assert!(!new.contains("\"handle\""), "{new}");
+    let (_, Purpose::Edit(info)) = env_edit() else {
+        panic!("not an edit");
+    };
+    assert_eq!(forms::describe(&forms::edit_policy(&info)).handle, None);
+}
+
 #[test]
 fn editing_an_env_handle_shows_its_variables_by_name_only() {
     let (form, _) = env_edit();
