@@ -290,6 +290,15 @@ menu. Treat a kv window that appears on its own, asking for your passphrase,
 as fake. On Windows the window needs the Microsoft Edge WebView2 Runtime,
 which Windows 10 and 11 normally have.
 
+<p align="center">
+  <img src="docs/images/tray-menu.png" width="300" alt="The tray's menu beside the icon: one request waiting, Open kv, Lock kv, Start at login and Quit kv tray">
+</p>
+
+| | |
+|---|---|
+| ![kv's window, Home: one request waiting, six handles and the latest activity](docs/images/tray-home.png) | ![Approvals: claude-code asks to use the github handle for a GET request, with Allow once, Allow for this session, Deny and Deny and block](docs/images/tray-approvals.png) |
+| ![Handles: search, a mode filter, New handle, tabs by kind and a ⋯ menu on each handle](docs/images/tray-handles.png) | ![New handle asks what the agent will use the secret for: a web API, a program or CLI, Postgres, Redis or a username and password](docs/images/tray-new-handle.png) |
+
 The window has no frame, so it opens beside the icon like the menu and hides
 when you click elsewhere, with three exceptions. Drag it by its title bar and
 it is yours: it stays where you put it, above other windows, until you hide it
