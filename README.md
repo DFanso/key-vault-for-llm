@@ -250,7 +250,8 @@ kv's window. The window does everything `kv tui`
 does without a terminal: Home shows what is waiting, your handles and shares,
 and the latest activity, with quick actions; Approvals has each waiting
 request in full; Handles is where you fill in agents' handle requests and
-add, edit, re-police, show or remove handles (New handle starts by asking what
+add, edit, re-police, show or remove handles (each handle's ⋯ menu holds Show
+value, Edit, Access policy and Remove; New handle starts by asking what
 the agent will use the secret for: a web API, a program or CLI, a Postgres or
 Redis database, or a file, so you need not know kv's kinds); then Shares (see sharing, below),
 Audit, and Settings, which picks a light or dark look (or follows the
