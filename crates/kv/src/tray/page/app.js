@@ -1171,8 +1171,14 @@
     show($("reveal-ask"), false);
     show($("reveal-shown"), true);
     $("reveal-title").textContent = handle;
+    // Each value with its own Copy, so one variable of several can be taken.
     $("reveal-fields").replaceChildren(
-      ...fields.map((f) => el("div", "field", el("label", null, f.label), el("div", "code-box secret-value", f.value))),
+      ...fields.map((f) => {
+        const value = el("div", "code-box secret-value", f.value);
+        const copy = button("Copy", (event) => copyText(value, event.currentTarget.querySelector(".text")), "outline small", "copy");
+        copy.setAttribute("aria-label", `Copy ${f.label}`);
+        return el("div", "field", el("label", null, f.label), el("div", "reveal-value", value, copy));
+      }),
     );
     // A received file can be saved as it is; nothing else has a Save.
     const info = ((page.overview && page.overview.handles) || []).find((h) => h.name === handle);
@@ -1613,6 +1619,7 @@
       return pick;
     });
     $("form-picks").replaceChildren(...picks);
+    show($("form-current"), false);
     show($("form-picker"), true);
     show($("form-fields"), false);
     show($("form-save"), false);
@@ -1623,6 +1630,9 @@
   // The form's fields, with the cursor in `focusKey` if it is shown.
   function showFields(focusKey) {
     $("form-title").textContent = page.form.title;
+    // Editing a handle: its current value is a click away, behind the same
+    // check as Show value.
+    show($("form-current"), Boolean(page.form.handle));
     show($("form-picker"), false);
     show($("form-fields"), true);
     show($("form-save"), true);
@@ -1842,6 +1852,7 @@
     $("form").reset();
     $("form-fields").replaceChildren();
     $("form-picks").replaceChildren();
+    show($("form-current"), false);
     show($("form-picker"), false);
     show($("form-fields"), true);
     show($("form-save"), true);
@@ -2343,6 +2354,9 @@
     wireFilter("audit-filter", (filter) => {
       page.auditFilter = filter;
       drawAudit();
+    });
+    $("form-reveal").addEventListener("click", () => {
+      if (page.form && page.form.handle) askReveal(page.form.handle);
     });
     $("form").addEventListener("submit", submitForm);
     $("form-cancel").addEventListener("click", () => closeForm(true));
