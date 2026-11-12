@@ -635,7 +635,31 @@ dialog::backdrop { background: rgba(20, 16, 14, 0.5); }
 .field { margin: 0 0 14px; }
 .field:last-child { margin-bottom: 0; }
 #share-about:not(:empty) { margin-bottom: 14px; }
-.field label { display: block; margin-bottom: 5px; font-weight: 600; color: var(--text-2); }
+.field label, .field > .label { display: block; margin-bottom: 5px; font-weight: 600; color: var(--text-2); }
+/* New handle, first step: a card per kind, in words of what it is for. */
+#form-picker > .muted:first-child { margin: 0 0 12px; }
+.picks { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.picks-label { margin: 16px 0 8px; font-weight: 600; }
+.pick {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--glass);
+  text-align: left;
+  white-space: normal;
+  font-weight: 500;
+}
+.pick:hover, .pick:focus-visible { border-color: var(--accent); background: var(--glass-hover); }
+.pick-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.pick-text strong { font-size: 13.5px; color: var(--text); }
+/* The chosen kind inside the form, with a way back to the cards. */
+.explained { display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.explained .pick-text { flex: 1; }
+.explained .link { flex: none; }
 .hint { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 div.actions { position: sticky; bottom: 0; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; padding: 14px 0 20px; background: var(--surface); }
 dialog .message:not(:empty) { margin-top: 10px; }
@@ -722,7 +746,7 @@ dialog .message:not(:empty) { margin-top: 10px; }
    their icons and counts, and the screens stack. */
 @media (max-width: 720px) and (min-width: 400px) {
   .tabs .label, .app-footer .hints { display: none; }
-  .stats, .share-actions, .columns { grid-template-columns: 1fr; }
+  .stats, .share-actions, .columns, .picks { grid-template-columns: 1fr; }
 }
 
 /* Motion: views and screens come in, controls ease between states. */

@@ -21,10 +21,23 @@ pub enum Input {
     Pairs,
 }
 
+/// One option of a choice, or one other way to do what the form does, in
+/// words for someone who does not know kv's terms yet.
+pub struct Explained {
+    /// The option it explains, or for a way elsewhere, its key.
+    pub value: &'static str,
+    /// What picking it means, e.g. "Call a web API".
+    pub title: &'static str,
+    /// When to pick it and what agents can then do.
+    pub detail: &'static str,
+}
+
 pub struct Field {
     pub key: &'static str,
     pub label: &'static str,
     pub input: Input,
+    /// For a choice: what its options mean, by option.
+    pub explained: &'static [Explained],
     pub text: Zeroizing<String>,
     pub choice: usize,
     pub pairs: Vec<(String, SecretText)>,
@@ -51,6 +64,7 @@ impl Field {
             key,
             label,
             input,
+            explained: &[],
             text: Zeroizing::new(String::new()),
             choice: 0,
             pairs: Vec::new(),
@@ -103,6 +117,17 @@ impl Field {
     pub fn hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = hint.into();
         self
+    }
+
+    pub fn explained(mut self, explained: &'static [Explained]) -> Self {
+        self.explained = explained;
+        self
+    }
+
+    /// What the selected option of a choice means, if the field says.
+    pub fn about_chosen(&self) -> Option<&'static Explained> {
+        let chosen = self.chosen();
+        self.explained.iter().find(|e| e.value == chosen)
     }
 
     /// Drawn by kv tui only; see `tui_only`.
@@ -297,6 +322,9 @@ pub struct FieldView {
     /// whose blank value keeps what is there. Never a value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub existing: Vec<String>,
+    /// For a choice: what each option means.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explained: Vec<ExplainedView>,
     /// Shown only while each of these choice fields has one of its options:
     /// the field this one depends on, then the one that depends on, and so
     /// on, so a field is hidden along with the field it hangs from.
@@ -311,6 +339,23 @@ pub enum FieldKind {
     Choice,
     /// `NAME=value` lines.
     Pairs,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExplainedView {
+    pub value: String,
+    pub title: String,
+    pub detail: String,
+}
+
+impl From<&Explained> for ExplainedView {
+    fn from(explained: &Explained) -> Self {
+        Self {
+            value: explained.value.to_owned(),
+            title: explained.title.to_owned(),
+            detail: explained.detail.to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,6 +392,7 @@ pub fn describe(form: &Form) -> FormView {
                     hint: field.hint.clone(),
                     suggested: field.suggested.clone(),
                     existing: field.existing.clone(),
+                    explained: field.explained.iter().map(ExplainedView::from).collect(),
                     when: conditions(form, field),
                 }
             })

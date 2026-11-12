@@ -268,6 +268,26 @@ fn a_requested_env_handle_offers_its_variables_and_commands_but_fills_no_value()
     assert!(secret.policy.allowed_cmds.is_empty());
 }
 
+/// Every kind the new handle form offers is explained, in the order the
+/// options come, and no other field carries explanations.
+#[test]
+fn every_kind_on_offer_is_explained() {
+    let view = forms::describe(&forms::new_handle());
+    let kind = field(&view, "kind");
+    let explained: Vec<&str> = kind.explained.iter().map(|e| e.value.as_str()).collect();
+    assert_eq!(explained, kind.options);
+    for option in &kind.explained {
+        assert!(
+            !option.title.is_empty() && !option.detail.is_empty(),
+            "{option:?}"
+        );
+    }
+    assert!(kind.hint.contains("can't be changed"), "{}", kind.hint);
+    for other in view.fields.iter().filter(|f| f.key != "kind") {
+        assert!(other.explained.is_empty(), "{}", other.key);
+    }
+}
+
 #[test]
 fn a_form_without_suggestions_sends_none_to_the_page() {
     let view = forms::describe(&forms::new_handle());
