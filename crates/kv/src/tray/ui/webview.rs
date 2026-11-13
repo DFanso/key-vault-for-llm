@@ -1,10 +1,15 @@
 //! kv's window on screen: a tao window holding a wry webview that shows the
 //! page `tray::window` carries, and nothing else. It opens like a flyout:
-//! no frame, next to the tray icon, above the other windows, and it hides
-//! when the user clicks elsewhere or presses Esc. A click on the icon opens
-//! it small, as a menu; the menu's Open kv grows it into the full window.
+//! no frame, next to the tray icon, in front of the other windows, and it
+//! hides when the user clicks elsewhere or presses Esc. A click on the icon
+//! opens it small, as a menu; the menu's Open kv grows it into the full
+//! window. Only the menu stays above other windows; the full window comes
+//! to the front when shown and goes behind an app the user clicks. Neither
+//! has the browser's own menu or keys: Save as and Print would put a shown
+//! secret in a file or on paper.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 
 use tao::dpi::LogicalSize;
 #[cfg(not(target_os = "macos"))]
@@ -52,6 +57,8 @@ pub struct KvWindow {
     // Declared first so it is dropped before the window it draws in.
     webview: WebView,
     window: Window,
+    /// Whether it is showing as the small menu, which stays on top.
+    menu: Cell<bool>,
 }
 
 impl KvWindow {
@@ -71,15 +78,17 @@ impl KvWindow {
             .with_inner_size(size(menu))
             .with_resizable(false)
             .with_decorations(false)
-            .with_always_on_top(true)
+            .with_always_on_top(menu)
             .with_visible(false)
             .with_window_icon(logo);
         #[cfg(windows)]
         let builder = {
             use tao::platform::windows::WindowBuilderExtWindows;
-            // A flyout has no taskbar button; the shadow outlines it.
+            // The menu, a flyout, has no taskbar button; the full window
+            // has one, to find it again behind other windows. The shadow
+            // outlines both.
             builder
-                .with_skip_taskbar(true)
+                .with_skip_taskbar(menu)
                 .with_undecorated_shadow(true)
         };
         let window = builder.build(target).map_err(|e| e.to_string())?;
@@ -92,7 +101,13 @@ impl KvWindow {
         #[cfg(windows)]
         let builder = {
             use wry::WebViewBuilderExtWindows;
-            WebViewBuilder::new_with_web_context(&mut context).with_https_scheme(true)
+            WebViewBuilder::new_with_web_context(&mut context)
+                .with_https_scheme(true)
+                // No Back, Reload, Save as or Print menu on a right click,
+                // and none of the browser's keys (Ctrl+P, Ctrl+S, F5...);
+                // the editing keys, Ctrl+C and Ctrl+V, still work.
+                .with_default_context_menus(false)
+                .with_browser_accelerator_keys(false)
         };
         #[cfg(not(windows))]
         let builder = WebViewBuilder::new();
@@ -126,7 +141,11 @@ impl KvWindow {
             .map_err(|e| e.to_string())?;
         #[cfg(target_os = "macos")]
         round_corners(&window);
-        let opened = Self { webview, window };
+        let opened = Self {
+            webview,
+            window,
+            menu: Cell::new(menu),
+        };
         opened.show_at(anchor, menu);
         Ok(opened)
     }
@@ -139,17 +158,33 @@ impl KvWindow {
         self.window.is_visible()
     }
 
-    /// Brings the window to the front where it is.
+    /// Brings the window to the front where it is. The full window is on
+    /// top only for that moment, as Windows may refuse the focus to a
+    /// window in the background; the menu stays on top.
     pub fn raise(&self) {
         self.window.set_minimized(false);
         self.window.set_visible(true);
+        self.window.set_always_on_top(true);
         self.window.set_focus();
+        self.window.set_always_on_top(self.menu.get());
+    }
+
+    /// Makes the window the menu, which stays on top and has no taskbar
+    /// button, or the full window, which is an ordinary one.
+    fn set_kind(&self, menu: bool) {
+        self.menu.set(menu);
+        #[cfg(windows)]
+        {
+            use tao::platform::windows::WindowExtWindows;
+            let _ = self.window.set_skip_taskbar(menu);
+        }
     }
 
     /// Moves the window beside `anchor` (or the pointer, without one) and
     /// brings it to the front.
     #[cfg(target_os = "macos")]
     pub fn show_at(&self, anchor: Option<Anchor>, menu: bool) {
+        self.set_kind(menu);
         self.place_on_mac(anchor.unwrap_or_else(pointer), menu);
         self.raise();
         // The shadow follows the rounded outline at the new size.
@@ -159,7 +194,8 @@ impl KvWindow {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub fn show_at(&self, anchor: Option<Anchor>, _menu: bool) {
+    pub fn show_at(&self, anchor: Option<Anchor>, menu: bool) {
+        self.set_kind(menu);
         let anchor = anchor.or_else(|| {
             let at = self.window.cursor_position().ok()?;
             Some(Anchor {

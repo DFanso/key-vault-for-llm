@@ -2109,7 +2109,19 @@
     });
   }
 
+  // The browser's own keys: print, save, reload, view source. Save as and
+  // Print would put a secret the window shows in a file or on paper. The
+  // tray turns them off in WebView2 too; this covers other webviews.
+  function browserKey(event) {
+    if (event.key === "F5") return true;
+    return (event.ctrlKey || event.metaKey) && /^[psru]$/i.test(event.key);
+  }
+
   function onKey(event) {
+    if (browserKey(event)) {
+      event.preventDefault();
+      return;
+    }
     if (page.menu) {
       if (event.key === "Escape") send({ type: "hide" });
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -2411,6 +2423,8 @@
       closeConfirm();
     });
     document.addEventListener("keydown", onKey);
+    // No browser menu on a right click (Back, Reload, Save as, Print).
+    document.addEventListener("contextmenu", (event) => event.preventDefault());
     draw();
     send({ type: "ready" });
   }
