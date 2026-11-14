@@ -60,6 +60,8 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         Instant::now(),
     )));
     let http = broker::http::client().map_err(io::Error::other)?;
+    let uses = Arc::new(Mutex::new(notify::UseNotices::default()));
+    let asks = Arc::new(Mutex::new(notify::RateCap::default()));
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let check_every = (settings.idle_lock.min(settings.locked_exit) / 4)
         .clamp(Duration::from_millis(100), Duration::from_secs(30));
@@ -69,7 +71,14 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         tokio::select! {
             accepted = agent.accept() => match accepted {
                 Ok(stream) => {
-                    tokio::spawn(serve_agent(stream, daemon.clone(), http.clone(), settings.notify));
+                    tokio::spawn(serve_agent(
+                        stream,
+                        daemon.clone(),
+                        http.clone(),
+                        settings,
+                        uses.clone(),
+                        asks.clone(),
+                    ));
                 }
                 Err(e) => accept_failed("agent", e).await,
             },
@@ -94,12 +103,28 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     Ok(Outcome::Stopped)
 }
 
+/// The tool and handles of work that runs without waiting for the user:
+/// a handle in mode auto, or one allowed for the agent's session.
+fn immediate_use(prepared: &Prepared) -> Option<(&'static str, Vec<String>)> {
+    match prepared {
+        Prepared::Http(job) => Some(("http_request", vec![job.secret.name.clone()])),
+        Prepared::Exec(job) => Some(("exec", job.handles.clone())),
+        Prepared::Db(job) => Some(("db_query", vec![job.secret.name.clone()])),
+        Prepared::Connect(job) => Some(("db_connect", vec![job.secret.name.clone()])),
+        Prepared::Run(job) => Some(("run", vec![job.handle.clone()])),
+        Prepared::Reply(_) | Prepared::Wait(_) => None,
+    }
+}
+
 async fn serve_agent(
     mut stream: ServerStream,
     daemon: Shared,
     http: reqwest::Client,
-    notify: bool,
+    settings: Settings,
+    uses: Arc<Mutex<notify::UseNotices>>,
+    asks: Arc<Mutex<notify::RateCap>>,
 ) {
+    let (level, sound) = (settings.notify, settings.sound);
     let mut session: Option<SessionInfo> = None;
     loop {
         let request: AgentRequest = match read_frame(&mut stream).await {
@@ -145,20 +170,41 @@ async fn serve_agent(
             return;
         };
         if let Some(text) = shared
-            && notify
+            && level.approvals()
         {
-            notify::share_received(text);
+            notify::share_received(text, sound);
         }
         if let Some(name) = requested
-            && notify
+            && level.approvals()
         {
-            notify::handle_requested(format!("An agent asked you to add {name}; open kv tui."));
+            notify::handle_requested(
+                format!("An agent asked you to add {name}; open kv tui."),
+                sound,
+            );
+        }
+        if level.uses()
+            && let Some((tool, handles)) = immediate_use(&prepared)
+            && let Some(text) = uses.lock().unwrap_or_else(PoisonError::into_inner).notice(
+                session.as_ref(),
+                &handles,
+                tool,
+                Instant::now(),
+            )
+        {
+            notify::handle_used(text, sound);
         }
         let prepared = match prepared {
             Prepared::Wait(waiting) => {
                 // kv tray shows it with buttons to answer it; one is enough.
-                if notify && !notifier {
-                    notify::approval_needed(waiting.notice.clone());
+                if level.approvals()
+                    && !notifier
+                    && let Some(text) = notify::approval_notice(
+                        &mut asks.lock().unwrap_or_else(PoisonError::into_inner),
+                        &waiting.notice,
+                        Instant::now(),
+                    )
+                {
+                    notify::approval_needed(text, sound);
                 }
                 match wait_for_decision(&daemon, &mut stream, *waiting).await {
                     Some(prepared) => prepared,
