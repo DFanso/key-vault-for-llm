@@ -98,7 +98,7 @@ pub async fn run(job: DbJob) -> AgentResponse {
         AgentResponse::Error { code, .. } => code.as_str(),
         _ => "ok",
     };
-    let summary = crate::audit::scrubbed(&crate::audit::db_summary(&job.call.query), &job.scrubber);
+    let summary = crate::audit::db_summary(&job.call.query, Some(&job.scrubber));
     job.audit.record_use(&Use {
         action: "db_query",
         handle: &job.secret.name,

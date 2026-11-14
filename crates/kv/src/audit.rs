@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use kv_core::db::split_command;
 use kv_core::scrub::Scrubber;
 use serde::{Deserialize, Serialize};
 
@@ -211,38 +212,75 @@ const REDIS_CREDENTIAL_COMMANDS: [&str; 5] = ["AUTH", "HELLO", "ACL", "CONFIG", 
 
 /// What the audit log keeps of an HTTP request: the method and the URL
 /// without its query string, fragment or user info, which can hold tokens.
-/// `?…` marks a URL that had a query. The URL is the agent's, so it may also
-/// be a bare path.
-pub fn http_summary(method: &str, url: &str) -> String {
-    let (base, rest) = match url.find(['?', '#']) {
-        Some(at) => (&url[..at], true),
-        None => (url, false),
+/// `?…` (or `#…`) marks what was dropped. The URL is the agent's, so it may
+/// be a bare path. Vault values are scrubbed before anything is cut, so no
+/// part of one survives a cut.
+pub fn http_summary(method: &str, url: &str, scrubber: Option<&Scrubber>) -> String {
+    let url = scrub_with(url, scrubber);
+    let (base, dropped) = match url::Url::parse(&url) {
+        Ok(mut parsed) => {
+            let dropped = if parsed.query().is_some() {
+                "?…"
+            } else if parsed.fragment().is_some() {
+                "#…"
+            } else {
+                ""
+            };
+            // Both only fail for URLs that cannot have user info.
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            (parsed.to_string(), dropped)
+        }
+        // A path, for a handle whose base URL is hidden.
+        Err(_) => match url.find(['?', '#']) {
+            Some(at) => (
+                url[..at].to_owned(),
+                if url[at..].starts_with('?') {
+                    "?…"
+                } else {
+                    "#…"
+                },
+            ),
+            None => (url.clone(), ""),
+        },
     };
-    let base = without_userinfo(base);
-    let summary = format!("{method} {base}{}", if rest { "?…" } else { "" });
-    cut(&summary, MAX_SUMMARY_CHARS)
+    cut(&format!("{method} {base}{dropped}"), MAX_SUMMARY_CHARS)
 }
 
 /// What the audit log keeps of a database query: its first 200 characters,
-/// cut before anything that sets or sends a password. For a Redis command
-/// that can carry one (`AUTH`, `HELLO`, `ACL`, `CONFIG`, `MIGRATE`) only its
-/// name is kept.
-pub fn db_summary(query: &str) -> String {
-    let query = query.trim();
-    let first = query.split_whitespace().next().unwrap_or_default();
+/// cut before the word "password", as a best effort against one typed into
+/// SQL. For a Redis command that can carry a password (`AUTH`, `HELLO`,
+/// `ACL`, `CONFIG`, `MIGRATE`), quoted or not, only its name is kept. Vault
+/// values are scrubbed before anything is cut.
+pub fn db_summary(query: &str, scrubber: Option<&Scrubber>) -> String {
+    let query = scrub_with(query.trim(), scrubber);
+    let first = match split_command(&query) {
+        Ok(args) => args
+            .first()
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .unwrap_or_default(),
+        Err(_) => query
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    };
     if REDIS_CREDENTIAL_COMMANDS
         .iter()
         .any(|command| first.eq_ignore_ascii_case(command))
     {
-        return if first.len() == query.len() {
-            first.to_ascii_uppercase()
+        let name = first.to_ascii_uppercase();
+        return if query.split_whitespace().count() <= 1 {
+            name
         } else {
-            format!("{} …", first.to_ascii_uppercase())
+            format!("{name} …")
         };
     }
     let kept = match query.to_ascii_lowercase().find("password") {
         Some(at) => format!("{} …", query[..at].trim_end()),
-        None => query.to_owned(),
+        None => query,
     };
     cut(&kept, MAX_QUERY_CHARS)
 }
@@ -253,16 +291,10 @@ pub fn scrubbed(summary: &str, scrubber: &Scrubber) -> String {
     String::from_utf8_lossy(&scrubber.scrub(summary.as_bytes())).into_owned()
 }
 
-/// `url` without `user:password@` in its authority.
-fn without_userinfo(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_owned();
-    };
-    let (scheme, rest) = url.split_at(scheme_end + 3);
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{scheme}{}", &rest[at + 1..]),
-        None => url.to_owned(),
+fn scrub_with(text: &str, scrubber: Option<&Scrubber>) -> String {
+    match scrubber {
+        Some(scrubber) => scrubbed(text, scrubber),
+        None => text.to_owned(),
     }
 }
 
