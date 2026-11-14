@@ -45,7 +45,10 @@ pub async fn send(client: &Client, job: HttpJob) -> AgentResponse {
         action: "http_request",
         handle: &job.secret.name,
         decision: job.decision,
-        summary: &format!("{} {}", job.call.method, job.call.url),
+        summary: &crate::audit::scrubbed(
+            &crate::audit::http_summary(&job.call.method, &job.call.url),
+            &job.scrubber,
+        ),
         outcome: &outcome,
         duration: job.started.elapsed(),
     });

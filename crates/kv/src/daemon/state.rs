@@ -913,7 +913,7 @@ impl Daemon {
         session: Option<&SessionInfo>,
         now: Instant,
     ) -> Prepared {
-        let summary = format!("{} {}", call.method, call.url);
+        let summary = self.loggable(crate::audit::http_summary(&call.method, &call.url));
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("http_request", &call.handle, &summary, decision, response)
         };
@@ -1182,7 +1182,7 @@ impl Daemon {
         session: Option<&SessionInfo>,
         now: Instant,
     ) -> Prepared {
-        let summary: String = call.query.chars().take(200).collect();
+        let summary = self.loggable(crate::audit::db_summary(&call.query));
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("db_query", &call.handle, &summary, decision, response)
         };
@@ -1687,6 +1687,15 @@ impl Daemon {
             duration: Duration::ZERO,
         });
         Prepared::Reply(response)
+    }
+
+    /// `summary` scrubbed of vault values when the vault is unlocked, for
+    /// the audit log. Locked, there are no values to scrub.
+    fn loggable(&mut self, summary: String) -> String {
+        if self.vault.is_none() {
+            return summary;
+        }
+        crate::audit::scrubbed(&summary, &self.scrubber())
     }
 
     /// The scrubber for every unlocked secret. Only call while unlocked.

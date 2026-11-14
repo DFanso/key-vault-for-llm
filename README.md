@@ -520,7 +520,9 @@ programs by absolute path (`--cmd /usr/local/bin/terraform`).
 
 Set `KV_HOME` to keep the vault, audit log and sockets in one directory
 instead of the platform defaults. Every use of a handle is recorded in the
-audit log (`audit.jsonl`), without values.
+audit log (`audit.jsonl`), without values: a request is kept as its method
+and URL without the query string, and a query or command is cut before any
+password it sets or sends.
 
 ## Touch ID and Windows Hello
 
