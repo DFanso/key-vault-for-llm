@@ -3009,7 +3009,10 @@ fn too_many_waiting() -> AgentResponse {
 /// become U+FFFD, invisible format characters (bidi overrides, zero-width
 /// spaces) are dropped and runs of whitespace become one space, so the text
 /// can neither drive the terminal nor pose as extra lines in the TUI.
-fn printable(text: &str, max_chars: usize) -> String {
+/// `text` made safe to show on one line: whitespace runs become one space,
+/// control characters become U+FFFD, format characters (bidi overrides,
+/// zero-width) go, and it is cut to `max_chars`.
+pub(crate) fn printable(text: &str, max_chars: usize) -> String {
     let mut clean = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_whitespace() {

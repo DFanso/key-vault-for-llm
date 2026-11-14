@@ -1,7 +1,12 @@
 //! What the daemon announces as desktop notifications, and with which
 //! sound. Posting itself is left to the platform and not tested here.
 
-use kv::notify::{FirstUses, Level, MAX_FIRST_USES, Sound, Tone, sound_name};
+use std::time::{Duration, Instant};
+
+use kv::notify::{
+    FirstUses, Level, MAX_FIRST_USES, MAX_NOTICES_PER_MINUTE, RateCap, Sound, Tone, UseNotices,
+    approval_notice, or_default, sound_name, use_notice,
+};
 use kv_core::proto::SessionInfo;
 
 fn session(id: &str) -> SessionInfo {
@@ -132,5 +137,121 @@ fn the_oldest_are_forgotten_past_the_limit() {
     assert_eq!(
         uses.first(Some(&one), &names(&["first"])),
         names(&["first"])
+    );
+}
+
+#[test]
+fn an_agent_cannot_add_a_line_or_reorder_text_through_its_name() {
+    let handles = names(&["github"]);
+    for spoof in [
+        "evil\nkv: approval needed",
+        "evil\u{2028}kv: approval needed",
+        "evil\u{202E}deppots",
+        "ev\u{200B}il\u{0007}",
+    ] {
+        let text = use_notice(Some(spoof), &handles, "http_request");
+        assert!(!text.contains('\n'), "{text:?}");
+        assert!(!text.contains('\u{2028}'), "{text:?}");
+        assert!(!text.contains('\u{202E}'), "{text:?}");
+        assert!(!text.contains('\u{200B}'), "{text:?}");
+        assert!(!text.contains('\u{0007}'), "{text:?}");
+        assert!(text.ends_with(" used github (http_request)."), "{text:?}");
+    }
+}
+
+#[test]
+fn a_long_or_blank_name_is_cut_or_replaced() {
+    let handles = names(&["github"]);
+    let long = "a".repeat(2000);
+    let text = use_notice(Some(&long), &handles, "exec");
+    let client = text.split(" used ").next().unwrap();
+    assert_eq!(client.chars().count(), 64);
+    assert_eq!(
+        use_notice(Some("   "), &handles, "exec"),
+        "An agent used github (exec)."
+    );
+    assert_eq!(
+        use_notice(None, &names(&["a", "b"]), "exec"),
+        "An agent used a, b (exec)."
+    );
+}
+
+#[test]
+fn use_notices_say_each_handle_once_per_session() {
+    let mut uses = UseNotices::default();
+    let now = Instant::now();
+    let one = session("s1");
+    let text = uses.notice(Some(&one), &names(&["github"]), "http_request", now);
+    assert_eq!(
+        text.as_deref(),
+        Some("claude-code used github (http_request).")
+    );
+    assert_eq!(
+        uses.notice(Some(&one), &names(&["github"]), "http_request", now),
+        None
+    );
+}
+
+#[test]
+fn use_notices_are_capped_per_minute_then_say_how_many_were_held() {
+    let mut uses = UseNotices::default();
+    let t0 = Instant::now();
+    for i in 0..MAX_NOTICES_PER_MINUTE {
+        let s = session(&format!("s{i}"));
+        assert!(
+            uses.notice(Some(&s), &names(&["github"]), "exec", t0)
+                .is_some()
+        );
+    }
+    // An agent naming a new session each call gets nothing more this minute.
+    for i in 0..5 {
+        let s = session(&format!("flood{i}"));
+        assert_eq!(uses.notice(Some(&s), &names(&["github"]), "exec", t0), None);
+    }
+    let later = t0 + Duration::from_secs(61);
+    let text = uses
+        .notice(Some(&session("next")), &names(&["github"]), "exec", later)
+        .unwrap();
+    assert!(
+        text.ends_with(" 5 more not shown; kv's Audit tab lists every use."),
+        "{text}"
+    );
+    let text = uses
+        .notice(Some(&session("after")), &names(&["github"]), "exec", later)
+        .unwrap();
+    assert!(!text.contains("more not shown"), "{text}");
+}
+
+#[test]
+fn a_value_not_understood_falls_back_to_the_default() {
+    assert_eq!(or_default::<Level>("KV_NOTIFY", "loud"), Level::Ask);
+    assert_eq!(or_default::<Level>("KV_NOTIFY", "all"), Level::All);
+    assert_eq!(
+        or_default::<Sound>("KV_NOTIFY_SOUND", "siren"),
+        Sound::Alarm
+    );
+    assert_eq!(
+        or_default::<Sound>("KV_NOTIFY_SOUND", "yes"),
+        Sound::Default
+    );
+}
+
+#[test]
+fn approval_notices_are_capped_per_minute_then_say_how_many_asked() {
+    let mut rate = RateCap::default();
+    let t0 = Instant::now();
+    let notice = "claude-code wants to use github (http_request). Open kv tui to answer.";
+    for _ in 0..MAX_NOTICES_PER_MINUTE {
+        assert_eq!(
+            approval_notice(&mut rate, notice, t0).as_deref(),
+            Some(notice)
+        );
+    }
+    assert_eq!(approval_notice(&mut rate, notice, t0), None);
+    assert_eq!(approval_notice(&mut rate, notice, t0), None);
+    let text = approval_notice(&mut rate, notice, t0 + Duration::from_secs(60)).unwrap();
+    assert_eq!(
+        text,
+        format!("{notice} 2 more requests asked meanwhile; open kv to see them.")
     );
 }

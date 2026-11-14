@@ -60,7 +60,8 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         Instant::now(),
     )));
     let http = broker::http::client().map_err(io::Error::other)?;
-    let uses = Arc::new(Mutex::new(notify::FirstUses::default()));
+    let uses = Arc::new(Mutex::new(notify::UseNotices::default()));
+    let asks = Arc::new(Mutex::new(notify::RateCap::default()));
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let check_every = (settings.idle_lock.min(settings.locked_exit) / 4)
         .clamp(Duration::from_millis(100), Duration::from_secs(30));
@@ -76,6 +77,7 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
                         http.clone(),
                         settings,
                         uses.clone(),
+                        asks.clone(),
                     ));
                 }
                 Err(e) => accept_failed("agent", e).await,
@@ -114,29 +116,13 @@ fn immediate_use(prepared: &Prepared) -> Option<(&'static str, Vec<String>)> {
     }
 }
 
-/// One line for the notification of a use. Handle names are checked when
-/// they are saved; the client name is whatever the agent said, so it is cut
-/// short and stripped of control characters. Never contains a value.
-fn used_notice(session: Option<&SessionInfo>, handles: &[String], tool: &str) -> String {
-    let client: String = session
-        .map(|s| {
-            s.client
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(64)
-                .collect()
-        })
-        .filter(|c: &String| !c.trim().is_empty())
-        .unwrap_or_else(|| "An agent".into());
-    format!("{client} used {} ({tool}).", handles.join(", "))
-}
-
 async fn serve_agent(
     mut stream: ServerStream,
     daemon: Shared,
     http: reqwest::Client,
     settings: Settings,
-    uses: Arc<Mutex<notify::FirstUses>>,
+    uses: Arc<Mutex<notify::UseNotices>>,
+    asks: Arc<Mutex<notify::RateCap>>,
 ) {
     let (level, sound) = (settings.notify, settings.sound);
     let mut session: Option<SessionInfo> = None;
@@ -198,20 +184,27 @@ async fn serve_agent(
         }
         if level.uses()
             && let Some((tool, handles)) = immediate_use(&prepared)
+            && let Some(text) = uses.lock().unwrap_or_else(PoisonError::into_inner).notice(
+                session.as_ref(),
+                &handles,
+                tool,
+                Instant::now(),
+            )
         {
-            let new = uses
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .first(session.as_ref(), &handles);
-            if !new.is_empty() {
-                notify::handle_used(used_notice(session.as_ref(), &new, tool), sound);
-            }
+            notify::handle_used(text, sound);
         }
         let prepared = match prepared {
             Prepared::Wait(waiting) => {
                 // kv tray shows it with buttons to answer it; one is enough.
-                if level.approvals() && !notifier {
-                    notify::approval_needed(waiting.notice.clone(), sound);
+                if level.approvals()
+                    && !notifier
+                    && let Some(text) = notify::approval_notice(
+                        &mut asks.lock().unwrap_or_else(PoisonError::into_inner),
+                        &waiting.notice,
+                        Instant::now(),
+                    )
+                {
+                    notify::approval_needed(text, sound);
                 }
                 match wait_for_decision(&daemon, &mut stream, *waiting).await {
                     Some(prepared) => prepared,

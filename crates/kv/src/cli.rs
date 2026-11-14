@@ -123,7 +123,7 @@ enum Command {
             default_value = "ask",
             default_missing_value = "ask",
             value_name = "ASK|ALL|OFF",
-            value_parser = clap::builder::ValueParser::new(str::parse::<crate::notify::Level>)
+            value_parser = clap::builder::ValueParser::new(notify_level)
         )]
         notify: crate::notify::Level,
         /// The sound of notifications: alarm (a louder one for approvals),
@@ -133,7 +133,7 @@ enum Command {
             env = "KV_NOTIFY_SOUND",
             default_value = "alarm",
             value_name = "ALARM|DEFAULT|OFF",
-            value_parser = clap::builder::ValueParser::new(str::parse::<crate::notify::Sound>)
+            value_parser = clap::builder::ValueParser::new(notify_sound)
         )]
         notify_sound: crate::notify::Sound,
     },
@@ -400,6 +400,21 @@ fn tray(login: Option<bool>) -> io::Result<()> {
         }
         None => crate::tray::run(Paths::from_env()?),
     }
+}
+
+/// `KV_NOTIFY` or `--notify`. A value it does not understand is the
+/// default, so the daemon still starts.
+fn notify_level(
+    value: &str,
+) -> std::result::Result<crate::notify::Level, std::convert::Infallible> {
+    Ok(crate::notify::or_default("KV_NOTIFY", value))
+}
+
+/// `KV_NOTIFY_SOUND` or `--notify-sound`, likewise.
+fn notify_sound(
+    value: &str,
+) -> std::result::Result<crate::notify::Sound, std::convert::Infallible> {
+    Ok(crate::notify::or_default("KV_NOTIFY_SOUND", value))
 }
 
 async fn run(cli: Cli) -> Result<()> {
@@ -1273,8 +1288,9 @@ mod tests {
         assert_eq!(notify(&["--notify", "all"]), Level::All);
         assert_eq!(parse(&["--notify-sound", "off"]).1, Sound::Off);
         assert_eq!(parse(&["--notify-sound", "default"]).1, Sound::Default);
-        assert!(Cli::try_parse_from(["kv", "daemon", "--notify", "loud"]).is_err());
-        assert!(Cli::try_parse_from(["kv", "daemon", "--notify-sound", "siren"]).is_err());
+        // A typo must not keep the daemon from starting: it falls back.
+        assert_eq!(notify(&["--notify", "loud"]), Level::Ask);
+        assert_eq!(parse(&["--notify-sound", "siren"]).1, Sound::Alarm);
     }
 
     #[test]

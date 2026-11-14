@@ -196,8 +196,10 @@ With `--read-only true`:
 
 Handles in `--mode ask` (the default) make the agent wait until you answer in
 `kv tui` or `kv tray`, for up to 60 seconds. kv also shows a desktop
-notification with a sound. Two settings change that; set them in your shell
-profile and run `kv stop` so the next command picks them up:
+notification with a sound. Two settings change that. Set them in your shell
+profile (on Windows as user environment variables, such as
+`setx KV_NOTIFY all`, so a `kv tray` started at login sees them too) and run
+`kv stop` so the next command picks them up:
 
 - `KV_NOTIFY`: `ask` (the default) for requests waiting for you, handles an
   agent asks you to add, and secrets shared with you; `all` for those and also
@@ -205,8 +207,13 @@ profile and run `kv stop` so the next command picks them up:
   the session), once per handle per agent session; `off` for none.
 - `KV_NOTIFY_SOUND`: `alarm` (the default) plays a louder sound for requests
   waiting for you and the usual one for the rest, `default` plays the usual
-  one for all, and `off` plays none. A request waiting for you stays on
-  screen until you dismiss it, where the system allows.
+  one for all, and `off` plays none. On Windows a request waiting for you
+  stays on screen until you dismiss it.
+
+At most 10 requests and 10 uses a minute get a notification each; the next
+one says how many were held back, and every waiting request is still in
+kv's window and `kv tui`. A value kv does not understand counts as the
+default, so a typo cannot keep the daemon from starting.
 
 ```sh
 kv tui
