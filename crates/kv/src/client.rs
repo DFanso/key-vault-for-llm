@@ -268,9 +268,12 @@ fn spawn_daemon() -> io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        // A console of its own that is never shown, rather than none: Windows
+        // drops the toast notifications of a process started with
+        // DETACHED_PROCESS, so approvals would go unannounced. Either way
+        // the daemon outlives the terminal that started it.
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         stop_inheriting_std_handles();
     }
     command.spawn().map(drop)

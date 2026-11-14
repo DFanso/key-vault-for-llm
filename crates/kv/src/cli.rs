@@ -112,20 +112,30 @@ enum Command {
         /// Started by another command: exit quietly if a daemon already runs
         #[arg(long, hide = true)]
         autostart: bool,
-        /// Show a desktop notification when a request waits for approval:
-        /// on or off. Daemons started on demand read KV_NOTIFY.
+        /// Desktop notifications: ask (requests waiting for approval), all
+        /// (also each handle an agent uses without asking, once per agent
+        /// session) or off. Daemons started on demand read KV_NOTIFY.
         #[arg(
             long,
             env = "KV_NOTIFY",
             action = clap::ArgAction::Set,
             num_args = 0..=1,
-            default_value = "on",
-            default_missing_value = "on",
-            value_name = "ON|OFF",
-            hide_possible_values = true,
-            value_parser = clap::builder::BoolishValueParser::new()
+            default_value = "ask",
+            default_missing_value = "ask",
+            value_name = "ASK|ALL|OFF",
+            value_parser = clap::builder::ValueParser::new(str::parse::<crate::notify::Level>)
         )]
-        notify: bool,
+        notify: crate::notify::Level,
+        /// The sound of notifications: alarm (a louder one for approvals),
+        /// default or off. Daemons started on demand read KV_NOTIFY_SOUND.
+        #[arg(
+            long,
+            env = "KV_NOTIFY_SOUND",
+            default_value = "alarm",
+            value_name = "ALARM|DEFAULT|OFF",
+            value_parser = clap::builder::ValueParser::new(str::parse::<crate::notify::Sound>)
+        )]
+        notify_sound: crate::notify::Sound,
     },
 }
 
@@ -401,6 +411,7 @@ async fn run(cli: Cli) -> Result<()> {
             locked_exit,
             autostart,
             notify,
+            notify_sound,
         } => {
             let outcome = daemon::run(
                 paths,
@@ -408,6 +419,7 @@ async fn run(cli: Cli) -> Result<()> {
                     idle_lock,
                     locked_exit,
                     notify,
+                    sound: notify_sound,
                     ..Settings::default()
                 },
             )
@@ -1238,19 +1250,31 @@ mod tests {
     use kv_core::vault::DeviceKind;
 
     #[test]
-    fn notify_takes_on_or_off() {
-        let notify = |args: &[&str]| match Cli::try_parse_from([&["kv", "daemon"], args].concat()) {
+    fn notify_takes_ask_all_off_and_the_old_on_off() {
+        use crate::notify::{Level, Sound};
+        let parse = |args: &[&str]| match Cli::try_parse_from([&["kv", "daemon"], args].concat()) {
             Ok(Cli {
-                command: Command::Daemon { notify, .. },
+                command:
+                    Command::Daemon {
+                        notify,
+                        notify_sound,
+                        ..
+                    },
                 ..
-            }) => notify,
+            }) => (notify, notify_sound),
             Ok(_) => unreachable!(),
             Err(e) => panic!("{args:?}: {e}"),
         };
-        assert!(!notify(&["--notify", "off"]));
-        assert!(!notify(&["--notify=false"]));
-        assert!(notify(&["--notify", "on"]));
-        assert!(notify(&["--notify"]));
+        let notify = |args: &[&str]| parse(args).0;
+        assert_eq!(notify(&["--notify", "off"]), Level::Off);
+        assert_eq!(notify(&["--notify=false"]), Level::Off);
+        assert_eq!(notify(&["--notify", "on"]), Level::Ask);
+        assert_eq!(notify(&["--notify"]), Level::Ask);
+        assert_eq!(notify(&["--notify", "all"]), Level::All);
+        assert_eq!(parse(&["--notify-sound", "off"]).1, Sound::Off);
+        assert_eq!(parse(&["--notify-sound", "default"]).1, Sound::Default);
+        assert!(Cli::try_parse_from(["kv", "daemon", "--notify", "loud"]).is_err());
+        assert!(Cli::try_parse_from(["kv", "daemon", "--notify-sound", "siren"]).is_err());
     }
 
     #[test]

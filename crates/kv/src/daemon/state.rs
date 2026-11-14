@@ -112,8 +112,10 @@ pub struct Settings {
     pub locked_exit: Duration,
     /// How long a request waits for a decision in `kv tui`.
     pub approval_wait: Duration,
-    /// Show a desktop notification when a request starts waiting.
-    pub notify: bool,
+    /// What to show as desktop notifications (`KV_NOTIFY`).
+    pub notify: crate::notify::Level,
+    /// The sound they play (`KV_NOTIFY_SOUND`).
+    pub sound: crate::notify::Sound,
 }
 
 impl Default for Settings {
@@ -122,7 +124,8 @@ impl Default for Settings {
             idle_lock: Duration::from_secs(8 * 60 * 60),
             locked_exit: Duration::from_secs(10 * 60),
             approval_wait: Duration::from_secs(60),
-            notify: false,
+            notify: crate::notify::Level::Off,
+            sound: crate::notify::Sound::default(),
         }
     }
 }
