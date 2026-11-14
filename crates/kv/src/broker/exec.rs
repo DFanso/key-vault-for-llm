@@ -41,7 +41,7 @@ pub async fn run(job: ExecJob) -> AgentResponse {
         action: "exec",
         handle: &job.handles.join(","),
         decision: job.decision,
-        summary: &job.argv[0],
+        summary: &crate::audit::scrubbed(&job.argv[0], &job.scrubber),
         outcome: &outcome,
         duration: job.started.elapsed(),
     });
