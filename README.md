@@ -216,11 +216,13 @@ asked for (the first screenshot above):
 
 An `http_request` shows its method and URL, the names of the extra headers
 the agent set (not their values), and its body: the size in bytes and the
-first 200 characters. Agent text is cut at 300 characters. A request whose
-URL, header names, command, query or working directory had to be cut can
-only be allowed once: `s` is not offered, since allowing it for the session
-would let more requests like it through unread. A body longer than its
-preview does not count, since its size is shown.
+first 200 characters. Agent text is cut at 300 characters in `kv tui` and
+kv's window. A request whose URL, header names, command, query or working
+directory had to be cut there can only be allowed once: `s` is not offered,
+since allowing it for the session would let more requests like it through
+unread. A body longer than its preview does not count, since its size is
+shown. The tray's menu and notifications show less of the request; open
+kv's window to read it in full before you allow it for the session.
 
 The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
 their policy (`p`). Secret values are typed into hidden fields and the TUI
