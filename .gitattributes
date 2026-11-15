@@ -1,0 +1,2 @@
+# Golden fixtures are compared byte for byte: never rewrite their line endings.
+crates/kv-core/tests/fixtures/** binary
