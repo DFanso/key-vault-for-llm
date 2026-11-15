@@ -342,30 +342,16 @@ mod tests {
         let old = humantime::format_rfc3339_millis(now - days(91)).to_string();
         let line =
             format!(r#"{{"ts":"{old}","socket":"agent","action":"status","outcome":"done"}}"#);
-        fs::write(
-            &path,
-            format!(
-                "{line}
-"
-            ),
-        )
-        .unwrap();
+        fs::write(&path, format!("{line}\n")).unwrap();
         let old_file = rotated(&path, 5);
-        fs::write(
-            &old_file, "x
-",
-        )
-        .unwrap();
+        fs::write(&old_file, "x\n").unwrap();
         set_modified(&old_file, now - days(200));
 
         Audit::new(path.clone()).prune(now);
         assert!(!path.exists(), "the live log was rotated");
         assert_eq!(
             fs::read_to_string(rotated(&path, 1)).unwrap(),
-            format!(
-                "{line}
-"
-            )
+            format!("{line}\n")
         );
         assert!(!old_file.exists(), "a file past the limit is deleted");
     }
@@ -377,18 +363,8 @@ mod tests {
         let audit = Audit::new(path.clone());
         audit.record("agent", "status", None, "done");
         let now = SystemTime::now();
-        fs::write(
-            rotated(&path, 1),
-            "x
-",
-        )
-        .unwrap();
-        fs::write(
-            rotated(&path, 2),
-            "x
-",
-        )
-        .unwrap();
+        fs::write(rotated(&path, 1), "x\n").unwrap();
+        fs::write(rotated(&path, 2), "x\n").unwrap();
         set_modified(&rotated(&path, 2), now - days(91));
 
         audit.prune(now);
@@ -397,12 +373,7 @@ mod tests {
         assert!(!rotated(&path, 2).exists());
 
         // A log that does not start with a record is left as it is.
-        fs::write(
-            &path,
-            "not json
-",
-        )
-        .unwrap();
+        fs::write(&path, "not json\n").unwrap();
         audit.prune(now + days(365));
         assert!(path.exists());
     }
