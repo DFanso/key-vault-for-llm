@@ -3053,11 +3053,6 @@ fn too_many_waiting() -> AgentResponse {
 /// spaces) are dropped and runs of whitespace become one space, so the text
 /// can neither drive the terminal nor pose as extra lines in the TUI.
 fn printable(text: &str, max_chars: usize) -> String {
-    printable_cut(text, max_chars).0
-}
-
-/// `printable`, and whether the text had to be cut.
-fn printable_cut(text: &str, max_chars: usize) -> (String, bool) {
     let mut clean = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_whitespace() {
@@ -3071,12 +3066,17 @@ fn printable_cut(text: &str, max_chars: usize) -> (String, bool) {
         }
     }
     let mut out: String = clean.chars().take(max_chars).collect();
-    let cut = clean.chars().count() > max_chars;
-    if cut {
+    if clean.chars().count() > max_chars {
         out.pop();
         out.push('…');
     }
-    (out, cut)
+    out
+}
+
+/// `printable`, and whether the text had to be cut to fit.
+fn printable_cut(text: &str, max_chars: usize) -> (String, bool) {
+    let cut = printable(text, usize::MAX).chars().count() > max_chars;
+    (printable(text, max_chars), cut)
 }
 
 /// A request body as the user sees it: its size in bytes, then how it
