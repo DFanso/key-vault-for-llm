@@ -523,8 +523,9 @@ Set `KV_HOME` to keep the vault, audit log and sockets in one directory
 instead of the platform defaults. Every use of a handle is recorded in the
 audit log (`audit.jsonl`), without values.
 
-The audit log is rotated at 10 MiB, five old files are kept, and records
-more than 90 days old are deleted.
+The audit log is rotated at 10 MiB and five old files are kept. An old file
+is deleted 90 days after its last record, and when the daemon starts it
+rotates a log whose first record is more than 90 days old.
 
 ## Touch ID and Windows Hello
 
