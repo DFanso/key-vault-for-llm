@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod bundle;
+pub mod clipboard;
 pub mod icon;
 pub mod login;
 pub mod model;

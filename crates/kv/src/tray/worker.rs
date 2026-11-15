@@ -63,6 +63,13 @@ pub trait Desktop: Send {
     fn post(&self, _notice: &Notice) {}
     /// Takes down the notifications named by `keys`.
     fn withdraw(&self, _keys: &[String]) {}
+    /// Puts a value shown in the window on the clipboard, for a while.
+    fn copy(&self, _text: &SecretText) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Takes a value `copy` put on the clipboard off it now, unless
+    /// something else was copied since. Called as the tray quits.
+    fn clear_copied(&self) {}
 }
 
 /// Who asked for something, and so hears how it went.
@@ -407,6 +414,10 @@ impl<D: Desktop> Worker<D> {
                     message: None,
                 }),
             },
+            FromPage::Copy { text } => {
+                let done = self.desktop.copy(&text).is_ok();
+                self.desktop.page(ToPage::Copied { done });
+            }
             FromPage::Forget { id } => {
                 let outcome = self.driver.run(Effect::Forget(id)).await;
                 self.report(Asker::Window, outcome, None);
@@ -676,8 +687,10 @@ impl<D: Desktop> Worker<D> {
     }
 
     /// Takes down every notification on show, as the tray quits: an answer
-    /// to one would have no one to hear it.
+    /// to one would have no one to hear it. A value copied from the window
+    /// goes too, since no one would clear it later.
     fn withdraw_all(&mut self) {
+        self.desktop.clear_copied();
         let keys: Vec<String> = std::mem::take(&mut self.posted).into_values().collect();
         if !keys.is_empty() {
             self.desktop.withdraw(&keys);

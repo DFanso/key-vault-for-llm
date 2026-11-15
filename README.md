@@ -320,9 +320,11 @@ Mac's login password) or Windows Hello where you set it up, or else the kv
 passphrase, which the daemon checks again; wrong ones count toward the same
 backoff as unlocking. Each showing is in the audit log, by handle, never with
 the value. The value goes after a minute, when you hide it, or when the
-window loses the focus or the vault locks. There is no Copy button, since any
-program, an agent's too, can read the clipboard: select the text and copy it
-yourself if you need to.
+window loses the focus or the vault locks. Each value has a Copy button. On
+Windows kv keeps the copy out of clipboard history (Win+V) and the cloud
+clipboard, and clears the clipboard after 20 seconds unless you copied
+something else since. On macOS the copy stays until you replace it. While the
+value is on the clipboard, any program, an agent's too, can read it.
 
 ### When the agent needs a key you have not added
 

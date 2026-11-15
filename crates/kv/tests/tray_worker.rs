@@ -39,6 +39,11 @@ struct Desk {
     notifying: Arc<Mutex<bool>>,
     posted: Arc<Mutex<Vec<Notice>>>,
     withdrawn: Arc<Mutex<Vec<String>>>,
+    /// What the window's Copy buttons copied, and whether copying fails.
+    copied: Arc<Mutex<Vec<String>>>,
+    copy_fails: Arc<Mutex<bool>>,
+    /// How often the tray asked to clear a copied value.
+    clears: Arc<Mutex<usize>>,
 }
 
 impl Desktop for Desk {
@@ -73,6 +78,18 @@ impl Desktop for Desk {
 
     fn withdraw(&self, keys: &[String]) {
         self.withdrawn.lock().unwrap().extend_from_slice(keys);
+    }
+
+    fn copy(&self, text: &SecretText) -> io::Result<()> {
+        if *self.copy_fails.lock().unwrap() {
+            return Err(io::Error::other("the clipboard is busy"));
+        }
+        self.copied.lock().unwrap().push(text.expose().to_owned());
+        Ok(())
+    }
+
+    fn clear_copied(&self) {
+        *self.clears.lock().unwrap() += 1;
     }
 }
 
@@ -1668,6 +1685,34 @@ async fn the_window_takes_the_move_and_focus_messages_itself() {
     // Nothing for the page to hear, and nothing wrong to report.
     assert!(desk.take().is_empty());
     assert_eq!(desk.notes(), Vec::<String>::new());
+}
+
+/// The Copy button hands its value to the desktop, which the page hears
+/// went or not, never with the value; quitting clears what was copied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_from_the_window_goes_to_the_desktop_and_quitting_clears_it() {
+    let (_daemon, _fake, desk, mut worker) = unlocked().await;
+    assert!(!worker.act(Action::Open(Tab::Handles)).await);
+    worker.model().await;
+    desk.take();
+    let copy = |text: &str| {
+        page(FromPage::Copy {
+            text: SecretText::new(text),
+        })
+    };
+
+    assert!(!worker.act(copy("sk-copied-value")).await);
+    assert_eq!(*desk.copied.lock().unwrap(), ["sk-copied-value"]);
+    assert_eq!(desk.take(), [ToPage::Copied { done: true }]);
+
+    *desk.copy_fails.lock().unwrap() = true;
+    assert!(!worker.act(copy("sk-other-value")).await);
+    assert_eq!(desk.take(), [ToPage::Copied { done: false }]);
+    assert_eq!(desk.notes(), Vec::<String>::new());
+
+    assert_eq!(*desk.clears.lock().unwrap(), 0);
+    assert!(worker.act(page(FromPage::Quit)).await);
+    assert_eq!(*desk.clears.lock().unwrap(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

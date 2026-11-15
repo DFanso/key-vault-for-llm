@@ -364,6 +364,31 @@ fn a_handles_value_and_a_request_for_the_passphrase_reach_the_page_as_data() {
     assert_eq!(parsed["message"], "Wrong passphrase");
 }
 
+/// The Copy button's value is read as secret text, kept out of debug
+/// output, and nothing but text is taken; the answer carries no value.
+#[test]
+fn a_value_to_copy_is_read_as_secret_text_and_the_answer_holds_none() {
+    let copy = FromPage::parse(r#"{"type":"copy","text":"sk-copy-me-12345"}"#).unwrap();
+    assert_eq!(
+        copy,
+        FromPage::Copy {
+            text: SecretText::new("sk-copy-me-12345")
+        }
+    );
+    assert!(!format!("{copy:?}").contains("sk-copy-me"), "{copy:?}");
+    for json in [
+        r#"{"type":"copy"}"#,
+        r#"{"type":"copy","text":7}"#,
+        r#"{"type":"copy","text":"a","handle":"aws"}"#,
+    ] {
+        assert_eq!(FromPage::parse(json), None, "{json}");
+    }
+    assert_eq!(
+        ToPage::Copied { done: true }.script(),
+        r#"kv.receive({"type":"copied","done":true})"#
+    );
+}
+
 /// The appearance the user picked is kept in a file of its own; anything
 /// else in it reads as following the system.
 #[test]
