@@ -459,7 +459,9 @@ kv add passwords --kind file --file ./passwords.txt --cmd hydra --mode ask
 A program uses the file through `exec`. List the handle with the others, and
 put `{file:passwords}` in an argument where the file's path goes (or read the
 path from `KV_FILE_PASSWORDS`). kv writes the file to a folder only you can
-read, under its own name, and removes it when the program ends. If the file
+read, under its own name, and removes it when the program ends (if the
+daemon stops first, the next one to start removes the folder once it is an
+hour old). If the file
 is text, each line of eight characters or more is scrubbed from the program's
 output like any other secret; a binary file is not scrubbed, and `kv add`
 says so. A text file whose lines add up to more than the scrubber takes
@@ -520,7 +522,8 @@ programs by absolute path (`--cmd /usr/local/bin/terraform`).
 
 Set `KV_HOME` to keep the vault, audit log and sockets in one directory
 instead of the platform defaults. Every use of a handle is recorded in the
-audit log (`audit.jsonl`), without values.
+audit log (`audit.jsonl`), without values. It is rotated at 10 MiB, five old
+files are kept, and records more than 90 days old are deleted.
 
 ## Touch ID and Windows Hello
 

@@ -9,11 +9,21 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use kv_core::crypto::fill_random;
 use zeroize::Zeroizing;
 
 use crate::sharefile::safe_file_name;
+
+/// What a job's folder is called, before its random part.
+const DIR_PREFIX: &str = "kv-files-";
+
+/// How old a job's folder must be before a starting daemon takes it for one
+/// a crash left behind. Far longer than the longest `exec` timeout, since
+/// daemons with another `KV_HOME` share the temp directory and may still be
+/// running a job.
+pub const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// A file a job needs on disk.
 pub struct JobFile {
@@ -39,7 +49,7 @@ impl Staged {
     pub fn write_in(parent: &Path, files: &[JobFile]) -> io::Result<Self> {
         let mut id = [0u8; 8];
         fill_random(&mut id);
-        let dir = parent.join(format!("kv-files-{}", hex::encode(id)));
+        let dir = parent.join(format!("{DIR_PREFIX}{}", hex::encode(id)));
         make_dir(&dir)?;
         let mut staged = Self {
             dir,
@@ -81,6 +91,48 @@ impl Drop for Staged {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Removes the job folders in the temp directory that a daemon which
+/// stopped without cleaning up left behind.
+pub fn remove_stale() {
+    remove_stale_in(&std::env::temp_dir(), SystemTime::now());
+}
+
+/// Removes the job folders in `parent` last changed more than
+/// `STALE_AFTER` before `now`. Errors are ignored: whatever cannot be
+/// removed now is tried again at the next start.
+pub fn remove_stale_in(parent: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !is_job_folder_name(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        // Not through a link: only a real folder is removed.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|changed| now.duration_since(changed).ok())
+            .is_some_and(|age| age > STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Whether `name` is one `Staged::write_in` makes: the prefix and 16 hex
+/// digits.
+fn is_job_folder_name(name: &str) -> bool {
+    name.strip_prefix(DIR_PREFIX)
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// What an argument says to be replaced with a file's path.
@@ -227,6 +279,40 @@ mod tests {
                 .substitute("{file:con}")
                 .ends_with(&*paths[0].to_string_lossy())
         );
+    }
+
+    #[test]
+    fn stale_job_folders_are_removed_and_others_kept() {
+        let parent = tempfile::tempdir().unwrap();
+        let staged = Staged::write_in(parent.path(), &[file("a", "list.txt", b"one")]).unwrap();
+        let fresh = staged
+            .env()
+            .next()
+            .unwrap()
+            .1
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_owned();
+        let other = parent.path().join("kv-files-not-a-job");
+        std::fs::create_dir(&other).unwrap();
+        let loose = parent.path().join("kv-files-0123456789abcdef.txt");
+        std::fs::write(&loose, b"x").unwrap();
+
+        // Just made: kept.
+        remove_stale_in(parent.path(), SystemTime::now());
+        assert!(fresh.exists());
+
+        // Past the safe age: removed, with what it holds. Folders with
+        // another name, and files, are left alone.
+        let later = SystemTime::now() + STALE_AFTER + Duration::from_secs(60);
+        remove_stale_in(parent.path(), later);
+        assert!(!fresh.exists(), "a stale job folder is removed");
+        assert!(other.exists());
+        assert!(loose.exists());
+        // Dropping the staged files after that is harmless.
+        drop(staged);
     }
 
     #[test]

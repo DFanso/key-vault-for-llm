@@ -53,9 +53,11 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     let mut agent = ipc::bind(&agent_endpoint)?;
     let mut control = ipc::bind(&control_endpoint)?;
 
+    let audit = Audit::new(paths.audit.clone());
+    housekeep(audit.clone());
     let daemon: Shared = Arc::new(Mutex::new(Daemon::new(
         paths.vault.clone(),
-        Audit::new(paths.audit.clone()),
+        audit,
         settings,
         Instant::now(),
     )));
@@ -92,6 +94,16 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     ipc::cleanup(&control_endpoint);
     drop(lock_file);
     Ok(Outcome::Stopped)
+}
+
+/// Clears up after an earlier daemon in the background, so the sockets are
+/// ready at once: the files of `file` handles a crash left in the temp
+/// directory, and audit records past their age.
+fn housekeep(audit: Audit) {
+    tokio::task::spawn_blocking(move || {
+        broker::files::remove_stale();
+        audit.prune(SystemTime::now());
+    });
 }
 
 async fn serve_agent(
