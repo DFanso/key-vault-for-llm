@@ -198,6 +198,14 @@ fn save_keeps_previous_version_as_bak() {
     let previous = Vault::unlock(&bak, PASS).unwrap();
     assert!(previous.secrets().is_empty());
     assert!(!path.with_file_name("vault.kv.tmp").exists());
+    assert!(!path.with_file_name("vault.kv.bak.tmp").exists());
+
+    // The next save replaces `.bak` with the version it replaces.
+    vault.remove("cache");
+    vault.save().unwrap();
+    let previous = Vault::unlock(&bak, PASS).unwrap();
+    assert_eq!(previous.secrets().len(), 1);
+    assert!(!path.with_file_name("vault.kv.bak.tmp").exists());
 }
 
 #[cfg(unix)]
