@@ -96,16 +96,6 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     Ok(Outcome::Stopped)
 }
 
-/// Clears up after an earlier daemon in the background, so the sockets are
-/// ready at once: the files of `file` handles a crash left in the temp
-/// directory, and audit records past their age.
-fn housekeep(audit: Audit) {
-    tokio::task::spawn_blocking(move || {
-        broker::files::remove_stale();
-        audit.prune(SystemTime::now());
-    });
-}
-
 async fn serve_agent(
     mut stream: ServerStream,
     daemon: Shared,
@@ -319,4 +309,14 @@ async fn accept_failed(socket: &str, error: io::Error) {
 
 fn lock(daemon: &Shared) -> MutexGuard<'_, Daemon> {
     daemon.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Clears up after an earlier daemon in the background, so the sockets are
+/// ready at once: the files of `file` handles a crash left in the temp
+/// directory, and audit records past their age.
+fn housekeep(audit: Audit) {
+    tokio::task::spawn_blocking(move || {
+        broker::files::remove_stale();
+        audit.prune(SystemTime::now());
+    });
 }
