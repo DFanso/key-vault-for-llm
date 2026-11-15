@@ -114,7 +114,7 @@ server a kv handle: an `env` handle with a `run` command, the exact command
 that starts it.
 
 ```sh
-kv add ssh-dev --kind env --var SSH_MCP_PASSWORD --mode auto \
+kv add ssh-dev --kind env --var SSH_MCP_PASSWORD \
   --description "dev box over SSH" \
   --run -- /path/to/bunx -y ssh-mcp@1.2.3 --host=10.0.0.5 --user=root
 kv add dokploy-prod --kind env --var DOKPLOY_URL --var DOKPLOY_API_KEY \
@@ -131,7 +131,8 @@ needed and keeps it for the agent's session; `stop_server` stops it.
   would be.
 - Nothing can change the command or its arguments without your passphrase,
   and agents see only the program's name (`runs: bunx`), never the arguments.
-- A handle in `--mode ask` waits for you in `kv tui` when the server starts;
+- A handle in `--mode ask` (the default, as both above are) waits for you
+  in `kv tui` when the server starts;
   `s` allows it for the rest of that agent session, until the handle's
   `grant_ttl`.
 - Locking the vault stops every server; the next call says the vault is
@@ -212,6 +213,14 @@ asked for (the first screenshot above):
   `grant_ttl` (15 minutes unless set with `kv policy --grant-ttl`)
 - `d` deny
 - `D` deny, and set the handles to `--mode deny`
+
+An `http_request` shows its method and URL, the names of the extra headers
+the agent set (not their values), and its body: the size in bytes and the
+first 200 characters. Agent text is cut at 300 characters. A request whose
+URL, header names, command, query or working directory had to be cut can
+only be allowed once: `s` is not offered, since allowing it for the session
+would let more requests like it through unread. A body longer than its
+preview does not count, since its size is shown.
 
 The Handles tab adds (`n`), edits (`e`) and removes (`x`) handles and changes
 their policy (`p`). Secret values are typed into hidden fields and the TUI

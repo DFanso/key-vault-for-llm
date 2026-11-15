@@ -250,6 +250,15 @@ fn request(approval: &Approval) -> Item {
     if let Some(cwd) = &approval.cwd {
         items.push(Item::Text(one_line(&format!("in {cwd}"), DETAIL_LEN)));
     }
+    if let Some(headers) = &approval.headers {
+        items.push(Item::Text(one_line(
+            &format!("headers {headers}"),
+            DETAIL_LEN,
+        )));
+    }
+    if let Some(body) = &approval.body {
+        items.push(Item::Text(one_line(&format!("body {body}"), DETAIL_LEN)));
+    }
     items.push(Item::Text(format!(
         "Expires in {}s",
         approval.expires_in_secs
