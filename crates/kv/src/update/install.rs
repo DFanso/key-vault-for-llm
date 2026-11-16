@@ -261,13 +261,18 @@ async fn check_version(binary: &Path, expected: &Version) -> Result<(), UpdateEr
     // child another thread is starting still holds it open.
     let mut tries = 0;
     let output = loop {
-        let run = tokio::process::Command::new(binary)
+        let mut command = tokio::process::Command::new(binary);
+        command
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output();
+            .kill_on_drop(true);
+        // The tray has no console, so without this a console program it
+        // starts flashes a window of its own.
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        let run = command.output();
         match tokio::time::timeout(VERSION_TIMEOUT, run).await {
             Err(_) => return Err(wont_run(&"it did not answer --version in time")),
             Ok(Err(e)) if e.kind() == io::ErrorKind::ExecutableFileBusy && tries < 20 => {
