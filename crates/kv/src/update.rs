@@ -177,23 +177,116 @@ pub async fn update_notice(paths: &crate::paths::Paths, now: u64) -> Option<Stri
         return None;
     }
     let file = paths.update_state_file();
-    let mut remembered = state::load(&file);
+    let remembered = state::load(&file);
     if !state::due(&remembered, now, state::CLI_EVERY) {
         return None;
     }
     let current = current_version();
     let client = check::client().ok()?;
-    let offer = tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         check::latest(&client, LATEST_URL, &current, target()?),
     )
     .await
-    .ok()?
-    .ok()?;
-    remembered.last_check = Some(now);
-    remembered.latest = offer.map(|o| o.version.to_string());
+    .unwrap_or_else(|_| Err(UpdateError::Network("timed out".into())));
+    let (remembered, notice) = after_check(remembered, now, &current, result);
     let _ = file.parent().map(std::fs::create_dir_all);
     let _ = state::save(&file, &remembered);
-    let version = state::newer_known(&remembered, &current)?;
-    Some(format!("kv {version} is out: run `kv update`."))
+    notice
+}
+
+/// What an automatic check leaves behind: the new state, and the notice to
+/// print. The attempt is counted even when it failed (so an offline kv does
+/// not ask again until tomorrow) and the remembered `latest` is kept then,
+/// so a newer version found earlier is still announced. A success replaces
+/// `latest`: with no newer release it is cleared.
+fn after_check(
+    mut state: state::UpdateState,
+    now: u64,
+    current: &semver::Version,
+    result: Result<Option<Offer>, UpdateError>,
+) -> (state::UpdateState, Option<String>) {
+    state.last_check = Some(now);
+    if let Ok(offer) = result {
+        state.latest = offer.map(|o| o.version.to_string());
+    }
+    let notice = state::newer_known(&state, current)
+        .map(|version| format!("kv {version} is out: run `kv update`."));
+    (state, notice)
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    fn offer(version: &str) -> Offer {
+        let asset = |name: &str| Asset {
+            name: name.into(),
+            url: "https://github.com/x".parse().unwrap(),
+            size: 1,
+        };
+        Offer {
+            version: Version::parse(version).unwrap(),
+            notes_url: "https://github.com/x".into(),
+            archive: asset("a"),
+            checksum: asset("a.sha256"),
+        }
+    }
+
+    fn remembered(latest: &str) -> state::UpdateState {
+        state::UpdateState {
+            last_check: Some(1),
+            latest: Some(latest.into()),
+            announced: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_check_is_counted_and_keeps_what_was_known() {
+        let current = Version::parse("1.8.0").unwrap();
+        let (state, notice) = after_check(
+            remembered("1.9.0"),
+            500,
+            &current,
+            Err(UpdateError::RateLimited),
+        );
+        assert_eq!(state.last_check, Some(500));
+        assert_eq!(state.latest.as_deref(), Some("1.9.0"));
+        assert_eq!(notice.as_deref(), Some("kv 1.9.0 is out: run `kv update`."));
+    }
+
+    #[test]
+    fn a_failed_check_with_nothing_known_says_nothing() {
+        let current = Version::parse("1.8.0").unwrap();
+        let (state, notice) = after_check(
+            state::UpdateState::default(),
+            500,
+            &current,
+            Err(UpdateError::Network("down".into())),
+        );
+        assert_eq!(state.last_check, Some(500));
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn finding_nothing_newer_clears_latest() {
+        let current = Version::parse("1.8.0").unwrap();
+        let (state, notice) = after_check(remembered("1.9.0"), 500, &current, Ok(None));
+        assert_eq!(state.latest, None);
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn finding_a_release_records_it_and_says_so() {
+        let current = Version::parse("1.8.0").unwrap();
+        let (state, notice) = after_check(
+            state::UpdateState::default(),
+            500,
+            &current,
+            Ok(Some(offer("1.9.1"))),
+        );
+        assert_eq!(state.latest.as_deref(), Some("1.9.1"));
+        assert_eq!(state.last_check, Some(500));
+        assert_eq!(notice.as_deref(), Some("kv 1.9.1 is out: run `kv update`."));
+    }
 }
