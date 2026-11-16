@@ -71,3 +71,34 @@ fn newer_known_only_when_latest_is_newer() {
     assert_eq!(newer_known(&with(Some("garbage")), &v("1.8.0")), None);
     assert_eq!(newer_known(&with(None), &v("1.8.0")), None);
 }
+
+#[test]
+fn saves_at_once_each_write_a_file_of_their_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = Paths::under(dir.path()).update_state_file();
+    let states: Vec<UpdateState> = (0..8)
+        .map(|n| UpdateState {
+            last_check: Some(n),
+            latest: Some(format!("1.{n}.0")),
+            announced: None,
+        })
+        .collect();
+    std::thread::scope(|scope| {
+        for state in &states {
+            let path = &path;
+            scope.spawn(move || {
+                for _ in 0..20 {
+                    // A rename can lose a race on Windows; never a half file.
+                    let _ = save(path, state);
+                }
+            });
+        }
+    });
+    assert!(states.contains(&load(&path)), "{:?}", load(&path));
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != path.file_name().unwrap())
+        .collect();
+    assert_eq!(left, Vec::<std::ffi::OsString>::new());
+}

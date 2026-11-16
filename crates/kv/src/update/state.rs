@@ -3,7 +3,7 @@
 //! Nothing here is secret.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -38,17 +38,24 @@ pub fn load(path: &Path) -> UpdateState {
         .unwrap_or_default()
 }
 
-/// Writes the state file by writing a temporary file beside it and
-/// renaming it into place, so a crash never leaves half a file.
+/// Writes the state file by writing a temporary file of its own beside it
+/// and renaming it into place, so a crash never leaves half a file and two
+/// kv processes saving at once (`kv status` beside the tray, say) never
+/// write into the same temporary file. The last rename wins.
 pub fn save(path: &Path, state: &UpdateState) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = Path::new(&tmp);
-    fs::write(tmp, json)?;
-    fs::rename(tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(tmp);
-    })
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    // Removed if anything below fails.
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    tmp.write_all(&json)?;
+    tmp.persist(path).map(drop).map_err(|e| e.error)
 }
 
 /// Whether a check is due: nothing was checked yet, or at least `every`
