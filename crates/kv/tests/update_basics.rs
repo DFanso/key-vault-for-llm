@@ -61,3 +61,32 @@ fn update_paths() {
             .ends_with(std::path::Path::new("run").join("update.lock"))
     );
 }
+
+/// A newer kv found by an earlier check is told on every run, without
+/// asking GitHub again before the day is out; only a release build tells.
+#[tokio::test]
+async fn a_known_update_is_told_on_every_run() {
+    use kv::update::state::{UpdateState, save};
+    use kv::update::update_notice;
+
+    if !checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = Paths::under(tmp.path());
+    let file = paths.update_state_file();
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let now = 1_000_000;
+    let remembered = UpdateState {
+        last_check: Some(now - 60),
+        latest: Some("999.0.0".into()),
+        announced: None,
+    };
+    save(&file, &remembered).unwrap();
+    let expected = cfg!(feature = "release-build").then(|| "kv 999.0.0 is out: run `kv update`.");
+    for _ in 0..2 {
+        assert_eq!(update_notice(&paths, now).await.as_deref(), expected);
+    }
+    // Not asked again: the last check stays as it was.
+    assert_eq!(kv::update::state::load(&file), remembered);
+}

@@ -170,24 +170,27 @@ impl fmt::Display for UpdateError {
 impl std::error::Error for UpdateError {}
 
 /// The line `kv status` and `kv tui` print when a newer kv is out, or
-/// `None`. It asks GitHub at most once a day (`now` is unix seconds), and
-/// only in a release build, with checks on, and with no tray running (the
-/// tray tells the user itself). The ask gives up after 3 seconds. Nothing
-/// that goes wrong is reported.
+/// `None`. Only in a release build, with checks on, and with no tray
+/// running (the tray tells the user itself). A newer version found earlier
+/// is told on every run; GitHub is asked at most once a day (`now` is unix
+/// seconds), and that ask gives up after 3 seconds. Nothing that goes wrong
+/// is reported.
 pub async fn update_notice(paths: &crate::paths::Paths, now: u64) -> Option<String> {
     if !is_release_build() || !checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()) {
         return None;
     }
     let file = paths.update_state_file();
     let remembered = state::load(&file);
+    let current = current_version();
     if !state::due(&remembered, now, state::CLI_EVERY) {
-        return None;
+        // Nothing to ask GitHub: tell what is known, if anything. The tray
+        // lock is looked at only then, so most runs do not touch it.
+        let notice = state::newer_known(&remembered, &current).map(|v| notice_line(&v))?;
+        return (!crate::tray::is_running(paths)).then_some(notice);
     }
-    // After the cheaper test, so most runs do not touch the tray lock.
     if crate::tray::is_running(paths) {
         return None;
     }
-    let current = current_version();
     let client = check::client().ok()?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -199,6 +202,11 @@ pub async fn update_notice(paths: &crate::paths::Paths, now: u64) -> Option<Stri
     let _ = file.parent().map(std::fs::create_dir_all);
     let _ = state::save(&file, &remembered);
     notice
+}
+
+/// What `kv status` and `kv tui` say when kv `version` is out.
+fn notice_line(version: &Version) -> String {
+    format!("kv {version} is out: run `kv update`.")
 }
 
 /// What an automatic check leaves behind: the new state, and the notice to
@@ -216,8 +224,7 @@ fn after_check(
     if let Ok(offer) = result {
         state.latest = offer.map(|o| o.version.to_string());
     }
-    let notice = state::newer_known(&state, current)
-        .map(|version| format!("kv {version} is out: run `kv update`."));
+    let notice = state::newer_known(&state, current).map(|version| notice_line(&version));
     (state, notice)
 }
 
