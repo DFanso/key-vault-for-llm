@@ -127,11 +127,9 @@ pub fn run(paths: Paths, lock: File, after_update: Option<AfterUpdate>) -> io::R
         #[cfg(windows)]
         clipboard: super::clipboard::Clipboard::default(),
     };
-    let mut ready_file = None;
-    if let Some(after) = after_update {
-        notify::tray(updated_text(&after.version));
-        ready_file = after.ready_file;
-    }
+    // Said once the icon is up: a tray that fails before that is not the
+    // one the update ends with.
+    let mut after_update = after_update;
     // Held for as long as the tray runs, unless an update hands it to the
     // tray on the new binary.
     let lock = Arc::new(Mutex::new(Some(lock)));
@@ -177,9 +175,13 @@ pub fn run(paths: Paths, lock: File, after_update: Option<AfterUpdate>) -> io::R
             Event::NewEvents(StartCause::Init) => match Tray::new() {
                 Ok(created) => {
                     tray = Some(created);
-                    // The tray this one replaces quits once it sees this.
-                    if let Some(ready) = ready_file.take() {
-                        let _ = std::fs::write(ready, b"");
+                    if let Some(after) = after_update.take() {
+                        // The tray this one replaces quits once it sees
+                        // this.
+                        if let Some(ready) = &after.ready_file {
+                            let _ = std::fs::write(ready, b"");
+                        }
+                        notify::tray(updated_text(&after.version));
                     }
                     // The tray is up, so this kv works: what a Windows
                     // update left of the old one can go.
