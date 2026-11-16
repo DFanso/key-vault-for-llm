@@ -2425,6 +2425,38 @@ async fn a_daemon_that_does_not_stop_keeps_the_old_tray() {
     assert_eq!(desk.notes().last().map(String::as_str), Some(STUCK));
 }
 
+/// An offer whose version an earlier update already put in place (its
+/// handover failed) is not installed again: the tray says how to finish.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_already_in_place_says_how_to_finish() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Err(UpdateError::AlreadyInstalled("1.9.0".into())));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    desk.take();
+    assert!(!worker.act(page(install("1.9.0"))).await);
+    assert_eq!(
+        install_results(&desk.take()),
+        [(
+            false,
+            "kv 1.9.0 is already installed. Quit kv tray and start it again to finish the \
+             update."
+                .to_owned()
+        )]
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+    assert_eq!(update_line(&worker.model().await), None);
+}
+
 /// A newer version found while the confirmation was open is not installed
 /// on the strength of the older one: the confirmation asks again.
 #[tokio::test(flavor = "multi_thread")]

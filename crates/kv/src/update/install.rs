@@ -53,10 +53,10 @@ pub struct Installed {
 const LOCK_NAME: &str = ".kv-update.lock";
 
 /// Takes the lock that lets one update at a time replace the binary in
-/// `dir`, its folder: two kv using different `KV_HOME`s but the same binary
-/// wait for each other. It is held until the returned file is dropped or
-/// the process exits; if another kv holds it, the answer is `Busy`. The
-/// lock file stays in `dir`.
+/// `dir`, its folder, so two kv using different `KV_HOME`s but the same
+/// binary cannot both update it. It is held until the returned file is
+/// dropped or the process exits. It does not wait: if another kv holds it,
+/// the answer is `Busy` at once. The lock file stays in `dir`.
 pub fn update_lock(dir: &Path) -> Result<File, UpdateError> {
     let file = File::options()
         .create(true)
@@ -83,8 +83,11 @@ pub fn update_lock(dir: &Path) -> Result<File, UpdateError> {
 ///
 /// In order: refuses a build that is not from the release build, takes the
 /// update lock in the installed binary's folder (held until the swap is
-/// done), removes work folders an interrupted update left, makes a work
-/// folder beside the installed binary, downloads
+/// done), stops with `AlreadyInstalled` if the installed binary already
+/// answers `--version` with the offered version (an earlier update put it
+/// there; nothing is downloaded and the backups stay as they are), removes
+/// work folders an interrupted update left, makes a work folder beside the
+/// installed binary, downloads
 /// the checksum (at most 4 KiB) and the archive (at most 64 MiB, and no
 /// more than the release announced), checks the archive against the
 /// checksum, unpacks the binary, runs it with `--version` and expects
@@ -107,6 +110,11 @@ pub async fn install(
         .ok_or_else(|| UpdateError::Swap(format!("{} has no folder", opts.installed.display())))?;
     // Held through the swap below: dropped only when this returns.
     let _lock = update_lock(dir)?;
+    // Installing it again would put the new kv in place of the backup too,
+    // leaving no way back.
+    if check_version(&opts.installed, &offer.version).await.is_ok() {
+        return Err(UpdateError::AlreadyInstalled(offer.version.to_string()));
+    }
     remove_stale_work(dir);
     // In the same folder, so the final rename stays on one filesystem.
     // Dropping it removes it and everything in it.

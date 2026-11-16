@@ -309,6 +309,38 @@ async fn a_work_folder_left_behind_is_removed() {
     assert_eq!(names(&s.bin), [".kv-update-note", ".kv-update.lock", "kv"]);
 }
 
+/// A kv already updated to the offered version (by an earlier update whose
+/// tray did not hand over, say) is not installed again: nothing is
+/// downloaded, and the backup of the version before stays the way back.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_version_already_in_place_is_not_installed_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup();
+    let current = script("99.0.0");
+    std::fs::write(&s.installed, &current).unwrap();
+    std::fs::set_permissions(&s.installed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(s.bin.join("kv.previous"), OLD).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let offer = offer_at(&server, 100, 64);
+    let client = kv::update::check::download_client().unwrap();
+
+    let err = install(&client, &offer, &options(&s.installed))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, UpdateError::AlreadyInstalled("99.0.0".into()));
+    assert_eq!(err.to_string(), "kv 99.0.0 is already installed");
+    assert_eq!(std::fs::read(&s.installed).unwrap(), current);
+    assert_eq!(std::fs::read(s.bin.join("kv.previous")).unwrap(), OLD);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv", "kv.previous"]);
+}
+
 #[tokio::test]
 async fn not_release_build_refused() {
     let s = setup();
@@ -452,8 +484,8 @@ fn the_way_back_names_the_kept_file() {
     }
 }
 
-/// The lock is the binary's folder's, not a `KV_HOME`'s: two homes
-/// updating one kv wait for each other.
+/// The lock is the binary's folder's, not a `KV_HOME`'s: while one home
+/// updates a kv, another home updating it is told `Busy`.
 #[test]
 fn lock_is_released_when_dropped() {
     let s = setup();

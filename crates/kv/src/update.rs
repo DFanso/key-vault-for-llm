@@ -132,6 +132,9 @@ pub enum UpdateError {
     WontRun(String),
     /// Another update is already running.
     Busy,
+    /// The binary in place already is the version offered: an earlier
+    /// update put it there, and the kv running is older.
+    AlreadyInstalled(String),
     /// Replacing the binary failed.
     Swap(String),
 }
@@ -162,6 +165,7 @@ impl fmt::Display for UpdateError {
             }
             Self::WontRun(e) => write!(f, "the new kv does not run on this system: {e}"),
             Self::Busy => write!(f, "another kv update is running"),
+            Self::AlreadyInstalled(version) => write!(f, "kv {version} is already installed"),
             Self::Swap(e) => write!(f, "could not replace kv: {e}"),
         }
     }

@@ -713,6 +713,20 @@ impl<D: Desktop> Worker<D> {
         }
         let installed = match self.updater.install(offer).await {
             Ok(installed) => installed,
+            // An earlier update from this tray went in, but its handover
+            // did not: nothing is left to install.
+            Err(UpdateError::AlreadyInstalled(version)) => {
+                self.offer = None;
+                self.send_state();
+                self.install_result(
+                    false,
+                    format!(
+                        "kv {version} is already installed. Quit kv tray and start it again to \
+                         finish the update."
+                    ),
+                );
+                return Next::Done;
+            }
             Err(e) => {
                 self.install_result(false, format!("{}.", sentence(&e.to_string())));
                 return Next::Done;

@@ -1086,9 +1086,15 @@ async fn update(paths: &Paths, check_only: bool, yes: bool) -> Result<()> {
     let download = check::download_client()
         .map_err(|e| CliError(format!("cannot start the download: {e}")))?;
     println!("Downloading kv {}…", offer.version);
-    let done = install::install(&download, &offer, &opts)
-        .await
-        .map_err(failed)?;
+    let done = match install::install(&download, &offer, &opts).await {
+        Ok(done) => done,
+        // Another kv update got there first.
+        Err(update::UpdateError::AlreadyInstalled(version)) => {
+            println!("kv {version} is already installed: kv is up to date.");
+            return Ok(());
+        }
+        Err(e) => return Err(failed(e)),
+    };
     // A daemon left running stays on the old binary, perhaps unlocked.
     if stop_or_lock(paths, ControlCommand::Stop).await.is_err() {
         return Err(CliError(format!(
