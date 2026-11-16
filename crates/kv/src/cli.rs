@@ -1076,10 +1076,18 @@ async fn update(paths: &Paths, check_only: bool, yes: bool) -> Result<()> {
     };
     let download = check::download_client()
         .map_err(|e| CliError(format!("cannot start the download: {e}")))?;
+    println!("Downloading kv {}…", offer.version);
     let done = install::install(&download, &offer, &opts, paths)
         .await
         .map_err(failed)?;
-    stop_or_lock(paths, ControlCommand::Stop).await?;
+    // A daemon left running stays on the old binary, perhaps unlocked.
+    if stop_or_lock(paths, ControlCommand::Stop).await.is_err() {
+        return Err(CliError(format!(
+            "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then start kv \
+             again.",
+            done.version
+        )));
+    }
     println!("Updated to kv {}. Unlock to continue.", done.version);
     if cfg!(target_os = "macos") {
         println!(
