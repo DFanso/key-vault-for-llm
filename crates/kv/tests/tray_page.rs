@@ -104,3 +104,28 @@ fn secrets_are_typed_only_into_password_fields() {
         "variable values"
     );
 }
+
+/// The update confirmation says what updating stops, word for word as
+/// `kv update` does, and the page asks the tray for each step.
+#[test]
+fn the_update_dialog_warns_before_updating() {
+    let index = asset("/index.html").unwrap().body;
+    assert!(
+        index.contains(
+            "Updating locks the vault and stops anything agents have running now: waiting \
+             approvals, programs, MCP servers and database connections."
+        ),
+        "the warning"
+    );
+    assert!(index.contains(r#"id="update-dialog""#));
+    let script = asset("/app.js").unwrap().body;
+    for message in [
+        r#"type: "offer_update""#,
+        r#"type: "check_updates""#,
+        r#"type: "install_update""#,
+        r#"type: "open_notes""#,
+        "Update to kv ",
+    ] {
+        assert!(script.contains(message), "{message}");
+    }
+}

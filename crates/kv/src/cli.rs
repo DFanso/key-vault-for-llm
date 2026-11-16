@@ -98,6 +98,10 @@ enum Command {
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         login: Option<bool>,
+        /// Started by the tray an update replaced: wait for it to let go,
+        /// and say kv was updated to this version.
+        #[arg(long, value_name = "VERSION", hide = true, value_parser = semver::Version::parse)]
+        after_update: Option<semver::Version>,
     },
     /// kv.app's notification helper, which `kv tray` starts on macOS.
     #[command(hide = true)]
@@ -365,10 +369,14 @@ pub fn main() -> ExitCode {
             }
         };
     }
-    if let Command::Tray { login } = cli.command {
+    if let Command::Tray {
+        login,
+        after_update,
+    } = cli.command
+    {
         // The tray's event loop needs the main thread, so it runs before
         // any runtime; its worker starts one of its own.
-        return match tray(login) {
+        return match tray(login, after_update) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("kv: {e}");
@@ -401,7 +409,7 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn tray(login: Option<bool>) -> io::Result<()> {
+fn tray(login: Option<bool>, after_update: Option<semver::Version>) -> io::Result<()> {
     match login {
         Some(on) => {
             crate::tray::login::set(on)?;
@@ -412,7 +420,7 @@ fn tray(login: Option<bool>) -> io::Result<()> {
             }
             Ok(())
         }
-        None => crate::tray::run(Paths::from_env()?),
+        None => crate::tray::run(Paths::from_env()?, after_update),
     }
 }
 

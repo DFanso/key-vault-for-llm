@@ -62,6 +62,7 @@ fn view<'a>(status: Option<&'a Status>, overview: Option<&'a Overview>) -> View<
         overview,
         device: Some(DeviceKind::TouchId),
         login: false,
+        update: None,
     }
 }
 
@@ -151,6 +152,48 @@ fn without_a_session_the_menu_offers_to_unlock() {
         labels(&model.menu)[..2],
         ["(No vault yet: run `kv init`)", "Open kv…"]
     );
+}
+
+#[test]
+fn update_line_in_both_menus() {
+    let newer = semver::Version::new(1, 9, 0);
+    let locked = status(true, 0);
+    let overview = overview(vec![approval(7, true)]);
+    for unlocked in [false, true] {
+        let plain = || match unlocked {
+            false => view(Some(&locked), None),
+            true => view(Some(&overview.status), Some(&overview)),
+        };
+        let without = Model::new(plain());
+        assert!(
+            !labels(&without.menu)
+                .iter()
+                .any(|l| l.starts_with("Update")),
+            "{:?}",
+            without.menu
+        );
+        let model = Model::new(View {
+            update: Some(&newer),
+            ..plain()
+        });
+        let labels = labels(&model.menu);
+        let at = labels
+            .iter()
+            .position(|l| l == "Update to kv 1.9.0…")
+            .unwrap_or_else(|| panic!("{labels:?}"));
+        assert_eq!(labels[at + 1], "Quit kv tray", "{labels:?}");
+        assert!(matches!(
+            &model.menu[at],
+            Item::Action {
+                action: Action::OfferUpdate,
+                ..
+            }
+        ));
+        assert_eq!(
+            Action::from_id(&Action::OfferUpdate.id()),
+            Some(Action::OfferUpdate)
+        );
+    }
 }
 
 #[test]

@@ -91,3 +91,95 @@ fn the_window_icon_is_the_mark_in_colour() {
         "the key's shaft is white"
     );
 }
+
+#[test]
+fn the_next_tray_waits_for_the_lock() {
+    use kv::tray::lock_single_retry;
+    use std::time::Duration;
+
+    let home = TempDir::new().unwrap();
+    let paths = Paths::under(home.path());
+    let first = lock_single(&paths).unwrap();
+    let error = lock_single_retry(&paths, Duration::from_millis(100)).unwrap_err();
+    assert_eq!(error.to_string(), "kv tray is already running");
+    let letting_go = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(first);
+    });
+    lock_single_retry(&paths, Duration::from_secs(5)).unwrap();
+    letting_go.join().unwrap();
+}
+
+/// A script standing in for the new kv: it writes down how it was started
+/// and runs `body`.
+#[cfg(unix)]
+fn successor(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("kv");
+    let args = dir.join("args");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$@\" >> '{}'\n{body}\n", args.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+#[test]
+fn a_successor_that_never_comes_up_leaves_the_old_tray_in_charge() {
+    use kv::tray::update::restart_after_update;
+    use std::sync::{Arc, Mutex};
+
+    let home = TempDir::new().unwrap();
+    let paths = Paths::under(home.path());
+    let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
+    let exe = successor(home.path(), "exit 1");
+    let error =
+        restart_after_update(&lock, &exe, &semver::Version::new(1, 9, 0), &paths).unwrap_err();
+    assert_eq!(
+        error,
+        "kv 1.9.0 is installed, but the new tray didn't start. Run `kv tray`, or log out and \
+         back in."
+    );
+    let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
+    assert_eq!(tried, "tray --after-update 1.9.0\n".repeat(3));
+    assert!(lock.lock().unwrap().is_some(), "the lock was taken back");
+    assert!(kv::tray::is_running(&paths));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_successor_that_takes_the_lock_is_the_tray_now() {
+    use kv::tray::update::restart_after_update;
+    use std::sync::{Arc, Mutex};
+
+    let home = TempDir::new().unwrap();
+    let paths = Paths::under(home.path());
+    let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
+    // Holds the tray lock (flock, as kv's) for a moment, like a new tray.
+    let body = format!(
+        "exec perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die; \
+         flock($f, LOCK_EX) or die; sleep 2' '{}'",
+        paths.tray_lock_file().display()
+    );
+    let exe = successor(home.path(), &body);
+    restart_after_update(&lock, &exe, &semver::Version::new(1, 9, 0), &paths).unwrap();
+    assert!(lock.lock().unwrap().is_none(), "the old tray let go");
+    let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
+    assert_eq!(tried, "tray --after-update 1.9.0\n");
+}
+
+#[test]
+fn the_new_tray_says_it_was_updated() {
+    let text = kv::tray::update::updated_text(&semver::Version::new(1, 9, 0));
+    let mut expected = "Updated to kv 1.9.0. Unlock to continue.".to_owned();
+    if cfg!(target_os = "macos") {
+        expected.push_str(
+            " macOS will ask for your login password once before Touch ID works again; choose \
+             Always Allow.",
+        );
+    }
+    assert_eq!(text, expected);
+}

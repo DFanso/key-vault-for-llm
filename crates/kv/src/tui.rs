@@ -188,21 +188,32 @@ impl Driver {
             Effect::RequestShare(call) => self.send(ControlCommand::RequestShare(call)).await,
             Effect::SendShare(call) => self.send(ControlCommand::SendShare(call)).await,
             Effect::ReceiveShare(call) => self.send(ControlCommand::ReceiveShare(call)).await,
-            Effect::Lock => {
-                self.token = None;
-                let request = ControlRequest {
-                    passphrase: None,
-                    device: None,
-                    token: None,
-                    command: ControlCommand::Lock,
-                };
-                match client::control_if_running(&self.paths, &request).await {
-                    Ok(None | Some(ControlResponse::Done { .. })) => Outcome::Done(Vec::new()),
-                    Ok(Some(other)) => Outcome::Failed(format!("could not lock: {other:?}")),
-                    Err(e) => Outcome::Failed(format!("could not lock: {e}")),
-                }
-            }
+            Effect::Lock => self.end_session(ControlCommand::Lock, "lock").await,
             Effect::Quit => Outcome::Done(Vec::new()),
+        }
+    }
+
+    /// Locks the vault and stops the daemon, as `kv stop` does, so the next
+    /// command starts the daemon afresh. The session ends with it.
+    pub async fn stop(&mut self) -> Outcome {
+        self.end_session(ControlCommand::Stop, "stop the daemon")
+            .await
+    }
+
+    /// Drops the session and sends `command`, which needs none (Lock or
+    /// Stop). No daemon running is done too.
+    async fn end_session(&mut self, command: ControlCommand, what: &str) -> Outcome {
+        self.token = None;
+        let request = ControlRequest {
+            passphrase: None,
+            device: None,
+            token: None,
+            command,
+        };
+        match client::control_if_running(&self.paths, &request).await {
+            Ok(None | Some(ControlResponse::Done { .. })) => Outcome::Done(Vec::new()),
+            Ok(Some(other)) => Outcome::Failed(format!("could not {what}: {other:?}")),
+            Err(e) => Outcome::Failed(format!("could not {what}: {e}")),
         }
     }
 

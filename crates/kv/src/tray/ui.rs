@@ -15,7 +15,7 @@ mod webview;
 
 use std::fs::File;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tao::event::{Event, StartCause, WindowEvent};
@@ -28,6 +28,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 use super::model::{Action, Edit, IconState, Item, Model, edits};
 #[cfg(target_os = "macos")]
 use super::notices::Notice;
+use super::update::{Release, updated_text};
 use super::window::{Stays, Tab, ToPage};
 use super::worker::{Desktop, Worker};
 use super::{icon, login};
@@ -50,7 +51,8 @@ enum Message {
     /// Open kv's window, or bring it to the front. The worker sends the tab
     /// to the page itself.
     Open,
-    Page(ToPage),
+    /// Boxed: the page's state is far larger than the other messages.
+    Page(Box<ToPage>),
     /// The tray icon was clicked; it is here.
     Clicked(Anchor),
     /// The page asked to hide the window.
@@ -67,8 +69,9 @@ enum Message {
     Quit,
 }
 
-/// Runs the event loop; returns only if it cannot start.
-pub fn run(paths: Paths, lock: File) -> io::Result<()> {
+/// Runs the event loop; returns only if it cannot start. `after_update` is
+/// the version an update just installed, for the tray to say so.
+pub fn run(paths: Paths, lock: File, after_update: Option<semver::Version>) -> io::Result<()> {
     #[cfg(windows)]
     leave_own_console();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -123,8 +126,20 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
         #[cfg(windows)]
         clipboard: super::clipboard::Clipboard::default(),
     };
+    if let Some(version) = after_update {
+        notify::tray(updated_text(&version));
+    }
+    // Held for as long as the tray runs, unless an update hands it to the
+    // tray on the new binary.
+    let lock = Arc::new(Mutex::new(Some(lock)));
+    let updater = Release::new(paths.clone(), lock.clone());
     std::thread::spawn(move || {
-        let worker = Worker::new(paths, device::platform().map(Arc::from), system);
+        let worker = Worker::new(
+            paths,
+            device::platform().map(Arc::from),
+            system,
+            Box::new(updater),
+        );
         let show = proxy.clone();
         runtime.block_on(worker.run(inbox, move |model| {
             let _ = show.send_event(Message::Show(model));
@@ -148,6 +163,9 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
     // A click on the icon asked the worker for the window: it opens as the
     // menu, not the full window.
     let mut want_menu = false;
+    // Whether the menu has a line for an update on offer, which makes it
+    // taller.
+    let mut update_line = false;
     event_loop.run(move |event, target, flow| {
         // Held for as long as the loop runs.
         let _ = &lock;
@@ -161,6 +179,25 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 }
             },
             Event::UserEvent(Message::Show(model)) => {
+                let offers = model.menu.iter().any(|item| {
+                    matches!(
+                        item,
+                        Item::Action {
+                            action: Action::OfferUpdate,
+                            ..
+                        }
+                    )
+                });
+                if offers != update_line {
+                    update_line = offers;
+                    if let Some(open) = &window {
+                        open.set_update_line(offers);
+                        // The menu on show takes its new size now.
+                        if open.is_visible() && !full {
+                            open.show_menu(anchor);
+                        }
+                    }
+                }
                 if let Some(tray) = &mut tray {
                     tray.show(model);
                 }
@@ -257,7 +294,14 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
                 }
                 None => {
                     let menu = std::mem::take(&mut want_menu);
-                    match KvWindow::open(target, actions.clone(), pages.clone(), anchor, menu) {
+                    match KvWindow::open(
+                        target,
+                        actions.clone(),
+                        pages.clone(),
+                        anchor,
+                        menu,
+                        update_line,
+                    ) {
                         Ok(opened) => {
                             window = Some(opened);
                             full = !menu;
@@ -275,7 +319,7 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
             Event::UserEvent(Message::Page(message)) => {
                 if let ToPage::State {
                     waiting_for_device, ..
-                } = &message
+                } = &*message
                 {
                     // The prompt is over: the window takes the focus back,
                     // so a click elsewhere hides it again.
@@ -538,7 +582,7 @@ impl Desktop for System {
     }
 
     fn page(&self, message: ToPage) {
-        let _ = self.proxy.send_event(Message::Page(message));
+        let _ = self.proxy.send_event(Message::Page(Box::new(message)));
     }
 
     fn login_is_on(&self) -> bool {
@@ -576,6 +620,25 @@ impl Desktop for System {
     #[cfg(windows)]
     fn clear_copied(&self) {
         self.clipboard.clear_now();
+    }
+
+    fn open_url(&self, url: &str) {
+        open_in_browser(url);
+    }
+}
+
+/// Opens `url`, an https address, in the default browser.
+fn open_in_browser(url: &str) {
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    let child = Command::new("/usr/bin/open").arg(url).spawn();
+    #[cfg(windows)]
+    let child = Command::new("explorer").arg(url).spawn();
+    // Nobody waits for the browser, so reap it off to the side.
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 

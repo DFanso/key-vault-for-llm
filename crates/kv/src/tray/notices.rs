@@ -48,6 +48,15 @@ pub struct Notice {
     /// Whether it offers Allow for this session: the request named its
     /// agent session.
     pub can_grant: bool,
+    /// Whether it offers answers at all. One that only tells the user
+    /// something (a new kv is out) has none; a click on it still comes
+    /// back.
+    #[serde(default = "with_answers")]
+    pub answers: bool,
+}
+
+fn with_answers() -> bool {
+    true
 }
 
 impl Notice {
@@ -83,9 +92,29 @@ impl Notice {
             subtitle: tool_words(&approval.tool).to_owned(),
             body,
             can_grant: approval.can_grant,
+            answers: true,
+        }
+    }
+
+    /// The notification that kv `version` is out, under the key
+    /// `update-<version>`. It has no answers: a click on it opens the
+    /// confirmation in kv's window.
+    pub fn update(version: &semver::Version) -> Notice {
+        Notice {
+            key: format!("{UPDATE_PREFIX}{version}"),
+            title: format!("kv {version} is out"),
+            subtitle: String::new(),
+            body: UPDATE_BODY.to_owned(),
+            can_grant: false,
+            answers: false,
         }
     }
 }
+
+/// How the key of an update's notification starts.
+pub const UPDATE_PREFIX: &str = "update-";
+/// What an update's notification says, after its title.
+pub const UPDATE_BODY: &str = "Open kv's menu to update.";
 
 /// What the tray tells the notification helper.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

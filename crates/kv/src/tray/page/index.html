@@ -29,6 +29,7 @@
     <button type="button" role="menuitem" id="menu-lock"><span id="menu-lock-icon" class="i i-lock" aria-hidden="true"></span><span class="label" id="menu-lock-text">Lock kv</span></button>
     <button type="button" role="menuitemcheckbox" id="menu-login" aria-checked="false"><span class="i i-power" aria-hidden="true"></span><span class="label">Start at login</span><span class="switch small" aria-hidden="true"><span class="knob"></span></span></button>
     <div class="menu-sep" role="separator"></div>
+    <button type="button" role="menuitem" id="menu-update" class="accent" hidden><span class="i i-download" aria-hidden="true"></span><span class="label" id="menu-update-text"></span></button>
     <button type="button" role="menuitem" id="menu-quit" class="danger"><span class="i i-log-out" aria-hidden="true"></span><span class="label">Quit kv tray</span></button>
   </div>
 </main>
@@ -249,6 +250,12 @@
           <button type="button" id="settings-lock" class="outline"><span class="i i-lock" aria-hidden="true"></span>Lock vault</button>
         </div>
         <div class="panel setting">
+          <span class="stat-icon tone-green"><span class="i i-download" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong id="settings-version">kv</strong><span class="muted small" id="update-status" role="status"></span></div>
+          <button type="button" id="settings-update" class="primary" hidden><span class="i i-download" aria-hidden="true"></span><span class="text">Update…</span></button>
+          <button type="button" id="check-updates" class="outline">Check for updates</button>
+        </div>
+        <div class="panel setting">
           <span class="stat-icon tone-red"><span class="i i-power" aria-hidden="true"></span></span>
           <div class="setting-text"><strong>Quit kv tray</strong><span class="muted small">Agents' requests then wait for <code>kv tui</code> or time out.</span></div>
           <button type="button" class="outline danger" data-quit>Quit</button>
@@ -445,6 +452,27 @@
     <div class="actions">
       <button type="button" id="confirm-cancel" class="outline">Cancel</button>
       <button type="submit" id="confirm-ok" class="danger-fill">Remove</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- A newer kv: what updating stops, its release notes, and the user's yes. -->
+<dialog id="update-dialog" aria-labelledby="update-title">
+  <form id="update-form">
+    <div class="dialog-head">
+      <span class="stat-icon tone-accent"><span class="i i-download" aria-hidden="true"></span></span>
+      <h2 id="update-title"></h2>
+    </div>
+    <div class="callout tone-amber">
+      <span class="i i-triangle-alert" aria-hidden="true"></span>
+      <p>Updating locks the vault and stops anything agents have running now: waiting approvals, programs, MCP servers and database connections.</p>
+    </div>
+    <p class="update-notes"><button type="button" id="update-notes" class="link">Release notes<span class="i i-arrow-right" aria-hidden="true"></span></button><span id="update-notes-url" class="muted small"></span></p>
+    <p id="update-progress" class="waiting" role="status" hidden></p>
+    <p id="update-error" class="message" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="update-cancel" class="outline">Not now</button>
+      <button type="submit" id="update-ok" class="primary"><span class="i i-download" aria-hidden="true"></span>Update</button>
     </div>
   </form>
 </dialog>
