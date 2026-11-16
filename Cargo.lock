@@ -2440,6 +2440,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -17,3 +17,4 @@ pub mod sharefile;
 pub mod throttle;
 pub mod tray;
 pub mod tui;
+pub mod update;

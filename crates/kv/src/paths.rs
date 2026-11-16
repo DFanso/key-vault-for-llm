@@ -62,6 +62,17 @@ impl Paths {
         self.runtime.join("tray.lock")
     }
 
+    /// What kv last learned about a newer release, beside the audit log. It
+    /// holds no secret.
+    pub fn update_state_file(&self) -> PathBuf {
+        self.audit.with_file_name("update.json")
+    }
+
+    /// Held while `kv update` swaps the binary, so a second one can tell.
+    pub fn update_lock_file(&self) -> PathBuf {
+        self.runtime.join("update.lock")
+    }
+
     /// The window's appearance, as the user last picked it in kv tray. Kept
     /// beside the vault; it holds no secret.
     pub fn tray_theme_file(&self) -> PathBuf {
