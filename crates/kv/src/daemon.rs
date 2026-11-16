@@ -6,4 +6,5 @@ mod server;
 mod state;
 
 pub use server::{Outcome, run};
+pub(crate) use state::printable;
 pub use state::{After, Daemon, Prepared, Settings, Waiting};
