@@ -69,6 +69,14 @@ mod tar_xz {
     }
 
     fn build(dir: &Path, items: &[Item]) -> std::path::PathBuf {
+        build_with(dir, items, lzma_rust2::XzOptions::with_preset(0))
+    }
+
+    fn build_with(
+        dir: &Path,
+        items: &[Item],
+        options: lzma_rust2::XzOptions,
+    ) -> std::path::PathBuf {
         let mut builder = tar::Builder::new(Vec::new());
         for item in items {
             match item {
@@ -97,8 +105,7 @@ mod tar_xz {
         }
         let tar_bytes = builder.into_inner().unwrap();
         let mut xz = Vec::new();
-        let mut writer =
-            lzma_rust2::XzWriter::new(&mut xz, lzma_rust2::XzOptions::with_preset(0)).unwrap();
+        let mut writer = lzma_rust2::XzWriter::new(&mut xz, options).unwrap();
         writer.write_all(&tar_bytes).unwrap();
         writer.finish().unwrap();
         let path = dir.join("kv-t.tar.xz");
@@ -193,6 +200,20 @@ mod tar_xz {
         // Exactly at the limit is fine.
         extract_binary_with_limit(&archive, &out, 64 * 1024).unwrap();
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 64 * 1024);
+    }
+
+    #[test]
+    fn huge_xz_dictionary_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = lzma_rust2::XzOptions::with_preset(0);
+        options.lzma_options.dict_size = 256 * 1024 * 1024;
+        let archive = build_with(dir.path(), &[Item::File("kv-t/kv", b"x")], options);
+        let out = dir.path().join("out");
+        assert!(matches!(
+            extract_binary(&archive, &out),
+            Err(UpdateError::TooLarge(_))
+        ));
+        assert!(!out.exists());
     }
 
     #[test]

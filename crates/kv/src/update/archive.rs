@@ -17,6 +17,11 @@ const MAX_BINARY: u64 = 256 * 1024 * 1024;
 #[cfg(unix)]
 const TAR_OVERHEAD: u64 = 1024 * 1024;
 
+/// The most memory the xz decoder may use for one block: 128 MiB. Real kv
+/// archives use a few MiB.
+#[cfg(unix)]
+const MAX_XZ_MEMORY_KB: u32 = 128 * 1024;
+
 /// The name of the binary inside a release archive.
 #[cfg(unix)]
 const BINARY: &str = "kv";
@@ -139,10 +144,18 @@ pub fn extract_binary_with_limit(
     // Both the xz and the tar reader stream, so only small buffers are held.
     // The unpacked stream is capped too, so a crafted archive stops early
     // however its entries are laid out.
-    let xz = lzma_rust2::XzReader::new(io::BufReader::new(file), false);
+    // A block header can declare any dictionary size, so cap what the
+    // decoder may allocate for it.
+    let xz = lzma_rust2::XzReader::new_mem_limit(io::BufReader::new(file), false, MAX_XZ_MEMORY_KB);
     let mut tar = tar::Archive::new(xz.take(limit.saturating_add(TAR_OVERHEAD)));
 
-    let damaged = |e: io::Error| UpdateError::Malformed(format!("the archive is damaged: {e}"));
+    let damaged = |e: io::Error| {
+        if e.kind() == io::ErrorKind::OutOfMemory {
+            UpdateError::TooLarge("the archive's decompression memory")
+        } else {
+            UpdateError::Malformed(format!("the archive is damaged: {e}"))
+        }
+    };
     for entry in tar.entries().map_err(damaged)? {
         let mut entry = entry.map_err(damaged)?;
         let kind = entry.header().entry_type();
@@ -170,6 +183,17 @@ pub fn extract_binary_with_limit(
 /// Unpacks the release binary from `archive` (a `.zip`) into `out`.
 #[cfg(windows)]
 pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
+    extract_binary_with_limit(archive, out, MAX_BINARY)
+}
+
+/// `extract_binary` with the size limit as a parameter, so tests can reach
+/// the limit with a small archive.
+#[cfg(windows)]
+pub fn extract_binary_with_limit(
+    archive: &Path,
+    out: &Path,
+    limit: u64,
+) -> Result<(), UpdateError> {
     let damaged =
         |e: &dyn std::fmt::Display| UpdateError::Malformed(format!("the archive is damaged: {e}"));
     let file = File::open(archive)
@@ -183,7 +207,8 @@ pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
                 "the archive has a link or device entry".to_string(),
             ));
         }
-        if entry.is_file() && is_binary_entry(Path::new(entry.name()))? {
+        let name = entry.name().map_err(|e| damaged(&e))?;
+        if entry.is_file() && is_binary_entry(Path::new(&*name))? {
             if entry.size() > limit {
                 return Err(UpdateError::TooLarge("the unpacked kv binary"));
             }

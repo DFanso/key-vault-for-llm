@@ -89,6 +89,8 @@ tar = { version = "0.4", default-features = false }
 [target.'cfg(windows)'.dependencies]
 # The Windows release archive is a `.zip`: deflate only, pure Rust.
 zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
+# zip's deflate needs a backend chosen; this is the pure-Rust one.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hkdf = "0.13"
 windows = { version = "0.62", features = [
     "Foundation",
