@@ -143,15 +143,18 @@ fn successor(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
 /// What the old tray says when no successor came up.
 #[cfg(unix)]
 fn not_started(home: &std::path::Path) -> String {
-    let device = if cfg!(target_os = "macos") {
-        "Touch ID"
-    } else {
-        "Touch ID or Windows Hello"
-    };
+    let mut text = "kv 1.9.0 is installed, but the new tray didn't start, so this kv tray is \
+                    still the old one. Quit kv tray and start it again, or log out and back in, \
+                    to finish the update."
+        .to_owned();
+    if cfg!(target_os = "macos") {
+        text.push_str(
+            " macOS may ask for your login password once before Touch ID works again; choose \
+             Always Allow.",
+        );
+    }
     format!(
-        "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray and start it \
-         again, or log out and back in. Until then {device} unlock won't work; unlock with \
-         your passphrase. To go back, move kv.previous over kv in {}.",
+        "{text} To go back, move kv.previous over kv in {}.",
         home.display()
     )
 }

@@ -116,13 +116,9 @@ pub fn restart_after_update(
             return Ok(());
         }
     }
-    let mut message = format!(
-        "kv {version} is installed, but the new tray didn't start. Quit kv tray and start it \
-         again, or log out and back in. Until then {} unlock won't work; unlock with your \
-         passphrase. {}",
-        device_name(),
-        swap::way_back(&installed.swapped)
-    );
+    let mut message = not_started_text(version);
+    message.push(' ');
+    message.push_str(&swap::way_back(&installed.swapped));
     match super::lock_single_retry(paths, RELOCK_WAIT) {
         Ok(file) => *held = Some(file),
         Err(e) => message.push_str(&format!(" (kv tray could not take its lock back: {e}.)")),
@@ -130,16 +126,21 @@ pub fn restart_after_update(
     Err(message)
 }
 
-/// The device unlock a tray left on the old kv cannot use with a daemon
-/// on the new one.
-fn device_name() -> &'static str {
+/// What the old tray says when no tray on the new kv came up, short of
+/// how to go back.
+pub fn not_started_text(version: &Version) -> String {
+    let mut text = format!(
+        "kv {version} is installed, but the new tray didn't start, so this kv tray is still \
+         the old one. Quit kv tray and start it again, or log out and back in, to finish the \
+         update."
+    );
     if cfg!(target_os = "macos") {
-        "Touch ID"
-    } else if cfg!(windows) {
-        "Windows Hello"
-    } else {
-        "Touch ID or Windows Hello"
+        text.push_str(
+            " macOS may ask for your login password once before Touch ID works again; choose \
+             Always Allow.",
+        );
     }
+    text
 }
 
 /// Starts one successor and waits for it to create `ready`, which it does
