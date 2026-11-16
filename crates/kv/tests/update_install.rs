@@ -412,3 +412,92 @@ mod swap {
         assert_eq!(names(&s.bin), ["kv", "kv.previous"]);
     }
 }
+
+#[test]
+fn old_binaries_are_told_apart() {
+    use kv::update::swap::is_old_binary;
+    for name in ["kv.exe.old", "kv.exe.1.old", "kv.exe.42.old"] {
+        assert!(is_old_binary(name), "{name}");
+    }
+    for name in [
+        "kv.exe",
+        "kv.previous",
+        "kv.exe.x.old",
+        "kv.exe..old",
+        "kv.exe.old.old",
+        "kv.old",
+        "other.exe.old",
+    ] {
+        assert!(!is_old_binary(name), "{name}");
+    }
+}
+
+/// The Windows swap: the running kv is renamed aside and the new one takes
+/// its name. These run on Windows only.
+#[cfg(windows)]
+mod swap_windows {
+    use super::*;
+    use kv::update::swap::{clean_old, swap};
+
+    /// A folder holding `kv.exe` with the old bytes, and a new binary
+    /// beside it.
+    fn installed_exe(s: &Setup) -> (PathBuf, PathBuf) {
+        std::fs::remove_file(&s.installed).unwrap();
+        let installed = s.bin.join("kv.exe");
+        std::fs::write(&installed, OLD).unwrap();
+        let new = s.bin.join("new.exe");
+        std::fs::write(&new, b"NEW").unwrap();
+        (installed, new)
+    }
+
+    #[test]
+    fn swaps_and_keeps_the_old_one() {
+        let s = setup();
+        let (installed, new) = installed_exe(&s);
+        let swapped = swap(&installed, &new).unwrap();
+        assert_eq!(swapped.installed, installed);
+        assert_eq!(swapped.backup, s.bin.join("kv.exe.old"));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"NEW");
+        assert_eq!(std::fs::read(&swapped.backup).unwrap(), OLD);
+        assert_eq!(names(&s.bin), ["kv.exe", "kv.exe.old"]);
+    }
+
+    #[test]
+    fn missing_new_binary_puts_the_old_one_back() {
+        let s = setup();
+        let (installed, _) = installed_exe(&s);
+        let err = swap(&installed, &s.bin.join("nope.exe")).unwrap_err();
+        assert!(matches!(err, UpdateError::Swap(_)), "{err:?}");
+        assert_eq!(std::fs::read(&installed).unwrap(), OLD);
+        assert_eq!(names(&s.bin), ["kv.exe", "new.exe"]);
+    }
+
+    /// An old kv still running from `kv.exe.old` (an agent session started
+    /// before the last update) cannot be removed: the swap moves the
+    /// running kv to another name, and that is cleared once it is free.
+    #[test]
+    fn an_old_binary_in_use_gets_a_name_of_its_own() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let s = setup();
+        let (installed, new) = installed_exe(&s);
+        let held = s.bin.join("kv.exe.old");
+        std::fs::write(&held, b"OLDER").unwrap();
+        // No sharing at all: it can be neither removed nor replaced.
+        let handle = std::fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&held)
+            .unwrap();
+
+        let swapped = swap(&installed, &new).unwrap();
+
+        assert_eq!(swapped.backup, s.bin.join("kv.exe.1.old"));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"NEW");
+        assert_eq!(std::fs::read(&swapped.backup).unwrap(), OLD);
+        clean_old(&installed);
+        assert_eq!(names(&s.bin), ["kv.exe", "kv.exe.old"], "still in use");
+        drop(handle);
+        clean_old(&installed);
+        assert_eq!(names(&s.bin), ["kv.exe"]);
+    }
+}

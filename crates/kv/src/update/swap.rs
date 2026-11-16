@@ -13,7 +13,8 @@ use super::UpdateError;
 pub struct Swapped {
     /// The binary that now holds the new version.
     pub installed: PathBuf,
-    /// The old binary: `kv.previous` on unix, `kv.exe.old` on Windows.
+    /// The old binary: `kv.previous` on unix, `kv.exe.old` (or
+    /// `kv.exe.<n>.old`) on Windows.
     pub backup: PathBuf,
 }
 
@@ -48,8 +49,9 @@ fn swap_error(folder: &Path, what: &str, e: io::Error) -> UpdateError {
 /// On unix the old binary is first linked or copied to `kv.previous`
 /// (replacing an older one), then `new_binary` is renamed over
 /// `installed`. On Windows, where a running program can be renamed but not
-/// replaced, `installed` becomes `kv.exe.old` and `new_binary` takes its
-/// name; if that second step fails the first is undone.
+/// replaced, `installed` becomes `kv.exe.old` (or `kv.exe.<n>.old`, when
+/// an older one is still running and cannot be removed) and `new_binary`
+/// takes its name; if that second step fails the first is undone.
 ///
 /// On any error `installed` is unchanged. The error is `NotWritable` with
 /// the folder when permission was refused, otherwise `Swap`.
@@ -90,18 +92,16 @@ pub fn swap(installed: &Path, new_binary: &Path) -> Result<Swapped, UpdateError>
 /// On unix the old binary is first linked or copied to `kv.previous`
 /// (replacing an older one), then `new_binary` is renamed over
 /// `installed`. On Windows, where a running program can be renamed but not
-/// replaced, `installed` becomes `kv.exe.old` and `new_binary` takes its
-/// name; if that second step fails the first is undone.
+/// replaced, `installed` becomes `kv.exe.old` (or `kv.exe.<n>.old`, when
+/// an older one is still running and cannot be removed) and `new_binary`
+/// takes its name; if that second step fails the first is undone.
 ///
 /// On any error `installed` is unchanged. The error is `NotWritable` with
 /// the folder when permission was refused, otherwise `Swap`.
 #[cfg(windows)]
 pub fn swap(installed: &Path, new_binary: &Path) -> Result<Swapped, UpdateError> {
     let dir = folder(installed)?;
-    let backup = installed.with_file_name("kv.exe.old");
-    // An old one left by an earlier update; it may still be running, in
-    // which case the rename below reports it.
-    let _ = fs::remove_file(&backup);
+    let backup = free_backup(installed);
     fs::rename(installed, &backup)
         .map_err(|e| swap_error(dir, "could not move the old kv aside", e))?;
     if let Err(e) = fs::rename(new_binary, installed) {
@@ -120,14 +120,53 @@ pub fn swap(installed: &Path, new_binary: &Path) -> Result<Swapped, UpdateError>
     })
 }
 
-/// Removes the `kv.exe.old` an update left beside `installed` on Windows.
-/// A failure is ignored: the old kv may still be running. On unix there is
-/// nothing to do. Called as each kv command starts, so the first command
-/// the new binary runs clears it.
+/// Where the Windows swap moves the running kv: `kv.exe.old`, after
+/// removing one an earlier update left. That one may still be running (an
+/// agent session started before the earlier update), and then it cannot be
+/// removed, so the first free `kv.exe.<n>.old` is used instead.
+#[cfg(windows)]
+fn free_backup(installed: &Path) -> PathBuf {
+    let usable = |path: &Path| {
+        let _ = fs::remove_file(path);
+        fs::symlink_metadata(path).is_err()
+    };
+    let backup = installed.with_file_name("kv.exe.old");
+    if usable(&backup) {
+        return backup;
+    }
+    // Bounded, should every name be taken; the rename then says why.
+    (1..=1000)
+        .map(|n| installed.with_file_name(format!("kv.exe.{n}.old")))
+        .find(|path| usable(path))
+        .unwrap_or(backup)
+}
+
+/// Whether `name` is an old binary a Windows update left behind:
+/// `kv.exe.old`, or `kv.exe.<n>.old` when that was still running.
+pub fn is_old_binary(name: &str) -> bool {
+    name.strip_prefix("kv.exe.")
+        .and_then(|rest| rest.strip_suffix("old"))
+        .is_some_and(|middle| {
+            middle.is_empty()
+                || middle
+                    .strip_suffix('.')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// Removes the old binaries an update left beside `installed` on Windows
+/// (see [`is_old_binary`]). A failure is ignored: an old kv may still be
+/// running. On unix there is nothing to do: `kv.previous` stays, as the
+/// way back. Called once the new kv has shown it works, after a command
+/// succeeded or the tray came up, so the way back is there until then.
 pub fn clean_old(installed: &Path) {
     #[cfg(windows)]
-    {
-        let _ = fs::remove_file(installed.with_file_name("kv.exe.old"));
+    if let Some(entries) = installed.parent().and_then(|dir| fs::read_dir(dir).ok()) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(is_old_binary) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
     #[cfg(not(windows))]
     {
