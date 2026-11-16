@@ -37,6 +37,9 @@ use crate::throttle::Throttle;
 
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(600);
+// A starting daemon removes job folders older than this, so no job may run
+// that long.
+const _: () = assert!(files::STALE_AFTER.as_secs() > 2 * MAX_EXEC_TIMEOUT.as_secs());
 const DEFAULT_DB_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DB_TIMEOUT: Duration = Duration::from_secs(300);
 

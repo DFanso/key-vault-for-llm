@@ -568,18 +568,20 @@ fn write_atomic(path: &Path, bytes: &[u8], backup: Backup) -> io::Result<()> {
     }
     let tmp = with_suffix(path, ".tmp");
     write_new_file(&tmp, bytes)?;
-    let bak = with_suffix(path, ".bak");
-    match backup {
-        Backup::KeepPrevious => {
-            if path.exists() {
-                fs::copy(path, &bak)?;
-            }
-        }
-        Backup::Replace => {
-            let bak_tmp = with_suffix(path, ".bak.tmp");
-            write_new_file(&bak_tmp, bytes)?;
-            fs::rename(&bak_tmp, &bak)?;
-        }
+    // `.bak` is replaced the same way as the vault, so a crash leaves the
+    // old copy or the new one, never half of one.
+    let previous = match backup {
+        Backup::KeepPrevious => match fs::read(path) {
+            Ok(previous) => Some(previous),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        },
+        Backup::Replace => Some(bytes.to_vec()),
+    };
+    if let Some(previous) = previous {
+        let bak_tmp = with_suffix(path, ".bak.tmp");
+        write_new_file(&bak_tmp, &previous)?;
+        fs::rename(&bak_tmp, with_suffix(path, ".bak"))?;
     }
     fs::rename(&tmp, path)?;
     #[cfg(unix)]

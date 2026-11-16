@@ -33,6 +33,9 @@ const MAX_CONNECTIONS: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the server has to accept the login.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the listener rests after a failed accept, so an error that
+/// does not clear (no file descriptors left, say) does not spin a core.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Why the daemon ended a lease or a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -338,7 +341,10 @@ async fn serve(
             _ = &mut expiry => break,
             _ = ended(ticket.end.clone()) => break,
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+                let Ok((stream, _)) = accepted else {
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    continue;
+                };
                 let Ok(permit) = connections.clone().try_acquire_owned() else {
                     record(&lease, "too_many_connections", Instant::now());
                     continue;
