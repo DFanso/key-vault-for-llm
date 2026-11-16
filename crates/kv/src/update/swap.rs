@@ -22,7 +22,35 @@ pub struct Swapped {
 /// replaces the real file and a link such as `~/.cargo/bin/kv` keeps
 /// pointing at it.
 pub fn installed_exe() -> io::Result<PathBuf> {
-    std::env::current_exe()?.canonicalize()
+    running_exe()?.canonicalize()
+}
+
+/// The path this kv was started from, as [`std::env::current_exe`] gives
+/// it, except after an update on Linux: once a new kv is renamed over the
+/// running one, Linux reports the old path with " (deleted)" added. Then
+/// the path without it is the answer, if a file is there: the new kv, which
+/// a kv still running from before the update (`kv mcp`, say) starts the
+/// daemon from and expects the daemon to run.
+pub fn running_exe() -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    let exe = without_deleted_mark(exe);
+    Ok(exe)
+}
+
+/// `path` without the " (deleted)" Linux adds to the program path of a
+/// process whose file was replaced, when a file is at the shorter path;
+/// otherwise `path` as it is.
+#[cfg(unix)]
+pub fn without_deleted_mark(path: PathBuf) -> PathBuf {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    match path.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+        Some(shorter) if Path::new(OsStr::from_bytes(shorter)).is_file() => {
+            PathBuf::from(OsStr::from_bytes(shorter))
+        }
+        _ => path,
+    }
 }
 
 /// The folder `installed` sits in.

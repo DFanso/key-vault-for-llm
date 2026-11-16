@@ -558,3 +558,18 @@ mod swap_windows {
         assert_eq!(names(&s.bin), ["kv.exe"]);
     }
 }
+
+/// On Linux a kv started before an update finds its own path as
+/// `<path> (deleted)`; the path without it is the new kv.
+#[cfg(unix)]
+#[test]
+fn a_replaced_program_path_names_the_new_kv() {
+    use kv::update::swap::without_deleted_mark;
+    let s = setup();
+    let marked = s.bin.join("kv (deleted)");
+    assert_eq!(without_deleted_mark(marked), s.installed);
+    // With nothing at the shorter path, or no mark, the path is kept.
+    let gone = s.bin.join("other (deleted)");
+    assert_eq!(without_deleted_mark(gone.clone()), gone);
+    assert_eq!(without_deleted_mark(s.installed.clone()), s.installed);
+}
