@@ -11,6 +11,8 @@ use semver::Version;
 
 use crate::notify::Level;
 
+pub mod check;
+
 /// Where the latest release is described. Nothing can change it: not an
 /// environment variable, a flag or a setting.
 pub const LATEST_URL: &str =
