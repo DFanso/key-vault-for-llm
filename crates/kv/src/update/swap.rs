@@ -74,6 +74,10 @@ pub fn swap(installed: &Path, new_binary: &Path) -> Result<Swapped, UpdateError>
     }
     fs::rename(new_binary, installed)
         .map_err(|e| swap_error(dir, "could not move the new kv into place", e))?;
+    // Make the renames themselves durable. Best effort: the swap is done.
+    if let Ok(folder) = fs::File::open(dir) {
+        let _ = folder.sync_all();
+    }
     Ok(Swapped {
         installed: installed.to_path_buf(),
         backup,

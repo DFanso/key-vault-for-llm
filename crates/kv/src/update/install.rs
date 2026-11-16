@@ -76,6 +76,9 @@ pub fn update_lock(paths: &Paths) -> Result<File, UpdateError> {
 /// checksum, unpacks the binary, runs it with `--version` and expects
 /// `kv <version>`, and only then swaps it in. The work folder is removed
 /// on every outcome, and on any failure the installed binary is unchanged.
+///
+/// Pass [`download_client`](super::check::download_client): its longer
+/// timeout leaves room for a large archive on a slow connection.
 pub async fn install(
     client: &Client,
     offer: &Offer,
@@ -119,6 +122,7 @@ pub async fn install(
         .map_err(|e| UpdateError::Swap(format!("unpacking stopped: {e}")))??;
 
     check_version(&new_binary, &offer.version).await?;
+    sync_to_disk(&new_binary)?;
     let swapped = swap(&opts.installed, &new_binary)?;
     drop(work);
     Ok(Installed {
@@ -188,8 +192,20 @@ async fn download_archive(client: &Client, asset: &Asset, out: &Path) -> Result<
     download(client, asset, asset.size, "release archive", |chunk| {
         file.write_all(chunk).map_err(write_err)
     })
-    .await?;
-    file.sync_all().map_err(write_err)
+    .await
+}
+
+/// Makes sure the new binary's bytes are on disk before it is renamed into
+/// place, so a crash right after the swap cannot leave an empty or partly
+/// written kv behind.
+fn sync_to_disk(binary: &Path) -> Result<(), UpdateError> {
+    let mut open = File::options();
+    // Windows needs write access to flush a file; unix syncs a read-only
+    // handle, and a writable one could make the new kv briefly "busy".
+    open.read(true).write(cfg!(windows));
+    open.open(binary)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| UpdateError::Swap(format!("could not save the new kv to disk: {e}")))
 }
 
 /// Runs the new binary with `--version` and checks it prints

@@ -152,7 +152,7 @@ async fn installs_and_keeps_a_backup() {
     let new = script("99.0.0");
     let archive = archive(&new);
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let done = install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -174,7 +174,7 @@ async fn replaces_an_older_backup() {
     std::fs::write(s.bin.join("kv.previous"), b"older still").unwrap();
     let archive = archive(&script("99.0.0"));
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -191,7 +191,7 @@ async fn checksum_mismatch_leaves_old_binary() {
     // archive.
     let archive = b"not the archive the checksum describes".to_vec();
     let (_server, offer) = serve(archive, sha256_hex(b"something else")).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let err = install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -208,7 +208,7 @@ async fn archive_larger_than_announced_is_refused() {
     let archive = vec![7u8; 4096];
     let (server, _) = serve(archive.clone(), sha256_hex(&archive)).await;
     let offer = offer_at(&server, 1000, 64);
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let err = install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -224,7 +224,7 @@ async fn oversized_checksum_file_is_refused() {
     let s = setup();
     let archive = b"archive".to_vec();
     let (_server, offer) = serve(archive, "0".repeat(5000)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let err = install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -241,7 +241,7 @@ async fn wrong_version_inside_archive() {
     let s = setup();
     let archive = archive(&script("98.0.0"));
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let err = install(&client, &offer, &options(&s.installed), &s.paths)
         .await
@@ -268,7 +268,7 @@ async fn not_release_build_refused() {
         .mount(&server)
         .await;
     let offer = offer_at(&server, 100, 64);
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
     let opts = InstallOptions {
         installed: s.installed.clone(),
         release_build: false,
@@ -292,7 +292,7 @@ async fn unwritable_folder() {
     let s = setup();
     let archive = archive(&script("99.0.0"));
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
     std::fs::set_permissions(&s.bin, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     let result = install(&client, &offer, &options(&s.installed), &s.paths).await;
@@ -316,7 +316,7 @@ async fn symlinked_install_replaces_target() {
     std::os::unix::fs::symlink(&s.installed, &link).unwrap();
     let archive = archive(&script("99.0.0"));
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     // What `installed_exe` does with the path it was run as.
     let installed = link.canonicalize().unwrap();
@@ -347,7 +347,7 @@ async fn second_install_is_busy() {
         .mount(&server)
         .await;
     let offer = offer_at(&server, 100, 64);
-    let client = kv::update::check::client().unwrap();
+    let client = kv::update::check::download_client().unwrap();
 
     let _held = update_lock(&s.paths).unwrap();
     let err = install(&client, &offer, &options(&s.installed), &s.paths)

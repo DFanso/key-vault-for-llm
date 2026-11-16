@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode, header, redirect};
+use reqwest::{Client, ClientBuilder, StatusCode, header, redirect};
 use semver::Version;
 use serde::Deserialize;
 use url::Url;
@@ -37,10 +37,10 @@ pub fn redirect_allowed(next: &Url, followed: usize) -> bool {
     followed < MAX_REDIRECTS && allowed_url(next)
 }
 
-/// The client for everything the updater downloads. It ignores proxy
-/// settings, follows at most five redirects and only to https on GitHub's
-/// own hosts, and names itself `kv/<version>` and nothing more.
-pub fn client() -> reqwest::Result<Client> {
+/// What every updater client shares: it ignores proxy settings, follows
+/// at most five redirects and only to https on GitHub's own hosts, and
+/// names itself `kv/<version>` and nothing more.
+fn builder() -> ClientBuilder {
     Client::builder()
         .redirect(redirect::Policy::custom(|attempt| {
             // `previous` holds the original URL too, so it is one longer
@@ -53,10 +53,23 @@ pub fn client() -> reqwest::Result<Client> {
             }
         }))
         .no_proxy()
-        .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(10))
         .user_agent(concat!("kv/", env!("CARGO_PKG_VERSION")))
-        .build()
+}
+
+/// The client for asking GitHub about releases. It ignores proxy
+/// settings, follows at most five redirects and only to https on GitHub's
+/// own hosts, names itself `kv/<version>` and nothing more, and gives up
+/// on a request after two minutes.
+pub fn client() -> reqwest::Result<Client> {
+    builder().timeout(Duration::from_secs(120)).build()
+}
+
+/// The client for downloading a release: the same rules as [`client`],
+/// but a request may take fifteen minutes, so a 64 MiB archive arrives
+/// over a slow connection too.
+pub fn download_client() -> reqwest::Result<Client> {
+    builder().timeout(Duration::from_secs(15 * 60)).build()
 }
 
 #[derive(Deserialize)]
