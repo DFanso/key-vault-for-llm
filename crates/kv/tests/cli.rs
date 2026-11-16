@@ -921,3 +921,46 @@ fn a_big_binary_file_is_kept_with_a_warning_and_a_big_word_list_is_refused() {
     );
     assert!(stderr.contains("scrubber"), "{stderr}");
 }
+
+/// Hits the real GitHub, so it only runs when asked for: `cargo test -p kv
+/// --test cli update_check_reports -- --ignored`.
+#[test]
+#[ignore = "asks the real GitHub"]
+fn update_check_reports() {
+    let kv = Kv::new();
+    let output = kv.run(&["update", "--check"], "");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    match output.status.code() {
+        Some(0) => assert!(
+            stdout.contains("is the latest") || stdout.contains("is out"),
+            "unexpected output: {stdout}"
+        ),
+        Some(1) => assert_eq!(stderr.trim().lines().count(), 1, "stderr: {stderr}"),
+        other => panic!("unexpected exit {other:?}"),
+    }
+}
+
+#[cfg(not(feature = "release-build"))]
+#[test]
+fn update_refuses_non_release_build() {
+    let kv = Kv::new();
+    let exe = std::fs::read(env!("CARGO_BIN_EXE_kv")).unwrap();
+    let stderr = kv.fails(&["update", "--yes"], "");
+    assert!(
+        stderr.contains("wasn't installed from a release"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(env!("CARGO_BIN_EXE_kv")).unwrap(), exe);
+}
+
+#[test]
+fn status_has_no_update_line_when_checks_off() {
+    let kv = Kv::with_daemon(&[]);
+    let mut command = kv.command(&["status"]);
+    command.env("KV_UPDATE_CHECK", "off");
+    let output = run_kv(command, "");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("kv update"), "{stdout}");
+}

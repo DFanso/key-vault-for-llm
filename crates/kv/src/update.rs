@@ -163,3 +163,37 @@ impl fmt::Display for UpdateError {
 }
 
 impl std::error::Error for UpdateError {}
+
+/// The line `kv status` and `kv tui` print when a newer kv is out, or
+/// `None`. It asks GitHub at most once a day (`now` is unix seconds), and
+/// only in a release build, with checks on, and with no tray running (the
+/// tray tells the user itself). The ask gives up after 3 seconds. Nothing
+/// that goes wrong is reported.
+pub async fn update_notice(paths: &crate::paths::Paths, now: u64) -> Option<String> {
+    if !is_release_build() || !checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()) {
+        return None;
+    }
+    if crate::tray::is_running(paths) {
+        return None;
+    }
+    let file = paths.update_state_file();
+    let mut remembered = state::load(&file);
+    if !state::due(&remembered, now, state::CLI_EVERY) {
+        return None;
+    }
+    let current = current_version();
+    let client = check::client().ok()?;
+    let offer = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        check::latest(&client, LATEST_URL, &current, target()?),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    remembered.last_check = Some(now);
+    remembered.latest = offer.map(|o| o.version.to_string());
+    let _ = file.parent().map(std::fs::create_dir_all);
+    let _ = state::save(&file, &remembered);
+    let version = state::newer_known(&remembered, &current)?;
+    Some(format!("kv {version} is out: run `kv update`."))
+}

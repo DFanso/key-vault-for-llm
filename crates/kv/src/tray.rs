@@ -67,3 +67,17 @@ pub fn lock_single(paths: &Paths) -> io::Result<File> {
         Err(TryLockError::Error(e)) => Err(e),
     }
 }
+
+/// Whether a `kv tray` is running: its lock is held by someone else. If
+/// this process can take the lock, it lets go again at once and the answer
+/// is no.
+pub fn is_running(paths: &Paths) -> bool {
+    let Ok(file) = File::options()
+        .read(true)
+        .write(true)
+        .open(paths.tray_lock_file())
+    else {
+        return false;
+    };
+    matches!(file.try_lock(), Err(TryLockError::WouldBlock))
+}
