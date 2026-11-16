@@ -12,6 +12,7 @@ use semver::Version;
 use crate::notify::Level;
 
 pub mod check;
+pub mod state;
 
 /// Where the latest release is described. Nothing can change it: not an
 /// environment variable, a flag or a setting.
