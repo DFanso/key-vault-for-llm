@@ -69,7 +69,9 @@ fn only_one_tray_runs_at_a_time() {
     let error = lock_single(&paths).unwrap_err();
     assert_eq!(error.to_string(), "kv tray is already running");
     drop(first);
-    lock_single(&paths).unwrap();
+    // A child another test is starting can hold a copy of the lock for a
+    // moment, until it runs its program, so allow a little time.
+    kv::tray::lock_single_retry(&paths, std::time::Duration::from_secs(2)).unwrap();
 }
 
 #[test]
