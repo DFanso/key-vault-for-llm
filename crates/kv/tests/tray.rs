@@ -110,6 +110,18 @@ fn the_next_tray_waits_for_the_lock() {
     letting_go.join().unwrap();
 }
 
+/// What an update to 1.9.0 of the kv at `exe` left.
+#[cfg(unix)]
+fn installed(exe: &std::path::Path) -> kv::update::install::Installed {
+    kv::update::install::Installed {
+        version: semver::Version::new(1, 9, 0),
+        swapped: kv::update::swap::Swapped {
+            installed: exe.to_path_buf(),
+            backup: exe.with_file_name("kv.previous"),
+        },
+    }
+}
+
 /// A script standing in for the new kv: it writes down how it was started
 /// and runs `body`.
 #[cfg(unix)]
@@ -136,8 +148,7 @@ fn a_successor_that_never_comes_up_leaves_the_old_tray_in_charge() {
     let paths = Paths::under(home.path());
     let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
     let exe = successor(home.path(), "exit 1");
-    let error =
-        restart_after_update(&lock, &exe, &semver::Version::new(1, 9, 0), &paths).unwrap_err();
+    let error = restart_after_update(&lock, &installed(&exe), &paths).unwrap_err();
     assert_eq!(
         error,
         format!(
@@ -168,7 +179,7 @@ fn a_successor_that_takes_the_lock_is_the_tray_now() {
         paths.tray_lock_file().display()
     );
     let exe = successor(home.path(), &body);
-    restart_after_update(&lock, &exe, &semver::Version::new(1, 9, 0), &paths).unwrap();
+    restart_after_update(&lock, &installed(&exe), &paths).unwrap();
     assert!(lock.lock().unwrap().is_none(), "the old tray let go");
     let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
     assert_eq!(tried, "tray --after-update 1.9.0\n");

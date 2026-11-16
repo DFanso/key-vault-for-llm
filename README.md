@@ -649,10 +649,22 @@ kv stop
 mv /path/to/kv.previous /path/to/kv
 ```
 
-On Windows it is `kv.exe.old`, next to `kv.exe`. kv removes it once the new
-kv has worked: after a kv command succeeds, or the tray has started. So it is
-the way back when the new kv does not work. The update already stopped the
-daemon; in PowerShell, move the old file over `kv.exe`:
+On Windows it is `kv.exe.old`, next to `kv.exe`. If a `kv.exe.old` from an
+earlier update is still running (an agent session's `kv mcp` started before
+that update, say), Windows will not let kv remove it, so the old kv is kept
+under the first free numbered name instead: `kv.exe.1.old`, then
+`kv.exe.2.old`, and so on. The number is the first one free, not a count, so
+it does not tell you which file is newest. The tray's message names the file
+when something goes wrong after an update; otherwise, the one the last update
+kept is the `.old` file with the latest Date modified. kv removes all of them
+once the new kv has worked: after a kv command succeeds, or the tray has
+started. So they are the way back when the new kv does not work.
+
+To go back, first close every kv that is running: quit kv tray and close the
+agent sessions, since each runs its own `kv mcp`. Windows will not replace
+`kv.exe` while a kv runs from it. The update already stopped the daemon. Then,
+in PowerShell, move the old file over `kv.exe`, with the name the update kept
+it under:
 
 ```powershell
 Move-Item -Force C:\path\to\kv.exe.old C:\path\to\kv.exe

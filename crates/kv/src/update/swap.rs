@@ -171,13 +171,22 @@ fn free_backup(installed: &Path) -> PathBuf {
 
 /// How to go back to the old kv by hand, for the messages that say an
 /// update went in but something after it failed: one sentence naming the
-/// folder `installed` is in.
-pub fn way_back(installed: &Path) -> String {
-    let dir = installed.parent().unwrap_or(installed).display();
+/// file the old kv was kept as, which on Windows may be `kv.exe.<n>.old`,
+/// and the folder it is in.
+pub fn way_back(swapped: &Swapped) -> String {
+    let dir = swapped.backup.parent().unwrap_or(&swapped.backup).display();
+    let backup = swapped
+        .backup
+        .file_name()
+        .unwrap_or(swapped.backup.as_os_str())
+        .to_string_lossy();
     if cfg!(windows) {
-        format!("To go back, rename kv.exe.old to kv.exe in {dir}.")
+        format!(
+            "To go back, close every kv (kv tray, and agent sessions' kv mcp), then move \
+             {backup} over kv.exe in {dir}."
+        )
     } else {
-        format!("To go back, move kv.previous over kv in {dir}.")
+        format!("To go back, move {backup} over kv in {dir}.")
     }
 }
 

@@ -418,6 +418,40 @@ async fn second_install_is_busy() {
     assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
 }
 
+/// The way back names the file the old kv was kept as: on Windows a
+/// numbered one when an older `kv.exe.old` was still running.
+#[test]
+fn the_way_back_names_the_kept_file() {
+    use kv::update::swap::{Swapped, way_back};
+    let s = setup();
+    if cfg!(windows) {
+        let swapped = Swapped {
+            installed: s.bin.join("kv.exe"),
+            backup: s.bin.join("kv.exe.2.old"),
+        };
+        assert_eq!(
+            way_back(&swapped),
+            format!(
+                "To go back, close every kv (kv tray, and agent sessions' kv mcp), then move \
+                 kv.exe.2.old over kv.exe in {}.",
+                s.bin.display()
+            )
+        );
+    } else {
+        let swapped = Swapped {
+            installed: s.installed.clone(),
+            backup: s.bin.join("kv.previous"),
+        };
+        assert_eq!(
+            way_back(&swapped),
+            format!(
+                "To go back, move kv.previous over kv in {}.",
+                s.bin.display()
+            )
+        );
+    }
+}
+
 /// The lock is the binary's folder's, not a `KV_HOME`'s: two homes
 /// updating one kv wait for each other.
 #[test]

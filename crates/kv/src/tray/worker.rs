@@ -691,12 +691,12 @@ impl<D: Desktop> Worker<D> {
                 "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then quit kv \
                  tray and start it again. {}",
                 installed.version,
-                crate::update::swap::way_back(&installed.swapped.installed)
+                crate::update::swap::way_back(&installed.swapped)
             );
             self.update_failed(message);
             return Next::Done;
         }
-        match self.updater.restart(&installed.version) {
+        match self.updater.restart(&installed) {
             Ok(()) => Next::Quit,
             Err(message) => {
                 self.update_failed(message);

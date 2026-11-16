@@ -141,8 +141,11 @@ impl Updater for Updates {
         Box::pin(async move { next.expect("an install was scripted") })
     }
 
-    fn restart(&self, version: &Version) -> Result<(), String> {
-        self.restarted.lock().unwrap().push(version.clone());
+    fn restart(&self, installed: &Installed) -> Result<(), String> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push(installed.version.clone());
         match self.restart_fails.lock().unwrap().clone() {
             Some(message) => Err(message),
             None => Ok(()),

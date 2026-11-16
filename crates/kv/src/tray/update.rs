@@ -32,7 +32,7 @@ pub trait Updater: Send + Sync {
     /// Starts a tray on the new binary and makes sure it came up. On `Err`
     /// this tray still holds its lock and keeps running; the text says what
     /// the user can do.
-    fn restart(&self, version: &Version) -> Result<(), String>;
+    fn restart(&self, installed: &Installed) -> Result<(), String>;
 }
 
 /// The updater `kv tray` runs with.
@@ -79,29 +79,23 @@ impl Updater for Release {
         })
     }
 
-    fn restart(&self, version: &Version) -> Result<(), String> {
-        let exe = self.installed.as_ref().map_err(|e| {
-            format!(
-                "kv {version} is installed, but the new tray didn't start ({e}). Quit kv tray \
-                 and start it again, or log out and back in."
-            )
-        })?;
-        restart_after_update(&self.lock, exe, version, &self.paths)
+    fn restart(&self, installed: &Installed) -> Result<(), String> {
+        restart_after_update(&self.lock, installed, &self.paths)
     }
 }
 
-/// Hands the tray over to `exe`, the kv just installed: lets go of the tray
-/// lock, then up to three times starts `exe tray --after-update <version>`
+/// Hands the tray over to the kv just `installed`: lets go of the tray
+/// lock, then up to three times starts `kv tray --after-update <version>`
 /// and waits up to 5 seconds for it to take the lock. A successor that
 /// exits, or never takes the lock, does not count, and one still running
 /// when its time is up is stopped. If none comes up this tray takes its
 /// lock back, to keep running, and the error says what the user can do.
 pub fn restart_after_update(
     lock: &Arc<Mutex<Option<File>>>,
-    exe: &Path,
-    version: &Version,
+    installed: &Installed,
     paths: &Paths,
 ) -> Result<(), String> {
+    let (exe, version) = (&installed.swapped.installed, &installed.version);
     let mut held = lock.lock().unwrap_or_else(PoisonError::into_inner);
     drop(held.take());
     for _ in 0..ATTEMPTS {
@@ -113,7 +107,7 @@ pub fn restart_after_update(
     Err(format!(
         "kv {version} is installed, but the new tray didn't start. Quit kv tray and start it \
          again, or log out and back in. {}",
-        swap::way_back(exe)
+        swap::way_back(&installed.swapped)
     ))
 }
 
