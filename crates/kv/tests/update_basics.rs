@@ -47,7 +47,7 @@ fn version_and_build_kind() {
         current_version(),
         Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
     );
-    assert!(!is_release_build());
+    assert_eq!(is_release_build(), cfg!(feature = "release-build"));
 }
 
 #[test]

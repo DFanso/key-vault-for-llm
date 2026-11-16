@@ -2227,12 +2227,17 @@ async fn install_success_stops_daemon_and_restarts() {
     assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
     assert_eq!(update_results(&desk.take()), Vec::new());
     // The daemon was stopped, so the next command starts the new one.
+    // Only "no daemon" counts: a probe that fails is tried again.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while client::agent_if_running(&daemon.paths, &AgentRequest::Status)
-        .await
-        .is_ok_and(|reply| reply.is_some())
-    {
-        assert!(Instant::now() < deadline, "the daemon still runs");
+    loop {
+        let probe = client::agent_if_running(&daemon.paths, &AgentRequest::Status).await;
+        if matches!(probe, Ok(None)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon still runs; the last probe gave {probe:?}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
