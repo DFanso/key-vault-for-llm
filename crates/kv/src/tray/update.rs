@@ -132,7 +132,10 @@ fn successor_came_up(exe: &Path, version: &Version, paths: &Paths) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Out of a terminal's job control, should this tray have one.
+        // Out of a terminal's job control, should this tray have one. On
+        // macOS it also keeps launchd from killing the successor when the
+        // old tray, started by the LaunchAgent, exits: launchd stops the
+        // job's whole process group then.
         command.process_group(0);
     }
     #[cfg(windows)]

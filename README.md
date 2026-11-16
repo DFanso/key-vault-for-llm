@@ -601,9 +601,10 @@ kv update --yes               # answer yes when there is no terminal to ask on
 `kv update` shows a link to the release notes and asks `Update to kv X.Y.Z?
 [y/N]` before it installs anything. When stdin is not a terminal (a script, for
 example) there is nothing to ask on, so it refuses unless you pass `--yes`,
-which answers yes for you. Updating locks the vault and stops anything agents have running
-now: waiting approvals, programs, MCP servers and database connections. When
-it finishes it says `Updated to kv X.Y.Z. Unlock to continue.`
+which answers yes for you. Updating locks the vault and stops anything agents
+have running now: waiting approvals, programs, MCP servers and database
+connections. When it finishes it says
+`Updated to kv X.Y.Z. Unlock to continue.`
 
 kv looks for a new release on its own, only in a build installed from a
 release:
@@ -625,7 +626,7 @@ To turn these off, set `KV_UPDATE_CHECK=off`:
 
 On macOS and Windows, `kv update` will not run while the tray is running. It
 points you to the tray's menu instead, so the tray restarts on the new
-version. On Linux you can run `kv update` with the tray open.
+version. On Linux there is no tray; `kv update` installs directly.
 
 kv trusts the latest release on GitHub (`DFanso/key-vault-for-llm`) and
 nothing else: no setting changes where it looks. It downloads the archive for
