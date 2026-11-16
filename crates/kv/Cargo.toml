@@ -36,6 +36,7 @@ rustls-platform-verifier = "0.7"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["aws-lc-rs"] }
@@ -80,10 +81,14 @@ wry = { version = "0.57", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
+# Release archives on unix are `.tar.xz`; both readers are pure Rust.
+lzma-rs = "0.3"
+tar = { version = "0.4", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# The Windows release archive is a `.zip`: deflate only, pure Rust.
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
 hkdf = "0.13"
-sha2 = "0.11"
 windows = { version = "0.62", features = [
     "Foundation",
     "Security_Credentials",
@@ -113,3 +118,10 @@ rmcp = { version = "3.9", default-features = false, features = ["client", "trans
 tempfile = "3.27"
 tokio-rustls = "0.26"
 wiremock = "0.6"
+
+[target.'cfg(unix)'.dev-dependencies]
+lzma-rs = "0.3"
+tar = { version = "0.4", default-features = false }
+
+[target.'cfg(windows)'.dev-dependencies]
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }

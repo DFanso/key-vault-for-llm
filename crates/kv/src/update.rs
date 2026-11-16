@@ -11,6 +11,7 @@ use semver::Version;
 
 use crate::notify::Level;
 
+pub mod archive;
 pub mod check;
 pub mod state;
 
