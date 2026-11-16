@@ -55,11 +55,6 @@ fn update_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = Paths::under(tmp.path());
     assert!(paths.update_state_file().ends_with("update.json"));
-    assert!(
-        paths
-            .update_lock_file()
-            .ends_with(std::path::Path::new("run").join("update.lock"))
-    );
 }
 
 /// A newer kv found by an earlier check is told on every run, without

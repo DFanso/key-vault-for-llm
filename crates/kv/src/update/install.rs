@@ -12,7 +12,6 @@ use semver::Version;
 
 use super::swap::{Swapped, swap};
 use super::{Asset, Offer, UpdateError, archive};
-use crate::paths::Paths;
 
 /// The most of a `.sha256` file kv will read: 4 KiB.
 const MAX_CHECKSUM: u64 = 4 * 1024;
@@ -50,22 +49,32 @@ pub struct Installed {
     pub swapped: Swapped,
 }
 
-/// Takes the lock that lets one update run at a time. It is held until the
-/// returned file is dropped or the process exits; if another kv holds it,
-/// the answer is `Busy`.
-pub fn update_lock(paths: &Paths) -> Result<File, UpdateError> {
-    let failed = |e: io::Error| UpdateError::Swap(format!("could not take the update lock: {e}"));
-    paths.ensure_runtime_dir().map_err(failed)?;
+/// The lock file in `dir`, the folder of the binary an update replaces.
+const LOCK_NAME: &str = ".kv-update.lock";
+
+/// Takes the lock that lets one update at a time replace the binary in
+/// `dir`, its folder: two kv using different `KV_HOME`s but the same binary
+/// wait for each other. It is held until the returned file is dropped or
+/// the process exits; if another kv holds it, the answer is `Busy`. The
+/// lock file stays in `dir`.
+pub fn update_lock(dir: &Path) -> Result<File, UpdateError> {
     let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(paths.update_lock_file())
-        .map_err(failed)?;
+        .open(dir.join(LOCK_NAME))
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+                UpdateError::NotWritable(dir.to_path_buf())
+            }
+            _ => UpdateError::Swap(format!("could not take the update lock: {e}")),
+        })?;
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(UpdateError::Busy),
-        Err(TryLockError::Error(e)) => Err(failed(e)),
+        Err(TryLockError::Error(e)) => Err(UpdateError::Swap(format!(
+            "could not take the update lock: {e}"
+        ))),
     }
 }
 
@@ -73,8 +82,9 @@ pub fn update_lock(paths: &Paths) -> Result<File, UpdateError> {
 /// old binary beside it.
 ///
 /// In order: refuses a build that is not from the release build, takes the
-/// update lock, removes work folders an interrupted update left, makes a
-/// work folder beside the installed binary, downloads
+/// update lock in the installed binary's folder (held until the swap is
+/// done), removes work folders an interrupted update left, makes a work
+/// folder beside the installed binary, downloads
 /// the checksum (at most 4 KiB) and the archive (at most 64 MiB, and no
 /// more than the release announced), checks the archive against the
 /// checksum, unpacks the binary, runs it with `--version` and expects
@@ -87,16 +97,16 @@ pub async fn install(
     client: &Client,
     offer: &Offer,
     opts: &InstallOptions,
-    paths: &Paths,
 ) -> Result<Installed, UpdateError> {
     if !opts.release_build {
         return Err(UpdateError::NotReleaseBuild);
     }
-    let _lock = update_lock(paths)?;
     let dir = opts
         .installed
         .parent()
         .ok_or_else(|| UpdateError::Swap(format!("{} has no folder", opts.installed.display())))?;
+    // Held through the swap below: dropped only when this returns.
+    let _lock = update_lock(dir)?;
     remove_stale_work(dir);
     // In the same folder, so the final rename stays on one filesystem.
     // Dropping it removes it and everything in it.
@@ -138,7 +148,8 @@ pub async fn install(
 
 /// Removes the work folders an earlier update left in `dir`, as one
 /// stopped with Ctrl-C does. Called with the update lock held, so no update
-/// is using them. Failures are ignored.
+/// is using them; the lock file itself is not a work folder and stays.
+/// Failures are ignored.
 fn remove_stale_work(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -147,7 +158,7 @@ fn remove_stale_work(dir: &Path) {
         let stale = entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with(WORK_PREFIX))
+            .is_some_and(|name| name.starts_with(WORK_PREFIX) && name != LOCK_NAME)
             && entry.file_type().is_ok_and(|kind| kind.is_dir());
         if stale {
             let _ = std::fs::remove_dir_all(entry.path());

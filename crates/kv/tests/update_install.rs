@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use kv::paths::Paths;
 use kv::update::install::{InstallOptions, install, update_lock};
 use kv::update::{Asset, Offer, UpdateError};
 use semver::Version;
@@ -85,7 +84,6 @@ struct Setup {
     _root: tempfile::TempDir,
     bin: PathBuf,
     installed: PathBuf,
-    paths: Paths,
 }
 
 fn setup() -> Setup {
@@ -100,12 +98,10 @@ fn setup() -> Setup {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let paths = Paths::under(&base.join("home"));
     Setup {
         _root: root,
         bin,
         installed,
-        paths,
     }
 }
 
@@ -154,7 +150,7 @@ async fn installs_and_keeps_a_backup() {
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
     let client = kv::update::check::download_client().unwrap();
 
-    let done = install(&client, &offer, &options(&s.installed), &s.paths)
+    let done = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap();
 
@@ -164,7 +160,7 @@ async fn installs_and_keeps_a_backup() {
     assert_eq!(version_of(&s.installed), "kv 99.0.0");
     assert_eq!(std::fs::read(&s.installed).unwrap(), new);
     assert_eq!(std::fs::read(s.bin.join("kv.previous")).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv", "kv.previous"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv", "kv.previous"]);
 }
 
 #[cfg(unix)]
@@ -176,12 +172,12 @@ async fn replaces_an_older_backup() {
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
     let client = kv::update::check::download_client().unwrap();
 
-    install(&client, &offer, &options(&s.installed), &s.paths)
+    install(&client, &offer, &options(&s.installed))
         .await
         .unwrap();
 
     assert_eq!(std::fs::read(s.bin.join("kv.previous")).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv", "kv.previous"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv", "kv.previous"]);
 }
 
 #[tokio::test]
@@ -193,13 +189,17 @@ async fn checksum_mismatch_leaves_old_binary() {
     let (_server, offer) = serve(archive, sha256_hex(b"something else")).await;
     let client = kv::update::check::download_client().unwrap();
 
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
     assert_eq!(err, UpdateError::ChecksumMismatch);
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv"], "no temp folder or backup is left");
+    assert_eq!(
+        names(&s.bin),
+        [".kv-update.lock", "kv"],
+        "no temp folder or backup is left"
+    );
 }
 
 #[tokio::test]
@@ -210,13 +210,13 @@ async fn archive_larger_than_announced_is_refused() {
     let offer = offer_at(&server, 1000, 64);
     let client = kv::update::check::download_client().unwrap();
 
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
     assert!(matches!(err, UpdateError::TooLarge(_)), "{err:?}");
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
 }
 
 #[tokio::test]
@@ -226,13 +226,13 @@ async fn oversized_checksum_file_is_refused() {
     let (_server, offer) = serve(archive, "0".repeat(5000)).await;
     let client = kv::update::check::download_client().unwrap();
 
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
     assert!(matches!(err, UpdateError::TooLarge(_)), "{err:?}");
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
 }
 
 #[cfg(unix)]
@@ -243,7 +243,7 @@ async fn wrong_version_inside_archive() {
     let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
     let client = kv::update::check::download_client().unwrap();
 
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
@@ -255,7 +255,7 @@ async fn wrong_version_inside_archive() {
         }
     );
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
 }
 
 /// A new binary that fails or prints nothing does not run here; it has no
@@ -272,7 +272,7 @@ async fn a_binary_that_fails_or_says_nothing_wont_run() {
         let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
         let client = kv::update::check::download_client().unwrap();
 
-        let err = install(&client, &offer, &options(&s.installed), &s.paths)
+        let err = install(&client, &offer, &options(&s.installed))
             .await
             .unwrap_err();
 
@@ -282,7 +282,7 @@ async fn a_binary_that_fails_or_says_nothing_wont_run() {
             format!("the new kv does not run on this system: {why}")
         );
         assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-        assert_eq!(names(&s.bin), ["kv"]);
+        assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
     }
 }
 
@@ -300,12 +300,13 @@ async fn a_work_folder_left_behind_is_removed() {
     let (_server, offer) = serve(archive, sha256_hex(b"something else")).await;
     let client = kv::update::check::download_client().unwrap();
 
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
     assert_eq!(err, UpdateError::ChecksumMismatch);
-    assert_eq!(names(&s.bin), [".kv-update-note", "kv"]);
+    // The update lock lives beside kv and is not a work folder either.
+    assert_eq!(names(&s.bin), [".kv-update-note", ".kv-update.lock", "kv"]);
 }
 
 #[tokio::test]
@@ -324,7 +325,7 @@ async fn not_release_build_refused() {
         release_build: false,
     };
 
-    let err = install(&client, &offer, &opts, &s.paths).await.unwrap_err();
+    let err = install(&client, &offer, &opts).await.unwrap_err();
 
     assert_eq!(err, UpdateError::NotReleaseBuild);
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
@@ -345,7 +346,7 @@ async fn unwritable_folder() {
     let client = kv::update::check::download_client().unwrap();
     std::fs::set_permissions(&s.bin, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    let result = install(&client, &offer, &options(&s.installed), &s.paths).await;
+    let result = install(&client, &offer, &options(&s.installed)).await;
 
     std::fs::set_permissions(&s.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     let err = result.unwrap_err();
@@ -378,7 +379,7 @@ async fn symlinked_install_replaces_target() {
     // What `installed_exe` does with the path it was run as.
     let installed = link.canonicalize().unwrap();
     assert_eq!(installed, s.installed);
-    install(&client, &offer, &options(&installed), &s.paths)
+    install(&client, &offer, &options(&installed))
         .await
         .unwrap();
 
@@ -406,24 +407,26 @@ async fn second_install_is_busy() {
     let offer = offer_at(&server, 100, 64);
     let client = kv::update::check::download_client().unwrap();
 
-    let _held = update_lock(&s.paths).unwrap();
-    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+    let _held = update_lock(&s.bin).unwrap();
+    let err = install(&client, &offer, &options(&s.installed))
         .await
         .unwrap_err();
 
     assert_eq!(err, UpdateError::Busy);
     assert_eq!(err.to_string(), "another kv update is running");
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
-    assert_eq!(names(&s.bin), ["kv"]);
+    assert_eq!(names(&s.bin), [".kv-update.lock", "kv"]);
 }
 
+/// The lock is the binary's folder's, not a `KV_HOME`'s: two homes
+/// updating one kv wait for each other.
 #[test]
 fn lock_is_released_when_dropped() {
     let s = setup();
-    let first = update_lock(&s.paths).unwrap();
-    assert_eq!(update_lock(&s.paths).unwrap_err(), UpdateError::Busy);
+    let first = update_lock(&s.bin).unwrap();
+    assert_eq!(update_lock(&s.bin).unwrap_err(), UpdateError::Busy);
     drop(first);
-    update_lock(&s.paths).unwrap();
+    update_lock(&s.bin).unwrap();
 }
 
 #[cfg(unix)]

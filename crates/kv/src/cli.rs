@@ -1077,7 +1077,7 @@ async fn update(paths: &Paths, check_only: bool, yes: bool) -> Result<()> {
     let download = check::download_client()
         .map_err(|e| CliError(format!("cannot start the download: {e}")))?;
     println!("Downloading kv {}…", offer.version);
-    let done = install::install(&download, &offer, &opts, paths)
+    let done = install::install(&download, &offer, &opts)
         .await
         .map_err(failed)?;
     // A daemon left running stays on the old binary, perhaps unlocked.

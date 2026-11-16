@@ -67,7 +67,6 @@ impl Updater for Release {
     }
 
     fn install(&self, offer: Offer) -> BoxFuture<'static, Result<Installed, UpdateError>> {
-        let paths = self.paths.clone();
         let installed = self.installed.clone();
         Box::pin(async move {
             let opts = InstallOptions {
@@ -76,7 +75,7 @@ impl Updater for Release {
             };
             let client =
                 check::download_client().map_err(|e| UpdateError::Network(e.to_string()))?;
-            install::install(&client, &offer, &opts, &paths).await
+            install::install(&client, &offer, &opts).await
         })
     }
 
