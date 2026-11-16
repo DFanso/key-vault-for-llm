@@ -52,7 +52,7 @@ enum Command {
         /// Only check; install nothing
         #[arg(long)]
         check: bool,
-        /// Install without asking (needed when there is no terminal)
+        /// Answer yes when there is no terminal to ask on
         #[arg(long)]
         yes: bool,
     },

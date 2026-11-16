@@ -595,12 +595,13 @@ run unattended.
 ```sh
 kv update --check             # say whether a newer kv is out, install nothing
 kv update                     # show the release notes, ask, then install
-kv update --yes               # install without asking
+kv update --yes               # answer yes when there is no terminal to ask on
 ```
 
-`kv update` asks `Update to kv X.Y.Z? [y/N]` before it does anything. When
-stdin is not a terminal there is nothing to ask on, so it refuses unless you
-pass `--yes`. Updating locks the vault and stops anything agents have running
+`kv update` shows a link to the release notes and asks `Update to kv X.Y.Z?
+[y/N]` before it installs anything. When stdin is not a terminal (a script, for
+example) there is nothing to ask on, so it refuses unless you pass `--yes`,
+which answers yes for you. Updating locks the vault and stops anything agents have running
 now: waiting approvals, programs, MCP servers and database connections. When
 it finishes it says `Updated to kv X.Y.Z. Unlock to continue.`
 
@@ -610,7 +611,7 @@ release:
 - The tray checks 3 minutes after it starts and then every 12 hours. It tells
   you with a notification and an `Update to kv X.Y.Z…` item in its menu.
 - `kv status` and `kv tui` check at most once a day, and only when the tray is
-  not running. They print `kv X.Y.Z is out: run `kv update`.`
+  not running. They print ``kv X.Y.Z is out: run `kv update`.``
 
 Set `KV_UPDATE_CHECK=off` in your shell profile to turn these off. `kv update`
 and `kv update --check` still check when you run them.
