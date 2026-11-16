@@ -913,7 +913,8 @@ impl Daemon {
         session: Option<&SessionInfo>,
         now: Instant,
     ) -> Prepared {
-        let summary = format!("{} {}", call.method, call.url);
+        let scrubber = self.log_scrubber();
+        let summary = crate::audit::http_summary(&call.method, &call.url, scrubber.as_deref());
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("http_request", &call.handle, &summary, decision, response)
         };
@@ -1010,7 +1011,11 @@ impl Daemon {
         now: Instant,
     ) -> Prepared {
         let handles = call.handles.join(",");
-        let summary = call.argv.first().cloned().unwrap_or_default();
+        let summary = match (call.argv.first(), self.log_scrubber()) {
+            (Some(program), Some(scrubber)) => crate::audit::scrubbed(program, &scrubber),
+            (Some(program), None) => program.clone(),
+            (None, _) => String::new(),
+        };
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("exec", &handles, &summary, decision, response)
         };
@@ -1182,7 +1187,8 @@ impl Daemon {
         session: Option<&SessionInfo>,
         now: Instant,
     ) -> Prepared {
-        let summary: String = call.query.chars().take(200).collect();
+        let scrubber = self.log_scrubber();
+        let summary = crate::audit::db_summary(&call.query, scrubber.as_deref());
         let refuse = |daemon: &Self, decision, response| {
             daemon.refuse("db_query", &call.handle, &summary, decision, response)
         };
@@ -1687,6 +1693,12 @@ impl Daemon {
             duration: Duration::ZERO,
         });
         Prepared::Reply(response)
+    }
+
+    /// The scrubber for what goes into the audit log: `None` while locked,
+    /// when there are no values to scrub.
+    fn log_scrubber(&mut self) -> Option<Arc<Scrubber>> {
+        self.vault.is_some().then(|| self.scrubber())
     }
 
     /// The scrubber for every unlocked secret. Only call while unlocked.
