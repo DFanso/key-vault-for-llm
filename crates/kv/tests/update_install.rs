@@ -258,6 +258,56 @@ async fn wrong_version_inside_archive() {
     assert_eq!(names(&s.bin), ["kv"]);
 }
 
+/// A new binary that fails or prints nothing does not run here; it has no
+/// version to report.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_binary_that_fails_or_says_nothing_wont_run() {
+    for (body, why) in [
+        ("exit 3", "--version ended with exit status: 3"),
+        ("true", "--version printed nothing"),
+    ] {
+        let s = setup();
+        let archive = archive(format!("#!/bin/sh\n{body}\n").as_bytes());
+        let (_server, offer) = serve(archive.clone(), sha256_hex(&archive)).await;
+        let client = kv::update::check::download_client().unwrap();
+
+        let err = install(&client, &offer, &options(&s.installed), &s.paths)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err, UpdateError::WontRun(why.into()));
+        assert_eq!(
+            err.to_string(),
+            format!("the new kv does not run on this system: {why}")
+        );
+        assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
+        assert_eq!(names(&s.bin), ["kv"]);
+    }
+}
+
+/// An update stopped with Ctrl-C leaves its work folder; the next one
+/// clears it.
+#[tokio::test]
+async fn a_work_folder_left_behind_is_removed() {
+    let s = setup();
+    let stale = s.bin.join(".kv-update-AbC123");
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(stale.join("archive"), b"half a download").unwrap();
+    // Not a work folder: kept.
+    std::fs::write(s.bin.join(".kv-update-note"), b"a file").unwrap();
+    let archive = b"not the archive the checksum describes".to_vec();
+    let (_server, offer) = serve(archive, sha256_hex(b"something else")).await;
+    let client = kv::update::check::download_client().unwrap();
+
+    let err = install(&client, &offer, &options(&s.installed), &s.paths)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, UpdateError::ChecksumMismatch);
+    assert_eq!(names(&s.bin), [".kv-update-note", "kv"]);
+}
+
 #[tokio::test]
 async fn not_release_build_refused() {
     let s = setup();
@@ -300,7 +350,14 @@ async fn unwritable_folder() {
     std::fs::set_permissions(&s.bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     let err = result.unwrap_err();
     assert_eq!(err, UpdateError::NotWritable(s.bin.clone()));
-    assert!(err.to_string().contains(&*s.bin.to_string_lossy()));
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "cannot write to {}; reinstall kv into a folder you own, or run kv update as the \
+             user who installed it",
+            s.bin.display()
+        )
+    );
     assert_eq!(std::fs::read(&s.installed).unwrap(), OLD);
     assert_eq!(names(&s.bin), ["kv"]);
 }

@@ -105,11 +105,7 @@ fn copy_capped(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), Upda
     let write_err =
         |e: io::Error| UpdateError::Swap(format!("could not write {}: {e}", out.display()));
     let mut file = File::create(out).map_err(write_err)?;
-    let copied = io::copy(&mut reader.take(limit.saturating_add(1)), &mut file)
-        .map_err(|e| UpdateError::Malformed(format!("the archive is damaged: {e}")))?;
-    if copied > limit {
-        return Err(UpdateError::TooLarge("the unpacked kv binary"));
-    }
+    copy_limited(reader, &mut file, limit, write_err)?;
     file.flush().map_err(write_err)?;
     #[cfg(unix)]
     {
@@ -118,6 +114,37 @@ fn copy_capped(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), Upda
             .map_err(write_err)?;
     }
     Ok(())
+}
+
+/// Copies at most `limit` bytes from `reader` to `writer`; more is
+/// `TooLarge`. A read error means the archive is damaged (`Malformed`); a
+/// write error, such as a full disk, is not the archive's fault and goes
+/// through `write_err`.
+fn copy_limited(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    limit: u64,
+    write_err: impl Fn(io::Error) -> UpdateError,
+) -> Result<u64, UpdateError> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut copied: u64 = 0;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return Ok(copied),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                return Err(UpdateError::Malformed(format!(
+                    "the archive is damaged: {e}"
+                )));
+            }
+        };
+        copied += n as u64;
+        if copied > limit {
+            return Err(UpdateError::TooLarge("unpacked kv binary"));
+        }
+        writer.write_all(&buf[..n]).map_err(&write_err)?;
+    }
 }
 
 fn no_binary() -> UpdateError {
@@ -151,7 +178,7 @@ pub fn extract_binary_with_limit(
 
     let damaged = |e: io::Error| {
         if e.kind() == io::ErrorKind::OutOfMemory {
-            UpdateError::TooLarge("the archive's decompression memory")
+            UpdateError::TooLarge("archive's decompression memory")
         } else {
             UpdateError::Malformed(format!("the archive is damaged: {e}"))
         }
@@ -172,7 +199,7 @@ pub fn extract_binary_with_limit(
         let path = entry.path().map_err(damaged)?.into_owned();
         if kind.is_file() && is_binary_entry(&path)? {
             if entry.size() > limit {
-                return Err(UpdateError::TooLarge("the unpacked kv binary"));
+                return Err(UpdateError::TooLarge("unpacked kv binary"));
             }
             return write_binary(&mut entry, out, limit);
         }
@@ -210,10 +237,74 @@ pub fn extract_binary_with_limit(
         let name = entry.name().map_err(|e| damaged(&e))?;
         if entry.is_file() && is_binary_entry(Path::new(&*name))? {
             if entry.size() > limit {
-                return Err(UpdateError::TooLarge("the unpacked kv binary"));
+                return Err(UpdateError::TooLarge("unpacked kv binary"));
             }
             return write_binary(&mut entry, out, limit);
         }
     }
     Err(no_binary())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A disk that is full.
+    struct Full;
+
+    impl Write for Full {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An archive stream that breaks off.
+    struct Broken;
+
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad block"))
+        }
+    }
+
+    fn swap(e: io::Error) -> UpdateError {
+        UpdateError::Swap(format!("could not write: {e}"))
+    }
+
+    #[test]
+    fn a_full_disk_is_not_a_damaged_archive() {
+        let err = copy_limited(&mut &b"kv"[..], &mut Full, 10, swap).unwrap_err();
+        assert_eq!(
+            err,
+            UpdateError::Swap("could not write: no space left".into())
+        );
+    }
+
+    #[test]
+    fn a_read_error_is_a_damaged_archive() {
+        let err = copy_limited(&mut Broken, &mut Vec::new(), 10, swap).unwrap_err();
+        assert_eq!(
+            err,
+            UpdateError::Malformed("the archive is damaged: bad block".into())
+        );
+    }
+
+    #[test]
+    fn more_than_the_limit_is_too_large() {
+        let mut out = Vec::new();
+        assert_eq!(
+            copy_limited(&mut &b"12345"[..], &mut out, 4, swap).unwrap_err(),
+            UpdateError::TooLarge("unpacked kv binary")
+        );
+        let mut out = Vec::new();
+        assert_eq!(copy_limited(&mut &b"1234"[..], &mut out, 4, swap), Ok(4));
+        assert_eq!(out, b"1234");
+        assert_eq!(
+            UpdateError::TooLarge("unpacked kv binary").to_string(),
+            "the unpacked kv binary is larger than allowed"
+        );
+    }
 }

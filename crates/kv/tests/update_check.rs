@@ -176,7 +176,8 @@ async fn redirects_off_github_or_to_plain_http_are_refused() {
             .get(format!("{}/start", server.uri()))
             .send()
             .await;
-        assert!(result.is_err(), "{target} was followed");
+        let err = result.expect_err(target);
+        assert!(err.is_redirect(), "{target}: {err:?}");
     }
 }
 

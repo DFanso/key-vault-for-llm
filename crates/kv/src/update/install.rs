@@ -21,6 +21,9 @@ const MAX_ARCHIVE: u64 = 64 * 1024 * 1024;
 /// How long the new binary has to answer `--version`.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How the work folder's name starts.
+const WORK_PREFIX: &str = ".kv-update-";
+
 /// The binary's name in the work folder.
 #[cfg(windows)]
 const NEW_BINARY: &str = "kv.exe";
@@ -70,7 +73,8 @@ pub fn update_lock(paths: &Paths) -> Result<File, UpdateError> {
 /// old binary beside it.
 ///
 /// In order: refuses a build that is not from the release build, takes the
-/// update lock, makes a work folder beside the installed binary, downloads
+/// update lock, removes work folders an interrupted update left, makes a
+/// work folder beside the installed binary, downloads
 /// the checksum (at most 4 KiB) and the archive (at most 64 MiB, and no
 /// more than the release announced), checks the archive against the
 /// checksum, unpacks the binary, runs it with `--version` and expects
@@ -93,10 +97,11 @@ pub async fn install(
         .installed
         .parent()
         .ok_or_else(|| UpdateError::Swap(format!("{} has no folder", opts.installed.display())))?;
+    remove_stale_work(dir);
     // In the same folder, so the final rename stays on one filesystem.
     // Dropping it removes it and everything in it.
     let work = tempfile::Builder::new()
-        .prefix(".kv-update-")
+        .prefix(WORK_PREFIX)
         .tempdir_in(dir)
         .map_err(|e| match e.kind() {
             io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
@@ -129,6 +134,25 @@ pub async fn install(
         version: offer.version.clone(),
         swapped,
     })
+}
+
+/// Removes the work folders an earlier update left in `dir`, as one
+/// stopped with Ctrl-C does. Called with the update lock held, so no update
+/// is using them. Failures are ignored.
+fn remove_stale_work(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(WORK_PREFIX))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn network(e: reqwest::Error) -> UpdateError {
@@ -209,11 +233,11 @@ fn sync_to_disk(binary: &Path) -> Result<(), UpdateError> {
 }
 
 /// Runs the new binary with `--version` and checks it prints
-/// `kv <expected>`. It is killed if it takes longer than ten seconds.
+/// `kv <expected>`. It is killed if it takes longer than ten seconds. A
+/// binary that cannot be started, fails, or prints nothing is `WontRun`;
+/// one that prints another version is `WrongVersion`.
 async fn check_version(binary: &Path, expected: &Version) -> Result<(), UpdateError> {
-    let not_run = |e: &dyn std::fmt::Display| {
-        UpdateError::Malformed(format!("the new kv could not be run: {e}"))
-    };
+    let wont_run = |e: &dyn std::fmt::Display| UpdateError::WontRun(e.to_string());
     // A file written a moment ago can be briefly "busy" on Linux while a
     // child another thread is starting still holds it open.
     let mut tries = 0;
@@ -226,23 +250,22 @@ async fn check_version(binary: &Path, expected: &Version) -> Result<(), UpdateEr
             .kill_on_drop(true)
             .output();
         match tokio::time::timeout(VERSION_TIMEOUT, run).await {
-            Err(_) => return Err(not_run(&"it did not answer --version in time")),
+            Err(_) => return Err(wont_run(&"it did not answer --version in time")),
             Ok(Err(e)) if e.kind() == io::ErrorKind::ExecutableFileBusy && tries < 20 => {
                 tries += 1;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            Ok(Err(e)) => return Err(not_run(&e)),
+            Ok(Err(e)) => return Err(wont_run(&e)),
             Ok(Ok(output)) => break output,
         }
     };
+    if !output.status.success() {
+        return Err(wont_run(&format!("--version ended with {}", output.status)));
+    }
     let printed = String::from_utf8_lossy(&output.stdout);
     let printed = printed.trim();
     if printed == format!("kv {expected}") {
-        return if output.status.success() {
-            Ok(())
-        } else {
-            Err(not_run(&format!("--version ended with {}", output.status)))
-        };
+        return Ok(());
     }
     let found: String = printed
         .lines()
@@ -252,12 +275,11 @@ async fn check_version(binary: &Path, expected: &Version) -> Result<(), UpdateEr
         .chars()
         .take(64)
         .collect();
+    if found.is_empty() {
+        return Err(wont_run(&"--version printed nothing"));
+    }
     Err(UpdateError::WrongVersion {
         expected: expected.to_string(),
-        found: if found.is_empty() {
-            "nothing".to_string()
-        } else {
-            found
-        },
+        found,
     })
 }

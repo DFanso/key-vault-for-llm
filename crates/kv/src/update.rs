@@ -128,10 +128,10 @@ pub enum UpdateError {
         /// The version the new binary reported.
         found: String,
     },
+    /// The new binary did not run, or did not answer `--version`.
+    WontRun(String),
     /// Another update is already running.
     Busy,
-    /// kv tray is running and has to be quit first.
-    TrayRunning,
     /// Replacing the binary failed.
     Swap(String),
 }
@@ -146,7 +146,12 @@ impl fmt::Display for UpdateError {
                 f,
                 "this kv was not installed from a release, so it cannot update itself"
             ),
-            Self::NotWritable(dir) => write!(f, "cannot write to {}", dir.display()),
+            Self::NotWritable(dir) => write!(
+                f,
+                "cannot write to {}; reinstall kv into a folder you own, or run kv update as \
+                 the user who installed it",
+                dir.display()
+            ),
             Self::NoAssetForTarget(target) => {
                 write!(f, "this release has no download for {target}")
             }
@@ -155,8 +160,8 @@ impl fmt::Display for UpdateError {
             Self::WrongVersion { expected, found } => {
                 write!(f, "the new kv reports version {found}, not {expected}")
             }
+            Self::WontRun(e) => write!(f, "the new kv does not run on this system: {e}"),
             Self::Busy => write!(f, "another kv update is running"),
-            Self::TrayRunning => write!(f, "kv tray is running; quit it and try again"),
             Self::Swap(e) => write!(f, "could not replace kv: {e}"),
         }
     }
@@ -173,12 +178,13 @@ pub async fn update_notice(paths: &crate::paths::Paths, now: u64) -> Option<Stri
     if !is_release_build() || !checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()) {
         return None;
     }
-    if crate::tray::is_running(paths) {
-        return None;
-    }
     let file = paths.update_state_file();
     let remembered = state::load(&file);
     if !state::due(&remembered, now, state::CLI_EVERY) {
+        return None;
+    }
+    // After the cheaper test, so most runs do not touch the tray lock.
+    if crate::tray::is_running(paths) {
         return None;
     }
     let current = current_version();
