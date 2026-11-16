@@ -192,6 +192,13 @@ pub enum FromPage {
         #[serde(default)]
         passphrase: Option<SecretText>,
     },
+    /// Put a shown value on the clipboard (its Copy button). Only the
+    /// Windows page sends this: the tray copies the value, keeps it out of
+    /// clipboard history and clears it after a while. The page hears
+    /// `Copied`.
+    Copy {
+        text: SecretText,
+    },
     /// Cancel a share request, or drop a received or sent record.
     Forget {
         id: String,
@@ -402,6 +409,10 @@ pub enum ToPage {
     HandleRevealed {
         handle: String,
         fields: Vec<RevealedField>,
+    },
+    /// Whether the value from `Copy` is on the clipboard.
+    Copied {
+        done: bool,
     },
     /// Showing `handle` needs the passphrase: there is no device, or its
     /// prompt was cancelled or failed, or a passphrase was wrong (`message`

@@ -120,6 +120,8 @@ pub fn run(paths: Paths, lock: File) -> io::Result<()> {
         proxy: proxy.clone(),
         #[cfg(target_os = "macos")]
         notices: start_helper(&paths, actions.clone()),
+        #[cfg(windows)]
+        clipboard: super::clipboard::Clipboard::default(),
     };
     std::thread::spawn(move || {
         let worker = Worker::new(paths, device::platform().map(Arc::from), system);
@@ -521,6 +523,9 @@ struct System {
     /// kv.app, which posts notifications the user can answer.
     #[cfg(target_os = "macos")]
     notices: Option<notices::Helper>,
+    /// What the window's Copy buttons copy through.
+    #[cfg(windows)]
+    clipboard: super::clipboard::Clipboard,
 }
 
 impl Desktop for System {
@@ -561,6 +566,16 @@ impl Desktop for System {
         if let Some(center) = &self.notices {
             center.withdraw(keys);
         }
+    }
+
+    #[cfg(windows)]
+    fn copy(&self, text: &kv_core::secret::SecretText) -> io::Result<()> {
+        self.clipboard.copy(text.expose())
+    }
+
+    #[cfg(windows)]
+    fn clear_copied(&self) {
+        self.clipboard.clear_now();
     }
 }
 

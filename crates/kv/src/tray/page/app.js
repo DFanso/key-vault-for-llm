@@ -48,6 +48,8 @@
     // What the confirm dialog's button sends.
     confirming: null,
     revealTimer: null,
+    // The Copy button waiting to hear whether the tray copied its value.
+    copyLabel: null,
     toastTimer: null,
     // The share dialog's step, while it is open, and whether the tray is
     // working on it.
@@ -108,6 +110,12 @@
 
   // The keys that copy a selection here.
   const COPY_KEYS = /Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+C";
+
+  // Whether the tray copies a value for the page. It does on Windows, where
+  // the page is served over https: it keeps the value out of clipboard
+  // history and clears it after 20 seconds. Elsewhere the page copies it
+  // and nothing clears it; clearing it on macOS is a follow-up.
+  const TRAY_COPIES = location.protocol === "https:";
 
   // What each tool does, in words, and its icon.
   const TOOLS = {
@@ -383,6 +391,10 @@
       case "handle_revealed":
         // Only the value still asked for: one the user cancelled stays put away.
         if (page.revealAsking === message.handle) openReveal(message.handle, message.fields, false);
+        break;
+      case "copied":
+        if (page.copyLabel) flashLabel(page.copyLabel, message.done ? "Copied" : "Not copied");
+        page.copyLabel = null;
         break;
       case "reveal_ask":
         if (page.revealAsking === message.handle) askPassphrase(message.message);
@@ -1169,10 +1181,12 @@
   }
 
   // A value, drawn as text the user can select, and wiped when the dialog
-  // closes, the timer runs out, the window hides or the vault locks. There
-  // is no Copy button: any program, an agent's too, can read the clipboard.
-  // `received` is a value that came from a share, which a file can be saved
-  // from.
+  // closes, the timer runs out, the window hides or the vault locks. Each
+  // value has a Copy button. On Windows the tray copies it, keeps it out of
+  // clipboard history and clears it after 20 seconds unless something else
+  // was copied since. While it is there any program, an agent's too, can
+  // read it. `received` is a value that came from a share, which a file can
+  // be saved from.
   function openReveal(handle, fields, received) {
     page.revealAsking = null;
     $("reveal-passphrase").value = "";
@@ -1226,6 +1240,7 @@
     clearTimeout(page.revealTimer);
     page.revealTimer = null;
     page.revealAsking = null;
+    page.copyLabel = null;
     $("reveal-passphrase").value = "";
     $("reveal-message").textContent = "";
     show($("reveal-ask"), false);
@@ -1241,11 +1256,17 @@
     if (dialog.open) dialog.close();
   }
 
-  // Copies `node`'s text. The copy command needs the text selected; where
-  // it fails, the clipboard API may still work, and failing that the text
-  // stays selected for the user's own keys. `label` says how it went.
+  // Copies `node`'s text. On Windows the tray does it, and `label` says how
+  // it went when the tray answers. Elsewhere the copy command needs the
+  // text selected; where it fails, the clipboard API may still work, and
+  // failing that the text stays selected for the user's own keys.
   function copyText(node, label) {
     const text = node.textContent;
+    if (TRAY_COPIES) {
+      page.copyLabel = label;
+      send({ type: "copy", text });
+      return;
+    }
     const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(node);
@@ -1259,13 +1280,7 @@
     }
     const tell = (done) => {
       if (done) selection.removeAllRanges();
-      const was = label.dataset.label || label.textContent;
-      label.dataset.label = was;
-      label.textContent = done ? "Copied" : `Selected: press ${COPY_KEYS}`;
-      clearTimeout(label.copyTimer);
-      label.copyTimer = setTimeout(() => {
-        label.textContent = was;
-      }, 2000);
+      flashLabel(label, done ? "Copied" : `Selected: press ${COPY_KEYS}`);
     };
     if (copied || !navigator.clipboard) {
       tell(copied);
@@ -1275,6 +1290,17 @@
       () => tell(true),
       () => tell(false),
     );
+  }
+
+  // Shows `text` on a Copy button's `label` for two seconds.
+  function flashLabel(label, text) {
+    const was = label.dataset.label || label.textContent;
+    label.dataset.label = was;
+    label.textContent = text;
+    clearTimeout(label.copyTimer);
+    label.copyTimer = setTimeout(() => {
+      label.textContent = was;
+    }, 2000);
   }
 
   // The share dialog: what to type for `step`, then what came of it.
