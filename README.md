@@ -613,8 +613,15 @@ release:
 - `kv status` and `kv tui` check at most once a day, and only when the tray is
   not running. They print ``kv X.Y.Z is out: run `kv update`.``
 
-Set `KV_UPDATE_CHECK=off` in your shell profile to turn these off. `kv update`
-and `kv update --check` still check when you run them.
+To turn these off, set `KV_UPDATE_CHECK=off`:
+
+- For `kv status` and `kv tui`, set it in your shell profile.
+- A tray started at login does not see your shell profile. On macOS, run
+  `KV_UPDATE_CHECK=off kv tray --login on` to carry it into the login item.
+  On Windows, set it as a user environment variable with
+  `setx KV_UPDATE_CHECK off`, which covers both.
+
+`kv update` and `kv update --check` still check when you run them.
 
 On macOS and Windows, `kv update` will not run while the tray is running. It
 points you to the tray's menu instead, so the tray restarts on the new
