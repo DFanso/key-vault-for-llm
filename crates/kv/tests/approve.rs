@@ -329,6 +329,101 @@ fn a_base_url_request_shows_its_path_not_the_address() {
 }
 
 #[test]
+fn a_request_shows_its_header_names_and_how_its_body_starts() {
+    let mut f = fixture();
+    let token = f.token();
+    let mut call = get("openrouter", "https://openrouter.ai/api/v1/chat");
+    call.method = "POST".into();
+    call.headers
+        .insert("X-Title".into(), "hidden-header-value-1234".into());
+    call.headers
+        .insert("Content-Type".into(), "application/json".into());
+    call.body = Some("{\"model\":\n\t\"x\"}".into());
+    f.wait(Some(&session("s1")), AgentRequest::HttpRequest(call), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    assert_eq!(approval.detail, "POST https://openrouter.ai/api/v1/chat");
+    // Names only: a header's value is the agent's text.
+    assert_eq!(approval.headers.as_deref(), Some("Content-Type, X-Title"));
+    assert_eq!(
+        approval.body.as_deref(),
+        Some("15 bytes: {\"model\": \"x\"}")
+    );
+    assert!(approval.can_grant);
+    let shown = serde_json::to_string(&approval).unwrap();
+    assert!(!shown.contains("hidden-header-value"), "{shown}");
+}
+
+#[test]
+fn a_request_without_extra_headers_or_a_body_shows_neither() {
+    let mut f = fixture();
+    let token = f.token();
+    f.wait(Some(&session("s1")), ask_get(), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    assert_eq!(approval.headers, None);
+    assert_eq!(approval.body, None);
+}
+
+#[test]
+fn a_long_body_shows_its_size_and_its_start() {
+    let mut f = fixture();
+    let token = f.token();
+    let mut call = get("openrouter", "https://openrouter.ai/api/v1/chat");
+    call.method = "POST".into();
+    call.body = Some(format!("{}{}", "a".repeat(300), "hidden-tail"));
+    f.wait(Some(&session("s1")), AgentRequest::HttpRequest(call), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    let body = approval.body.unwrap();
+    assert!(body.starts_with("311 bytes: aaa"), "{body}");
+    assert!(body.ends_with('…'), "{body}");
+    assert!(!body.contains("hidden-tail"), "{body}");
+    assert!(body.chars().count() <= 220, "{body}");
+    // The size says the preview is partial, so the session can still be
+    // granted.
+    assert!(approval.can_grant);
+}
+
+#[test]
+fn a_request_whose_detail_was_cut_cannot_be_granted_for_the_session() {
+    let mut f = fixture();
+    let token = f.token();
+    let agent = session("s1");
+    let long = || {
+        AgentRequest::HttpRequest(get(
+            "openrouter",
+            &format!("https://openrouter.ai/api/v1/models?q={}", "a".repeat(400)),
+        ))
+    };
+    let mut waiting = f.wait(Some(&agent), long(), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    assert!(approval.detail.ends_with('…'), "{}", approval.detail);
+    assert!(!approval.can_grant);
+
+    // Allow for this session then allows this one request only, as for a
+    // share.
+    done(&f.decide(&token, waiting.id, Verdict::AllowSession));
+    assert_eq!(verdict(&mut waiting), Some(Verdict::AllowSession));
+    assert_eq!(job_decision(waiting.then), "approved");
+    f.wait(Some(&agent), long(), f.t0);
+    f.wait(Some(&agent), ask_get(), f.t0);
+}
+
+#[test]
+fn a_request_whose_header_names_were_cut_cannot_be_granted() {
+    let mut f = fixture();
+    let token = f.token();
+    let mut call = get("openrouter", "https://openrouter.ai/api/v1/models");
+    for i in 0..40 {
+        call.headers
+            .insert(format!("X-Extra-Header-{i:02}"), "1".into());
+    }
+    f.wait(Some(&session("s1")), AgentRequest::HttpRequest(call), f.t0);
+    let approval = f.overview(&token).approvals.remove(0);
+    let headers = approval.headers.unwrap();
+    assert!(headers.ends_with('…'), "{headers}");
+    assert!(!approval.can_grant);
+}
+
+#[test]
 fn a_grant_ends_when_its_handle_is_removed() {
     let mut f = fixture();
     let token = f.token();

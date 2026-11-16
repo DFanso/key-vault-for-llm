@@ -26,6 +26,8 @@ fn approval(id: u64, can_grant: bool) -> Approval {
         detail: format!("GET https://openrouter.ai/api/v1/models?page={id}"),
         cwd: None,
         env_vars: Vec::new(),
+        headers: None,
+        body: None,
         can_grant,
         expires_in_secs: 42,
     }
@@ -504,4 +506,25 @@ fn any_menu_becomes_any_other() {
             assert_eq!(&apply(a, b, &edits(a, b)), b, "{a:?} -> {b:?}");
         }
     }
+}
+
+#[test]
+fn a_request_menu_shows_header_names_and_the_body() {
+    let mut post = approval(7, true);
+    post.headers = Some("Content-Type, X-Title".into());
+    post.body = Some("15 bytes: {\"model\": \"x\"}".into());
+    let overview = overview(vec![post]);
+    let model = Model::new(view(Some(&overview.status), Some(&overview)));
+    let Item::Submenu { items, .. } = &model.menu[0] else {
+        panic!("{:?}", model.menu[0]);
+    };
+    assert_eq!(
+        labels(&items[..4]),
+        [
+            "(GET https://openrouter.ai/api/v1/models?page=7)",
+            "(headers Content-Type, X-Title)",
+            "(body 15 bytes: {\"model\": \"x\"})",
+            "(Expires in 42s)",
+        ]
+    );
 }

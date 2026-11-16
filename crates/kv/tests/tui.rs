@@ -71,6 +71,8 @@ fn approval(id: u64, can_grant: bool) -> Approval {
         detail: format!("GET https://openrouter.ai/api/v1/models?page={id}"),
         cwd: None,
         env_vars: Vec::new(),
+        headers: None,
+        body: None,
         can_grant,
         expires_in_secs: 42,
     }
@@ -419,4 +421,19 @@ fn a_run_approval_names_the_program() {
     assert!(drawn.contains("starts bunx"), "{drawn}");
     assert!(drawn.contains("a allow once"), "{drawn}");
     assert!(!drawn.contains("allow for session"), "{drawn}");
+}
+
+#[test]
+fn an_http_approval_shows_header_names_and_the_body() {
+    let mut post = approval(7, true);
+    post.headers = Some("Content-Type, X-Title".into());
+    post.body = Some("15 bytes: {\"model\": \"x\"}".into());
+    let app = unlocked(vec![post]);
+    let drawn = screen(&app);
+    assert!(drawn.contains("headers Content-Type, X-Title"), "{drawn}");
+    assert!(
+        drawn.contains("body 15 bytes: {\"model\": \"x\"}"),
+        "{drawn}"
+    );
+    assert!(drawn.contains("s allow for session"), "{drawn}");
 }

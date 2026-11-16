@@ -681,8 +681,16 @@ pub struct Approval {
     /// injected, not only the command.
     #[serde(default)]
     pub env_vars: Vec<String>,
+    /// The extra headers an `http_request` sets, by name only: their
+    /// values are the agent's text and can be long. Joined with ", ".
+    #[serde(default)]
+    pub headers: Option<String>,
+    /// For an `http_request` with a body: its size in bytes and how it
+    /// starts, such as `512 bytes: {"name":…`.
+    #[serde(default)]
+    pub body: Option<String>,
     /// Whether `allow_session` can grant anything: the request named its
-    /// agent session.
+    /// agent session, and nothing shown about it had to be cut.
     pub can_grant: bool,
     pub expires_in_secs: u64,
 }

@@ -83,6 +83,13 @@ const NOTIFIER_FRESH: Duration = Duration::from_secs(5);
 /// agent cannot flood the approval list or the notifications.
 const MAX_PENDING: usize = 32;
 
+/// How much of a waiting request's detail, working directory or header
+/// names the user sees. A request with more cannot be allowed for the
+/// session, since the user did not see all of it.
+const SHOWN_DETAIL: usize = 300;
+/// How much of a request body the user sees, after its size.
+const SHOWN_BODY: usize = 200;
+
 /// Programs started through `run` at once, counting those waiting for
 /// approval.
 const MAX_RUNS: usize = 32;
@@ -210,10 +217,13 @@ struct Pending {
     detail: String,
     cwd: Option<String>,
     env_vars: Vec<String>,
+    headers: Option<String>,
+    body: Option<String>,
     client: Option<String>,
     session: Option<String>,
     /// Whether "allow for the session" may grant anything. Sending a share
-    /// never can: each one waits for the user.
+    /// never can: each one waits for the user. Nor can a request whose
+    /// shown text had to be cut.
     grantable: bool,
     /// For a share, what to record once the user allows it.
     sent: Option<Sent>,
@@ -240,6 +250,11 @@ struct Ask {
     cwd: Option<String>,
     /// The variables the program would get, for `exec` and `run`.
     env_vars: Vec<String>,
+    /// The extra header names, for `http_request`.
+    headers: Vec<String>,
+    /// The body's size and start, for `http_request`, already made
+    /// printable.
+    body: Option<String>,
     grantable: bool,
     sent: Option<Sent>,
 }
@@ -519,6 +534,8 @@ impl Daemon {
             detail,
             cwd: None,
             env_vars: Vec::new(),
+            headers: Vec::new(),
+            body: None,
             grantable: false,
             sent: Some(sealed.sent),
         };
@@ -983,6 +1000,10 @@ impl Daemon {
             } => format!("{} {}", call.method, call.url),
             _ => format!("{} {}", call.method, url.as_str()),
         };
+        // What else the request sends: header names, not their values, and
+        // the start of the body.
+        let headers = call.headers.keys().cloned().collect();
+        let body = call.body.as_deref().map(body_preview);
         let handle = call.handle.clone();
         let job = Prepared::Http(Box::new(HttpJob {
             secret,
@@ -1004,6 +1025,8 @@ impl Daemon {
             detail,
             cwd: None,
             env_vars: Vec::new(),
+            headers,
+            body,
             grantable: true,
             sent: None,
         };
@@ -1181,6 +1204,8 @@ impl Daemon {
             detail,
             cwd: Some(cwd),
             env_vars: env_names,
+            headers: Vec::new(),
+            body: None,
             grantable: true,
             sent: None,
         };
@@ -1282,6 +1307,8 @@ impl Daemon {
             detail,
             cwd: None,
             env_vars: Vec::new(),
+            headers: Vec::new(),
+            body: None,
             grantable: true,
             sent: None,
         };
@@ -1369,6 +1396,8 @@ impl Daemon {
             ),
             cwd: None,
             env_vars: Vec::new(),
+            headers: Vec::new(),
+            body: None,
             grantable: true,
             sent: None,
         };
@@ -1467,6 +1496,8 @@ impl Daemon {
             detail: format!("starts {program}"),
             cwd: None,
             env_vars: job_env_names,
+            headers: Vec::new(),
+            body: None,
             grantable: true,
             sent: None,
         };
@@ -1499,22 +1530,35 @@ impl Daemon {
             ask.tool
         );
         let (reply, verdict) = oneshot::channel();
+        // Allowing for the session covers later requests the user never
+        // sees, so it needs this one seen in full.
+        let mut cut = false;
+        let mut shown = |text: &str| {
+            let (text, was_cut) = printable_cut(text, SHOWN_DETAIL);
+            cut |= was_cut;
+            text
+        };
+        let detail = shown(&ask.detail);
+        let cwd = ask.cwd.map(|cwd| shown(&cwd));
+        let headers = (!ask.headers.is_empty()).then(|| shown(&ask.headers.join(", ")));
         self.approvals.push(Pending {
             id,
             tool: ask.tool,
             ask: ask.ask,
             handles: ask.handles,
             summary: ask.summary,
-            detail: printable(&ask.detail, 300),
-            cwd: ask.cwd.map(|cwd| printable(&cwd, 300)),
+            detail,
+            cwd,
             env_vars: ask
                 .env_vars
                 .iter()
                 .map(|name| envvars::shown(name))
                 .collect(),
+            headers,
+            body: ask.body,
             client,
             session: session.map(|s| s.id.clone()),
-            grantable: ask.grantable,
+            grantable: ask.grantable && !cut,
             sent: ask.sent,
             queued: now,
             expires: now + self.settings.approval_wait,
@@ -1988,6 +2032,8 @@ impl Daemon {
                 detail: p.detail.clone(),
                 cwd: p.cwd.clone(),
                 env_vars: p.env_vars.clone(),
+                headers: p.headers.clone(),
+                body: p.body.clone(),
                 can_grant: p.session.is_some() && p.grantable,
                 expires_in_secs: p.expires.saturating_duration_since(now).as_secs(),
             })
@@ -3046,6 +3092,21 @@ pub(crate) fn printable(text: &str, max_chars: usize) -> String {
         out.push('…');
     }
     out
+}
+
+/// `printable`, and whether the text had to be cut to fit.
+fn printable_cut(text: &str, max_chars: usize) -> (String, bool) {
+    let cut = printable(text, usize::MAX).chars().count() > max_chars;
+    (printable(text, max_chars), cut)
+}
+
+/// A request body as the user sees it: its size in bytes, then how it
+/// starts, made printable.
+fn body_preview(body: &str) -> String {
+    if body.is_empty() {
+        return "0 bytes".to_owned();
+    }
+    format!("{} bytes: {}", body.len(), printable(body, SHOWN_BODY))
 }
 
 /// Unicode format characters that change how text is laid out without

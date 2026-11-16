@@ -239,6 +239,12 @@ fn approval_lines(approval: &Approval, selected: bool) -> Vec<Line<'static>> {
             approval.env_vars.join(", ")
         )));
     }
+    if let Some(headers) = &approval.headers {
+        lines.push(Line::raw(format!("    headers {headers}")));
+    }
+    if let Some(body) = &approval.body {
+        lines.push(Line::raw(format!("    body {body}")));
+    }
     lines.push(Line::styled(
         format!("    answer within {}s", approval.expires_in_secs),
         dim(),

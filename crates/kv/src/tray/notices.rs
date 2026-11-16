@@ -69,6 +69,14 @@ impl Notice {
             body.push('\n');
             body.push_str(&flat(&format!("in {cwd}"), BODY_LEN));
         }
+        if let Some(headers) = &approval.headers {
+            body.push('\n');
+            body.push_str(&flat(&format!("headers {headers}"), BODY_LEN));
+        }
+        if let Some(sent) = &approval.body {
+            body.push('\n');
+            body.push_str(&flat(&format!("body {sent}"), BODY_LEN));
+        }
         Notice {
             key,
             title: flat(&format!("{client} wants {handles}"), TITLE_LEN),
@@ -156,6 +164,8 @@ mod tests {
             detail: "[\"terraform\",\n\"plan\"]".into(),
             cwd: Some("/work/infra".into()),
             env_vars: vec!["AWS_ACCESS_KEY_ID".into()],
+            headers: None,
+            body: None,
             can_grant: false,
             expires_in_secs: 60,
         }
@@ -168,6 +178,24 @@ mod tests {
         assert_eq!(notice.subtitle, "Run a command");
         assert_eq!(notice.body, "[\"terraform\", \"plan\"]\nin /work/infra");
         assert!(!notice.can_grant);
+    }
+
+    #[test]
+    fn a_notice_shows_what_a_request_sends() {
+        let approval = Approval {
+            tool: "http_request".into(),
+            detail: "POST https://api.example.com/items".into(),
+            cwd: None,
+            env_vars: Vec::new(),
+            headers: Some("Content-Type, X-Title".into()),
+            body: Some("15 bytes: {\"model\": \"x\"}".into()),
+            ..approval()
+        };
+        let notice = Notice::with_key(&approval, "kv-request-7-00".into());
+        assert_eq!(
+            notice.body,
+            "POST https://api.example.com/items\nheaders Content-Type, X-Title\nbody 15 bytes: {\"model\": \"x\"}"
+        );
     }
 
     #[test]
