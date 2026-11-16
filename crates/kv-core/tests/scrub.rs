@@ -338,3 +338,271 @@ proptest! {
         prop_assert!(out.contains("[kv:h]"), "nothing replaced in {}", out);
     }
 }
+
+// Secrets beyond ASCII, and secrets that overlap each other.
+
+/// JavaScript's `encodeURIComponent()` as the scrubber models it: leaves
+/// `-_.~` alone. Non-ASCII is escaped by every set.
+const JS_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// JavaScript's `encodeURI()`: also leaves URL delimiters alone.
+const JS_URI: &AsciiSet = &PY_QUOTE
+    .remove(b';')
+    .remove(b',')
+    .remove(b'?')
+    .remove(b':')
+    .remove(b'@')
+    .remove(b'&')
+    .remove(b'=')
+    .remove(b'+')
+    .remove(b'$')
+    .remove(b'!')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'#');
+
+/// Characters a generated secret is made of: ASCII, two-byte accents,
+/// three-byte CJK and four-byte emoji, which JSON escapes as surrogate
+/// pairs. No `[` or `]`, so a replacement label can never help spell one.
+const ALPHABET: &[char] = &[
+    'a', 'Z', '0', '9', '-', '_', '/', ':', '"', '\\', ' ', '%', '+', '@', '~', 'é', 'ä', 'ö', 'ñ',
+    'ß', 'Ω', '中', '文', '秘', '密', '鍵', 'あ', '🔑', '😀', '🦀', '\u{0301}',
+];
+
+/// Non-ASCII characters only, so each generated secret holds at least one.
+const WIDE: &[char] = &['é', 'ß', 'Ω', '秘', '鍵', 'あ', '🔑', '🦀', '\u{0301}'];
+
+/// A secret of 8 to 20 characters with at least one non-ASCII character.
+fn unicode_secret() -> impl Strategy<Value = String> {
+    (
+        prop::collection::vec(prop::sample::select(ALPHABET), 7..20),
+        prop::sample::select(WIDE),
+        any::<prop::sample::Index>(),
+    )
+        .prop_map(|(mut chars, wide, at)| {
+            let at = at.index(chars.len() + 1);
+            chars.insert(at, wide);
+            chars.into_iter().collect()
+        })
+}
+
+/// A JSON string body with every non-ASCII character as `\uXXXX`, as
+/// Python's `json.dumps` writes it.
+fn json_ascii(secret: &str, uppercase: bool) -> String {
+    let quoted = serde_json::to_string(secret).unwrap();
+    let mut out = String::new();
+    for c in quoted[1..quoted.len() - 1].chars() {
+        if c.is_ascii() {
+            out.push(c);
+            continue;
+        }
+        for unit in c.encode_utf16(&mut [0u16; 2]) {
+            if uppercase {
+                out.push_str(&format!("\\u{unit:04X}"));
+            } else {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
+/// Every text form of `secret` the scrubber says it covers, other than
+/// base64: raw, hex, percent-encodings and JSON string bodies.
+fn text_forms(secret: &str) -> Vec<String> {
+    let raw = secret.as_bytes();
+    let mut out = vec![secret.to_owned(), hex::encode(raw), hex::encode_upper(raw)];
+    for set in [NON_ALPHANUMERIC, JS_COMPONENT, PY_QUOTE, JS_URI] {
+        let upper = percent_encode(raw, set).to_string();
+        let lower = lowercase_escapes(&upper);
+        for form in [upper, lower] {
+            out.push(form.replace("%20", "+"));
+            out.push(form);
+        }
+    }
+    let plain = serde_json::to_string(secret).unwrap();
+    let plain = plain[1..plain.len() - 1].to_owned();
+    for form in [plain, json_ascii(secret, false), json_ascii(secret, true)] {
+        out.push(form.replace('/', "\\/"));
+        out.push(form);
+    }
+    out
+}
+
+/// The base64 characters that depend only on `secret` when it starts
+/// `offset` bytes into an encoded buffer, in both alphabets.
+fn base64_cores(secret: &str) -> Vec<String> {
+    let raw = secret.as_bytes();
+    let mut out = Vec::new();
+    for engine in [&STANDARD, &URL_SAFE] {
+        for offset in 0..3 {
+            let mut buf = vec![0u8; offset];
+            buf.extend_from_slice(raw);
+            let encoded = engine.encode(&buf);
+            let start = (offset * 8).div_ceil(6);
+            let end = (offset + raw.len()) * 8 / 6;
+            out.push(encoded[start..end].to_owned());
+        }
+    }
+    out
+}
+
+/// Everything that must not be left in scrubbed output.
+fn forbidden(secret: &str) -> Vec<String> {
+    let mut out = text_forms(secret);
+    out.extend(base64_cores(secret));
+    out.retain(|form| form.len() >= scrub::MIN_SECRET_LEN);
+    out
+}
+
+/// One way to write `secret` into output: a text form, or base64 of it
+/// between other bytes, so it lands at any alignment.
+fn written(secret: &str, how: usize, before: &[u8], after: &[u8]) -> String {
+    let forms = text_forms(secret);
+    match how % (forms.len() + 2) {
+        n if n < forms.len() => forms[n].clone(),
+        n => {
+            let mut buf = before.to_vec();
+            buf.extend_from_slice(secret.as_bytes());
+            buf.extend_from_slice(after);
+            if n == forms.len() {
+                STANDARD.encode(&buf)
+            } else {
+                URL_SAFE.encode(&buf)
+            }
+        }
+    }
+}
+
+/// Scrubs `input` through a stream cut at `cuts`, and checks it matches
+/// the one-shot result.
+fn stream_scrub(s: &Scrubber, input: &[u8], cuts: &[usize]) -> Result<String, TestCaseError> {
+    let mut stream = s.stream();
+    let mut out = Vec::new();
+    for chunk in chunked(input, cuts) {
+        out.extend(stream.push(chunk));
+    }
+    out.extend(stream.finish());
+    prop_assert_eq!(&out, &s.scrub(input));
+    // Only whole matches are replaced, so the output is still UTF-8.
+    Ok(String::from_utf8(out).expect("scrubbed UTF-8 stays UTF-8"))
+}
+
+fn assert_none_survive(out: &str, secrets: &[String]) -> Result<(), TestCaseError> {
+    for secret in secrets {
+        for form in forbidden(secret) {
+            prop_assert!(
+                !out.contains(&form),
+                "{:?} of secret {:?} survived in {:?}",
+                form,
+                secret,
+                out
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_value_is_measured_in_characters_not_bytes() {
+    // Seven CJK characters are 21 bytes, but still too short to scrub.
+    let s = Scrubber::new([("short", "秘密秘密秘密秘")]);
+    assert!(s.is_empty());
+    let s = Scrubber::new([("long", "秘密秘密秘密秘密")]);
+    assert_eq!(scrub(&s, "x秘密秘密秘密秘密y"), "x[kv:long]y");
+}
+
+#[test]
+fn an_emoji_is_caught_as_a_json_surrogate_pair() {
+    let s = Scrubber::new([("pw", "key-🔑-0123")]);
+    for encoded in [r"key-🔑-0123", r"key-🔑-0123"] {
+        assert_eq!(scrub(&s, encoded), "[kv:pw]", "{encoded}");
+    }
+}
+
+proptest! {
+    #[test]
+    fn no_encoding_of_a_unicode_secret_survives(
+        secret in unicode_secret(),
+        pieces in prop::collection::vec(
+            (
+                any::<usize>(),
+                prop::collection::vec(any::<u8>(), 0..3),
+                prop::collection::vec(any::<u8>(), 0..3),
+                "[ ,;\n]{0,8}",
+            ),
+            1..5,
+        ),
+        cuts in prop::collection::vec(any::<usize>(), 0..10),
+    ) {
+        prop_assume!(scrub::cost(&secret) <= MAX_TOTAL_COST);
+        let s = Scrubber::new([("h", secret.as_str())]);
+        let mut input = String::new();
+        for (how, before, after, noise) in &pieces {
+            input.push_str(noise);
+            input.push_str(&written(&secret, *how, before, after));
+        }
+        let out = stream_scrub(&s, input.as_bytes(), &cuts)?;
+        assert_none_survive(&out, std::slice::from_ref(&secret))?;
+        prop_assert!(out.contains("[kv:h]"), "nothing replaced in {:?}", out);
+    }
+
+    #[test]
+    fn overlapping_secrets_never_survive(
+        base in unicode_secret(),
+        extra in prop::collection::vec(prop::sample::select(ALPHABET), 1..6),
+        keep in any::<prop::sample::Index>(),
+        tail in any::<prop::sample::Index>(),
+        pieces in prop::collection::vec(
+            (
+                any::<usize>(),
+                any::<usize>(),
+                prop::collection::vec(any::<u8>(), 0..3),
+                "[ ,;\n]{0,8}",
+            ),
+            1..6,
+        ),
+        cuts in prop::collection::vec(any::<usize>(), 0..10),
+    ) {
+        let chars: Vec<char> = base.chars().collect();
+        let extra: String = extra.into_iter().collect();
+        let spare = chars.len() - scrub::MIN_SECRET_LEN + 1;
+        // A prefix of `base`, at least the scrubber's minimum long.
+        let prefix: String = chars[..scrub::MIN_SECRET_LEN + keep.index(spare)]
+            .iter()
+            .collect();
+        // The last part of `base`, at least the minimum long.
+        let suffix: String = chars[tail.index(spare)..].iter().collect();
+        let secrets = vec![
+            base.clone(),
+            // `base` is a prefix of this one.
+            format!("{base}{extra}"),
+            // This one is a prefix of `base`.
+            prefix.clone(),
+            // Shares a prefix with `base`, then differs.
+            format!("{prefix}{extra}🦀"),
+            // Starts inside `base` and runs past its end.
+            format!("{suffix}{extra}"),
+        ];
+        let total: usize = secrets.iter().map(|v| scrub::cost(v)).sum();
+        prop_assume!(total <= MAX_TOTAL_COST);
+        let handles = ["base", "longer", "prefix", "sibling", "tail"];
+        let s = Scrubber::new(handles.into_iter().zip(secrets.iter().map(String::as_str)));
+        let mut input = String::new();
+        for (which, how, before, noise) in &pieces {
+            input.push_str(noise);
+            input.push_str(&written(&secrets[which % secrets.len()], *how, before, b"~"));
+        }
+        // `base` and `tail` written over each other: the text holds both.
+        input.push_str(&format!(" {base}{extra} "));
+        let out = stream_scrub(&s, input.as_bytes(), &cuts)?;
+        assert_none_survive(&out, &secrets)?;
+        prop_assert!(out.contains("[kv:"), "nothing replaced in {:?}", out);
+    }
+}
