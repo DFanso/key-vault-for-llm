@@ -140,51 +140,132 @@ fn successor(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
     script
 }
 
+/// What the old tray says when no successor came up.
+#[cfg(unix)]
+fn not_started(home: &std::path::Path) -> String {
+    let device = if cfg!(target_os = "macos") {
+        "Touch ID"
+    } else {
+        "Touch ID or Windows Hello"
+    };
+    format!(
+        "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray and start it \
+         again, or log out and back in. Until then {device} unlock won't work; unlock with \
+         your passphrase. To go back, move kv.previous over kv in {}.",
+        home.display()
+    )
+}
+
+/// A shell command that takes the tray lock (flock, as kv's) at once, or
+/// exits, and holds it for `secs` seconds, like a new tray.
+#[cfg(unix)]
+fn hold_lock(paths: &Paths, secs: u32) -> String {
+    format!(
+        "exec perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die; \
+         flock($f, LOCK_EX|LOCK_NB) or die; sleep {secs}' '{}'",
+        paths.tray_lock_file().display()
+    )
+}
+
+/// How the old tray starts each successor.
+#[cfg(unix)]
+fn started(paths: &Paths) -> String {
+    format!(
+        "tray --after-update 1.9.0 --ready-file {}\n",
+        paths.tray_ready_file().display()
+    )
+}
+
 #[cfg(unix)]
 #[test]
 fn a_successor_that_never_comes_up_leaves_the_old_tray_in_charge() {
     use kv::tray::update::restart_after_update;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     let home = TempDir::new().unwrap();
     let paths = Paths::under(home.path());
     let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
     let exe = successor(home.path(), "exit 1");
-    let error = restart_after_update(&lock, &installed(&exe), &paths).unwrap_err();
-    assert_eq!(
-        error,
-        format!(
-            "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray and start it \
-             again, or log out and back in. To go back, move kv.previous over kv in {}.",
-            home.path().display()
-        )
-    );
+    let error =
+        restart_after_update(&lock, &installed(&exe), &paths, Duration::from_secs(5)).unwrap_err();
+    assert_eq!(error, not_started(home.path()));
     let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
-    assert_eq!(tried, "tray --after-update 1.9.0\n".repeat(3));
+    assert_eq!(tried, started(&paths).repeat(3));
     assert!(lock.lock().unwrap().is_some(), "the lock was taken back");
     assert!(kv::tray::is_running(&paths));
 }
 
+/// A successor that takes the tray lock but never says its icon is up (as
+/// one whose icon fails after it took the lock) does not count: it is
+/// stopped, tried again, and the old tray stays.
 #[cfg(unix)]
 #[test]
-fn a_successor_that_takes_the_lock_is_the_tray_now() {
+fn a_successor_that_takes_the_lock_but_is_never_ready_does_not_count() {
     use kv::tray::update::restart_after_update;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     let home = TempDir::new().unwrap();
     let paths = Paths::under(home.path());
     let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
-    // Holds the tray lock (flock, as kv's) for a moment, like a new tray.
-    let body = format!(
-        "exec perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die; \
-         flock($f, LOCK_EX) or die; sleep 2' '{}'",
-        paths.tray_lock_file().display()
-    );
+    let exe = successor(home.path(), &hold_lock(&paths, 30));
+    let error =
+        restart_after_update(&lock, &installed(&exe), &paths, Duration::from_secs(1)).unwrap_err();
+    assert_eq!(error, not_started(home.path()));
+    let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
+    assert_eq!(tried, started(&paths).repeat(3));
+    assert!(lock.lock().unwrap().is_some(), "the lock was taken back");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_successor_that_says_it_is_up_is_the_tray_now() {
+    use kv::tray::update::restart_after_update;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let home = TempDir::new().unwrap();
+    let paths = Paths::under(home.path());
+    let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
+    // Takes the lock and, its icon up, creates the file it was given.
+    let body = format!(": > \"$5\"; {}", hold_lock(&paths, 3));
     let exe = successor(home.path(), &body);
-    restart_after_update(&lock, &installed(&exe), &paths).unwrap();
+    restart_after_update(&lock, &installed(&exe), &paths, Duration::from_secs(5)).unwrap();
     assert!(lock.lock().unwrap().is_none(), "the old tray let go");
     let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
-    assert_eq!(tried, "tray --after-update 1.9.0\n");
+    assert_eq!(tried, started(&paths));
+    assert!(
+        !paths.tray_ready_file().exists(),
+        "the ready file is removed"
+    );
+}
+
+/// When the old tray cannot take its lock back, it says so.
+#[cfg(unix)]
+#[test]
+fn a_lock_that_cannot_be_taken_back_is_said() {
+    use kv::tray::update::restart_after_update;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let home = TempDir::new().unwrap();
+    let paths = Paths::under(home.path());
+    let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
+    // Gone for good: never ready, and keeps the lock past the old tray's
+    // few seconds of trying.
+    let body = format!("({}) & exit 1", hold_lock(&paths, 8));
+    let exe = successor(home.path(), &body);
+    let error =
+        restart_after_update(&lock, &installed(&exe), &paths, Duration::from_secs(1)).unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "{} (kv tray could not take its lock back: kv tray is already running.)",
+            not_started(home.path())
+        )
+    );
+    assert!(lock.lock().unwrap().is_none());
 }
 
 #[test]

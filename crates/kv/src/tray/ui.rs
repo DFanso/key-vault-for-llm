@@ -31,7 +31,7 @@ use super::notices::Notice;
 use super::update::{Release, updated_text};
 use super::window::{Stays, Tab, ToPage};
 use super::worker::{Desktop, Worker};
-use super::{icon, login};
+use super::{AfterUpdate, icon, login};
 use crate::device;
 use crate::notify;
 use crate::paths::Paths;
@@ -70,8 +70,9 @@ enum Message {
 }
 
 /// Runs the event loop; returns only if it cannot start. `after_update` is
-/// the version an update just installed, for the tray to say so.
-pub fn run(paths: Paths, lock: File, after_update: Option<semver::Version>) -> io::Result<()> {
+/// set when an update started this tray: it says what was installed, and
+/// creates the ready file once the icon is up.
+pub fn run(paths: Paths, lock: File, after_update: Option<AfterUpdate>) -> io::Result<()> {
     #[cfg(windows)]
     leave_own_console();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -126,8 +127,10 @@ pub fn run(paths: Paths, lock: File, after_update: Option<semver::Version>) -> i
         #[cfg(windows)]
         clipboard: super::clipboard::Clipboard::default(),
     };
-    if let Some(version) = after_update {
-        notify::tray(updated_text(&version));
+    let mut ready_file = None;
+    if let Some(after) = after_update {
+        notify::tray(updated_text(&after.version));
+        ready_file = after.ready_file;
     }
     // Held for as long as the tray runs, unless an update hands it to the
     // tray on the new binary.
@@ -174,6 +177,10 @@ pub fn run(paths: Paths, lock: File, after_update: Option<semver::Version>) -> i
             Event::NewEvents(StartCause::Init) => match Tray::new() {
                 Ok(created) => {
                     tray = Some(created);
+                    // The tray this one replaces quits once it sees this.
+                    if let Some(ready) = ready_file.take() {
+                        let _ = std::fs::write(ready, b"");
+                    }
                     // The tray is up, so this kv works: what a Windows
                     // update left of the old one can go.
                     if let Ok(installed) = crate::update::swap::installed_exe() {

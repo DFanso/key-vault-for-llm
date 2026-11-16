@@ -1,7 +1,7 @@
 //! The tray's side of self-update: asking GitHub, installing what the user
 //! agreed to, and handing over to a tray running the new binary.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,10 +17,13 @@ use crate::update::{self as updating, LATEST_URL, Offer, UpdateError, check, swa
 
 /// How many times the tray starts its successor before giving up.
 const ATTEMPTS: usize = 3;
-/// How long each successor has to take the tray lock.
-const START_WAIT: Duration = Duration::from_secs(5);
+/// How long each successor has to say it is up: to take the tray lock and
+/// show its icon. Its own wait for the lock is 5 seconds of that.
+pub const START_WAIT: Duration = Duration::from_secs(10);
 /// How often the tray looks whether its successor is up.
 const POLL: Duration = Duration::from_millis(50);
+/// How long the tray tries to take its lock back when no successor came up.
+const RELOCK_WAIT: Duration = Duration::from_secs(3);
 
 /// What the tray's worker needs to update kv. The real one asks GitHub and
 /// replaces the installed binary; tests script the answers.
@@ -29,9 +32,10 @@ pub trait Updater: Send + Sync {
     fn check(&self) -> BoxFuture<'static, Result<Option<Offer>, UpdateError>>;
     /// Downloads, verifies and swaps in `offer`.
     fn install(&self, offer: Offer) -> BoxFuture<'static, Result<Installed, UpdateError>>;
-    /// Starts a tray on the new binary and makes sure it came up. On `Err`
-    /// this tray still holds its lock and keeps running; the text says what
-    /// the user can do.
+    /// Starts a tray on the new binary and makes sure it came up: on `Ok`
+    /// this tray quits. On `Err` this tray keeps running, and has taken its
+    /// lock back unless the text says it could not; the text says what the
+    /// user can do.
     fn restart(&self, installed: &Installed) -> Result<(), String>;
 }
 
@@ -80,44 +84,76 @@ impl Updater for Release {
     }
 
     fn restart(&self, installed: &Installed) -> Result<(), String> {
-        restart_after_update(&self.lock, installed, &self.paths)
+        restart_after_update(&self.lock, installed, &self.paths, START_WAIT)
     }
 }
 
 /// Hands the tray over to the kv just `installed`: lets go of the tray
-/// lock, then up to three times starts `kv tray --after-update <version>`
-/// and waits up to 5 seconds for it to take the lock. A successor that
-/// exits, or never takes the lock, does not count, and one still running
-/// when its time is up is stopped. If none comes up this tray takes its
-/// lock back, to keep running, and the error says what the user can do.
+/// lock, then up to three times starts
+/// `kv tray --after-update <version> --ready-file <file>` and waits up to
+/// `wait` for it to say it is up, by creating that file once its icon
+/// shows, while still running. A successor that exits, or does not say so
+/// in time, does not count, and one still running when its time is up is
+/// stopped.
+///
+/// If none comes up, this tray keeps running: it tries for a few seconds
+/// to take its lock back, and the error says what the user can do, and
+/// that the lock could not be taken back if so.
 pub fn restart_after_update(
     lock: &Arc<Mutex<Option<File>>>,
     installed: &Installed,
     paths: &Paths,
+    wait: Duration,
 ) -> Result<(), String> {
     let (exe, version) = (&installed.swapped.installed, &installed.version);
+    let ready = paths.tray_ready_file();
     let mut held = lock.lock().unwrap_or_else(PoisonError::into_inner);
     drop(held.take());
     for _ in 0..ATTEMPTS {
-        if successor_came_up(exe, version, paths) {
+        let up = successor_came_up(exe, version, &ready, wait);
+        let _ = fs::remove_file(&ready);
+        if up {
             return Ok(());
         }
     }
-    *held = super::lock_single(paths).ok();
-    Err(format!(
+    let mut message = format!(
         "kv {version} is installed, but the new tray didn't start. Quit kv tray and start it \
-         again, or log out and back in. {}",
+         again, or log out and back in. Until then {} unlock won't work; unlock with your \
+         passphrase. {}",
+        device_name(),
         swap::way_back(&installed.swapped)
-    ))
+    );
+    match super::lock_single_retry(paths, RELOCK_WAIT) {
+        Ok(file) => *held = Some(file),
+        Err(e) => message.push_str(&format!(" (kv tray could not take its lock back: {e}.)")),
+    }
+    Err(message)
 }
 
-/// Starts one successor and waits for it to hold the tray lock.
-fn successor_came_up(exe: &Path, version: &Version, paths: &Paths) -> bool {
+/// The device unlock a tray left on the old kv cannot use with a daemon
+/// on the new one.
+fn device_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Touch ID"
+    } else if cfg!(windows) {
+        "Windows Hello"
+    } else {
+        "Touch ID or Windows Hello"
+    }
+}
+
+/// Starts one successor and waits for it to create `ready`, which it does
+/// once its icon is up, while it still runs.
+fn successor_came_up(exe: &Path, version: &Version, ready: &Path, wait: Duration) -> bool {
+    // One left from before would say a successor is up that is not.
+    let _ = fs::remove_file(ready);
     let mut command = Command::new(exe);
     command
         .arg("tray")
         .arg("--after-update")
         .arg(version.to_string())
+        .arg("--ready-file")
+        .arg(ready)
         // It outlives this tray: it must not hold on to this one's output.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -141,14 +177,13 @@ fn successor_came_up(exe: &Path, version: &Version, paths: &Paths) -> bool {
     let Ok(mut child) = command.spawn() else {
         return false;
     };
-    let deadline = Instant::now() + START_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
-        // The lock alone could be another tray's: the successor must also
-        // still be running.
+        // A successor that said it is up and then exited is not up.
         if !matches!(child.try_wait(), Ok(None)) {
             return false;
         }
-        if super::is_running(paths) && matches!(child.try_wait(), Ok(None)) {
+        if ready.exists() && matches!(child.try_wait(), Ok(None)) {
             return true;
         }
         if Instant::now() >= deadline {

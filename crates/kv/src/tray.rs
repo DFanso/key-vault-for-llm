@@ -26,10 +26,19 @@ use crate::paths::Paths;
 /// the tray lock.
 pub const AFTER_UPDATE_WAIT: Duration = Duration::from_secs(5);
 
-/// Runs the tray until the user quits it. `after_update` is the version an
-/// update just installed, when the old tray started this one: it waits for
-/// the lock a little, and says the update is done.
-pub fn run(paths: Paths, after_update: Option<semver::Version>) -> io::Result<()> {
+/// What a tray started by an update is told by the tray it replaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AfterUpdate {
+    /// The version the update installed, for the tray to say so.
+    pub version: semver::Version,
+    /// The file to create once the icon is up, for the old tray to see.
+    pub ready_file: Option<std::path::PathBuf>,
+}
+
+/// Runs the tray until the user quits it. `after_update` is set when the
+/// tray an update replaced started this one: it waits for the lock a
+/// little, says the update is done, and says it is up once its icon shows.
+pub fn run(paths: Paths, after_update: Option<AfterUpdate>) -> io::Result<()> {
     #[cfg(any(target_os = "macos", windows))]
     {
         let lock = match after_update {

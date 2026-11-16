@@ -102,6 +102,10 @@ enum Command {
         /// and say kv was updated to this version.
         #[arg(long, value_name = "VERSION", hide = true, value_parser = semver::Version::parse)]
         after_update: Option<semver::Version>,
+        /// Started by the tray an update replaced: create this file once
+        /// the icon is up, so that tray knows it can quit.
+        #[arg(long, value_name = "FILE", hide = true, requires = "after_update")]
+        ready_file: Option<std::path::PathBuf>,
     },
     /// kv.app's notification helper, which `kv tray` starts on macOS.
     #[command(hide = true)]
@@ -367,10 +371,15 @@ pub fn main() -> ExitCode {
     if let Command::Tray {
         login,
         after_update,
+        ready_file,
     } = cli.command
     {
         // The tray's event loop needs the main thread, so it runs before
         // any runtime; its worker starts one of its own.
+        let after_update = after_update.map(|version| crate::tray::AfterUpdate {
+            version,
+            ready_file,
+        });
         return match tray(login, after_update) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -412,7 +421,7 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn tray(login: Option<bool>, after_update: Option<semver::Version>) -> io::Result<()> {
+fn tray(login: Option<bool>, after_update: Option<crate::tray::AfterUpdate>) -> io::Result<()> {
     match login {
         Some(on) => {
             crate::tray::login::set(on)?;
