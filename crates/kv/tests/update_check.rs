@@ -2,7 +2,7 @@
 //! API. Asset links in the test releases name the real GitHub host because
 //! they are only validated here, never downloaded.
 
-use kv::update::check::{client, latest, offer_from};
+use kv::update::check::{client, latest, offer_from, redirect_allowed};
 use kv::update::{UpdateError, archive_name, current_version};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
@@ -151,4 +151,45 @@ async fn oversized_reply_is_refused() {
         check(&server).await,
         Err(UpdateError::TooLarge(_))
     ));
+}
+
+async fn redirecting_to(location: &str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/start"))
+        .respond_with(ResponseTemplate::new(302).insert_header("location", location))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn redirects_off_github_or_to_plain_http_are_refused() {
+    for target in [
+        "https://evil.example/x",
+        "http://github.com/DFanso/key-vault-for-llm/x",
+        "https://github.com.evil.example/x",
+    ] {
+        let server = redirecting_to(target).await;
+        let result = client()
+            .unwrap()
+            .get(format!("{}/start", server.uri()))
+            .send()
+            .await;
+        assert!(result.is_err(), "{target} was followed");
+    }
+}
+
+#[test]
+fn redirect_rules_allow_five_hops_and_refuse_the_sixth() {
+    let ok = |s: &str, n| redirect_allowed(&s.parse().unwrap(), n);
+    for hops in 0..5 {
+        assert!(ok("https://github.com/a", hops), "hop {}", hops + 1);
+    }
+    assert!(!ok("https://github.com/a", 5), "sixth hop");
+    assert!(ok("https://api.github.com/a", 0));
+    assert!(ok("https://objects.githubusercontent.com/a", 0));
+    assert!(!ok("http://github.com/a", 0));
+    assert!(!ok("https://evil.example/a", 0));
+    assert!(!ok("https://githubusercontent.com.evil.example/a", 0));
 }

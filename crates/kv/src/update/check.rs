@@ -30,18 +30,26 @@ pub fn allowed_url(url: &Url) -> bool {
     }
 }
 
+/// Whether a download may follow a redirect to `next`, having already
+/// followed `followed` redirects: at most five in all, each to https on
+/// GitHub's own hosts.
+pub fn redirect_allowed(next: &Url, followed: usize) -> bool {
+    followed < MAX_REDIRECTS && allowed_url(next)
+}
+
 /// The client for everything the updater downloads. It ignores proxy
 /// settings, follows at most five redirects and only to https on GitHub's
 /// own hosts, and names itself `kv/<version>` and nothing more.
 pub fn client() -> reqwest::Result<Client> {
     Client::builder()
         .redirect(redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.error("too many redirects")
-            } else if allowed_url(attempt.url()) {
+            // `previous` holds the original URL too, so it is one longer
+            // than the number of redirects already followed.
+            let followed = attempt.previous().len().saturating_sub(1);
+            if redirect_allowed(attempt.url(), followed) {
                 attempt.follow()
             } else {
-                attempt.error("redirect to a host kv does not trust")
+                attempt.error("redirect refused")
             }
         }))
         .no_proxy()
