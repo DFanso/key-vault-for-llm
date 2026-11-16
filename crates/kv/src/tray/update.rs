@@ -113,7 +113,8 @@ pub fn restart_after_update(
     *held = super::lock_single(paths).ok();
     Err(format!(
         "kv {version} is installed, but the new tray didn't start. Quit kv tray and start it \
-         again, or log out and back in."
+         again, or log out and back in. {}",
+        swap::way_back(exe)
     ))
 }
 

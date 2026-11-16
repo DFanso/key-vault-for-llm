@@ -639,14 +639,21 @@ kv binary can no longer read the Touch ID key until you allow it once; see
 Allow.
 
 The old kv is kept so you can go back by hand. On macOS and Linux it is
-`kv.previous`, next to `kv`. On Windows it is `kv.exe.old`, and kv removes
-it the next time a kv command runs, so it is only there until you start the new
-kv once. To go back, stop kv and move the old file over `kv` (if `kv` is a
-link, use the folder of the file it points to):
+`kv.previous`, next to `kv`. To go back, stop kv and move the old file over
+`kv` (if `kv` is a link, use the folder of the file it points to):
 
 ```sh
 kv stop
 mv /path/to/kv.previous /path/to/kv
+```
+
+On Windows it is `kv.exe.old`, next to `kv.exe`. kv removes it once the new
+kv has worked: after a kv command succeeds, or the tray has started. So it is
+the way back when the new kv does not work. The update already stopped the
+daemon; in PowerShell, move the old file over `kv.exe`:
+
+```powershell
+Move-Item -Force C:\path\to\kv.exe.old C:\path\to\kv.exe
 ```
 
 A kv built from source (`cargo install`, `cargo build`) does not update

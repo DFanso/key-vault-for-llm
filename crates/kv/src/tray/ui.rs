@@ -172,7 +172,14 @@ pub fn run(paths: Paths, lock: File, after_update: Option<semver::Version>) -> i
         *flow = ControlFlow::Wait;
         match event {
             Event::NewEvents(StartCause::Init) => match Tray::new() {
-                Ok(created) => tray = Some(created),
+                Ok(created) => {
+                    tray = Some(created);
+                    // The tray is up, so this kv works: what a Windows
+                    // update left of the old one can go.
+                    if let Ok(installed) = crate::update::swap::installed_exe() {
+                        crate::update::swap::clean_old(&installed);
+                    }
+                }
                 Err(e) => {
                     eprintln!("kv: cannot show the tray icon: {e}");
                     *flow = ControlFlow::ExitWithCode(1);

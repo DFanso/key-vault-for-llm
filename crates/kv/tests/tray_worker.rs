@@ -2347,7 +2347,8 @@ async fn checking_by_hand_answers_in_settings() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_daemon_that_does_not_stop_keeps_the_old_tray() {
     const STUCK: &str = "kv 1.9.0 is installed, but the kv daemon didn't stop. Run `kv stop`, \
-                         then quit kv tray and start it again.";
+                         then quit kv tray and start it again. To go back, move kv.previous \
+                         over kv in /opt/kv/bin.";
     let dir = TempDir::new().unwrap();
     let paths = Paths::under(dir.path());
     paths.ensure_runtime_dir().unwrap();

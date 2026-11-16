@@ -689,8 +689,9 @@ impl<D: Desktop> Worker<D> {
         if let Outcome::Failed(_) = self.driver.stop().await {
             let message = format!(
                 "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then quit kv \
-                 tray and start it again.",
-                installed.version
+                 tray and start it again. {}",
+                installed.version,
+                crate::update::swap::way_back(&installed.swapped.installed)
             );
             self.update_failed(message);
             return Next::Done;

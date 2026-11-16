@@ -354,11 +354,6 @@ pub fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::parse();
-    // An update leaves the old binary beside the new one; the next run of
-    // any command removes it, so a Windows update needs no helper.
-    if let Ok(installed) = crate::update::swap::installed_exe() {
-        crate::update::swap::clean_old(&installed);
-    }
     if let Command::TrayNotices = cli.command {
         // Its event loop needs the main thread, as the tray's does.
         return match crate::tray::run_notices() {
@@ -401,7 +396,15 @@ pub fn main() -> ExitCode {
         std::process::exit(code);
     }
     match runtime.block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // A Windows update leaves the old binary beside the new one.
+            // This kv has now run a command, so it works: the old one can
+            // go, and a Windows update needs no helper to remove it.
+            if let Ok(installed) = crate::update::swap::installed_exe() {
+                crate::update::swap::clean_old(&installed);
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("kv: {e}");
             ExitCode::FAILURE

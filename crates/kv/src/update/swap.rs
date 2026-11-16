@@ -141,6 +141,18 @@ fn free_backup(installed: &Path) -> PathBuf {
         .unwrap_or(backup)
 }
 
+/// How to go back to the old kv by hand, for the messages that say an
+/// update went in but something after it failed: one sentence naming the
+/// folder `installed` is in.
+pub fn way_back(installed: &Path) -> String {
+    let dir = installed.parent().unwrap_or(installed).display();
+    if cfg!(windows) {
+        format!("To go back, rename kv.exe.old to kv.exe in {dir}.")
+    } else {
+        format!("To go back, move kv.previous over kv in {dir}.")
+    }
+}
+
 /// Whether `name` is an old binary a Windows update left behind:
 /// `kv.exe.old`, or `kv.exe.<n>.old` when that was still running.
 pub fn is_old_binary(name: &str) -> bool {
