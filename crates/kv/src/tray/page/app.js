@@ -617,25 +617,26 @@
   }
 
   // The confirmation for an update: what it stops, its release notes, and
-  // Update or Not now.
+  // Update or Not now. While an update runs it stays busy until the
+  // update's result comes.
   function openUpdate(ask) {
     page.updateAsk = ask;
-    page.updating = false;
     $("update-title").textContent = `Update to kv ${ask.version}?`;
     $("update-notes-url").textContent = ask.notes_url;
     $("update-error").textContent = "";
-    show($("update-progress"), false);
-    $("update-ok").disabled = false;
-    $("update-cancel").disabled = false;
+    show($("update-progress"), page.updating);
+    $("update-ok").disabled = page.updating;
+    $("update-cancel").disabled = page.updating;
     $("update-cancel").textContent = "Not now";
     const dialog = $("update-dialog");
     if (!dialog.open) dialog.showModal();
     $("update-ok").focus();
   }
 
+  // Not while an update runs: it would leave nothing to show its result.
   function closeUpdate() {
+    if (page.updating) return;
     page.updateAsk = null;
-    page.updating = false;
     const dialog = $("update-dialog");
     if (dialog.open) dialog.close();
   }
@@ -650,7 +651,8 @@
     show(progress, true);
     $("update-ok").disabled = true;
     $("update-cancel").disabled = true;
-    send({ type: "install_update" });
+    // The version the user agreed to: the tray installs only that one.
+    send({ type: "install_update", version: page.updateAsk.version });
   }
 
   function checkUpdates() {
@@ -660,11 +662,15 @@
     send({ type: "check_updates" });
   }
 
-  // How a check or an update went: in the confirmation, if the update was
-  // asked from there; else in Settings.
+  // How a check or an update went: an update's in the confirmation, a
+  // check's in Settings, whichever else is under way.
   function updateResult(result) {
-    if (page.updating && $("update-dialog").open) {
+    if (result.kind === "install") {
       page.updating = false;
+      if (!$("update-dialog").open) {
+        say(result.message);
+        return;
+      }
       show($("update-progress"), false);
       $("update-error").textContent = result.message;
       // An update that went in but whose tray did not start again leaves

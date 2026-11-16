@@ -122,7 +122,8 @@ fn the_update_dialog_warns_before_updating() {
     for message in [
         r#"type: "offer_update""#,
         r#"type: "check_updates""#,
-        r#"type: "install_update""#,
+        r#"type: "install_update", version: page.updateAsk.version"#,
+        r#"result.kind === "install""#,
         r#"type: "open_notes""#,
         "Update to kv ",
     ] {

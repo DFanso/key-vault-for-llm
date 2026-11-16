@@ -23,7 +23,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::model::{Action, Model, View};
 use super::notices::{self, Notice};
 use super::update::Updater;
-use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
+use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use crate::client;
 use crate::device::Device;
 use crate::forms::{self, Form, Purpose};
@@ -144,6 +144,11 @@ pub struct Worker<D> {
     /// Whether the tray checks in the background: only a release build,
     /// which can update itself, and only with `KV_UPDATE_CHECK` not off.
     auto_checks: bool,
+    /// Settings asked for a check that has not started yet.
+    check_wanted: bool,
+    /// Settings asked for the check under way or about to start, so its
+    /// answer goes there.
+    check_manual: bool,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -171,6 +176,8 @@ impl<D: Desktop> Worker<D> {
             next_check: Instant::now() + state::TRAY_FIRST,
             auto_checks: update::is_release_build()
                 && update::checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()),
+            check_wanted: false,
+            check_manual: false,
         }
     }
 
@@ -220,10 +227,15 @@ impl<D: Desktop> Worker<D> {
         })
     }
 
-    /// Carries out one action, a device prompt included. Returns true for
-    /// Quit.
+    /// Carries out one action, a device prompt and a check for updates
+    /// included. Returns true for Quit.
     pub async fn act(&mut self, action: Action) -> bool {
-        match self.begin(action).await {
+        let next = self.begin(action).await;
+        if std::mem::take(&mut self.check_wanted) {
+            let found = self.updater.check().await.map_err(|e| e.to_string());
+            self.begin(Action::UpdateChecked(found)).await;
+        }
+        match next {
             Next::Done => false,
             Next::Prompt(purpose) => {
                 let answer = self.ask(&purpose).await;
@@ -238,8 +250,9 @@ impl<D: Desktop> Worker<D> {
     }
 
     /// Shows a model every tick and after every action until Quit, or until
-    /// the UI drops its sender. A device prompt runs beside the loop, so the
-    /// icon and the window stay current while the user decides.
+    /// the UI drops its sender. A device prompt and a check for updates run
+    /// beside the loop, so the icon and the window stay current, and
+    /// requests are answered, while they do.
     pub async fn run(
         mut self,
         mut actions: UnboundedReceiver<Action>,
@@ -247,7 +260,8 @@ impl<D: Desktop> Worker<D> {
     ) {
         let mut tick = tokio::time::interval(TICK);
         let mut prompt = None;
-        // A background check for an update, while one runs.
+        // A check for an update, while one runs: in the background, or one
+        // Settings asked for.
         let mut checking: Option<Check> = None;
         loop {
             tokio::select! {
@@ -291,6 +305,10 @@ impl<D: Desktop> Worker<D> {
                         checking = self.due_check();
                     }
                 }
+            }
+            // Settings asked for a check: one already under way answers it.
+            if std::mem::take(&mut self.check_wanted) && checking.is_none() {
+                checking = Some(self.updater.check());
             }
             show(self.model().await);
         }
@@ -369,7 +387,10 @@ impl<D: Desktop> Worker<D> {
             }
             Action::Quit => return Next::Quit,
             Action::OfferUpdate => self.offer_update(),
-            Action::UpdateChecked(found) => self.checked(found, false),
+            Action::UpdateChecked(found) => {
+                let manual = std::mem::take(&mut self.check_manual);
+                self.checked(found, manual);
+            }
         }
         Next::Done
     }
@@ -563,11 +584,13 @@ impl<D: Desktop> Worker<D> {
             }
             FromPage::Quit => return Next::Quit,
             FromPage::OfferUpdate => self.offer_update(),
+            // Started by `run` beside its loop (or by `act`), not here: a
+            // slow answer must not hold up anything else.
             FromPage::CheckUpdates => {
-                let found = self.updater.check().await.map_err(|e| e.to_string());
-                self.checked(found, true);
+                self.check_wanted = true;
+                self.check_manual = true;
             }
-            FromPage::InstallUpdate => return self.install_update().await,
+            FromPage::InstallUpdate { version } => return self.install_update(&version).await,
             // Only an https page on GitHub: the address came from GitHub's
             // answer, and the system opens whatever scheme it is given.
             FromPage::OpenNotes => {
@@ -626,7 +649,11 @@ impl<D: Desktop> Worker<D> {
                 ),
                 Err(e) => (false, format!("{}.", sentence(e))),
             };
-            self.desktop.page(ToPage::UpdateResult { ok, message });
+            self.desktop.page(ToPage::UpdateResult {
+                kind: UpdateKind::Check,
+                ok,
+                message,
+            });
         }
     }
 
@@ -656,29 +683,38 @@ impl<D: Desktop> Worker<D> {
         self.desktop.page(ask);
     }
 
-    /// Installs the update on offer, which the user agreed to. Once it is
+    /// Installs the update on offer, which the user agreed to: only if it
+    /// is still `confirmed`, the version the confirmation showed. Once it is
     /// in place the daemon stops (which locks the vault) and a tray on the
     /// new binary takes over, and this one quits. If the install fails
     /// nothing has changed and this tray keeps running; if the new tray
     /// does not come up, this one keeps running on and says what to do.
-    async fn install_update(&mut self) -> Next {
+    async fn install_update(&mut self, confirmed: &str) -> Next {
         if let Some(window) = &mut self.window {
             window.asking_update = false;
         }
         let Some(offer) = self.offer.clone() else {
-            self.desktop.page(ToPage::UpdateResult {
-                ok: false,
-                message: "There is no update on offer now.".into(),
-            });
+            self.install_result(false, "There is no update on offer now.".into());
             return Next::Done;
         };
+        if offer.version.to_string() != confirmed {
+            // A check found another version while the confirmation was
+            // open: ask again, about this one.
+            self.offer_update();
+            self.install_result(
+                false,
+                format!(
+                    "The update on offer is kv {} now, not {confirmed}. Choose Update to \
+                     install it.",
+                    offer.version
+                ),
+            );
+            return Next::Done;
+        }
         let installed = match self.updater.install(offer).await {
             Ok(installed) => installed,
             Err(e) => {
-                self.desktop.page(ToPage::UpdateResult {
-                    ok: false,
-                    message: format!("{}.", sentence(&e.to_string())),
-                });
+                self.install_result(false, format!("{}.", sentence(&e.to_string())));
                 return Next::Done;
             }
         };
@@ -710,11 +746,17 @@ impl<D: Desktop> Worker<D> {
     fn update_failed(&self, message: String) {
         // With nothing left to offer, and locked if the daemon stopped.
         self.send_state();
-        self.desktop.page(ToPage::UpdateResult {
-            ok: false,
-            message: message.clone(),
-        });
+        self.install_result(false, message.clone());
         self.desktop.notify(&message);
+    }
+
+    /// Tells the confirmation how the update it asked for went.
+    fn install_result(&self, ok: bool, message: String) {
+        self.desktop.page(ToPage::UpdateResult {
+            kind: UpdateKind::Install,
+            ok,
+            message,
+        });
     }
 
     /// Saves the open form with what the page sent. The form stays open,

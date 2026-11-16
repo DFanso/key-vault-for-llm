@@ -292,7 +292,10 @@ pub enum FromPage {
     /// Check for an update now (Settings). The page hears `UpdateResult`.
     CheckUpdates,
     /// Install the update on offer: the user agreed in the confirmation.
-    InstallUpdate,
+    /// Only if it is still `version`, the one the confirmation showed.
+    InstallUpdate {
+        version: String,
+    },
     /// Open the release notes of the update on offer in the browser. The
     /// tray opens the address it has itself, never one from the page.
     OpenNotes,
@@ -449,8 +452,10 @@ pub enum ToPage {
         version: String,
         notes_url: String,
     },
-    /// How a check for updates, or an update, went.
+    /// How a check for updates, or an update, went: `kind` says which, so
+    /// the page shows it in Settings or in the confirmation.
     UpdateResult {
+        kind: UpdateKind,
         ok: bool,
         message: String,
     },
@@ -460,6 +465,16 @@ pub enum ToPage {
         text: String,
         request: Option<u64>,
     },
+}
+
+/// What an `UpdateResult` is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateKind {
+    /// A check Settings asked for.
+    Check,
+    /// An update the confirmation asked for.
+    Install,
 }
 
 impl ToPage {

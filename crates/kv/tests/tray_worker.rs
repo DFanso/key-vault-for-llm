@@ -18,7 +18,7 @@ use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
 use kv::tray::notices::Notice;
 use kv::tray::update::Updater;
-use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
+use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use kv::tray::worker::{Desktop, Worker};
 use kv::tui::app::ShareDone;
 use kv::update::install::Installed;
@@ -127,12 +127,20 @@ struct Updates {
     restart_fails: Arc<Mutex<Option<String>>>,
     installed: Arc<Mutex<Vec<Version>>>,
     restarted: Arc<Mutex<Vec<Version>>>,
+    /// When set, the next check answers only once this is sent to.
+    check_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 impl Updater for Updates {
     fn check(&self) -> BoxFuture<'static, Result<Option<Offer>, UpdateError>> {
         let next = self.checks.lock().unwrap().pop_front();
-        Box::pin(async move { next.unwrap_or(Ok(None)) })
+        let gate = self.check_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            next.unwrap_or(Ok(None))
+        })
     }
 
     fn install(&self, offer: Offer) -> BoxFuture<'static, Result<Installed, UpdateError>> {
@@ -181,14 +189,35 @@ fn installed(version: &str) -> Installed {
     }
 }
 
-fn update_results(pages: &[ToPage]) -> Vec<(bool, String)> {
+/// What `pages` say about updates of `kind`.
+fn results(pages: &[ToPage], of: UpdateKind) -> Vec<(bool, String)> {
     pages
         .iter()
         .filter_map(|page| match page {
-            ToPage::UpdateResult { ok, message } => Some((*ok, message.clone())),
+            ToPage::UpdateResult { kind, ok, message } if *kind == of => {
+                Some((*ok, message.clone()))
+            }
             _ => None,
         })
         .collect()
+}
+
+/// What `pages` tell the confirmation about the update it asked for.
+fn install_results(pages: &[ToPage]) -> Vec<(bool, String)> {
+    let all = results(pages, UpdateKind::Install);
+    assert_eq!(results(pages, UpdateKind::Check), [], "no check results");
+    all
+}
+
+/// What `pages` tell Settings about the check it asked for.
+fn check_results(pages: &[ToPage]) -> Vec<(bool, String)> {
+    let all = results(pages, UpdateKind::Check);
+    assert_eq!(
+        results(pages, UpdateKind::Install),
+        [],
+        "no install results"
+    );
+    all
 }
 
 /// The last `State` in `pages`: whether locked, whether waiting for the
@@ -221,6 +250,13 @@ fn messages(pages: &[ToPage]) -> Vec<(String, Option<u64>)> {
 
 fn page(message: FromPage) -> Action {
     Action::Window(message)
+}
+
+/// The confirmation's Update, for `version`.
+fn install(version: &str) -> FromPage {
+    FromPage::InstallUpdate {
+        version: version.into(),
+    }
 }
 
 fn values(pairs: &[(&str, &str)]) -> BTreeMap<String, SecretText> {
@@ -2192,9 +2228,9 @@ async fn install_failure_keeps_tray() {
     assert_eq!(*desk.windows.lock().unwrap(), [Tab::Home]);
     assert!(desk.take().contains(&update_ask("1.9.0")));
 
-    assert!(!worker.act(page(FromPage::InstallUpdate)).await);
+    assert!(!worker.act(page(install("1.9.0"))).await);
     assert_eq!(
-        update_results(&desk.take()),
+        install_results(&desk.take()),
         [(
             false,
             "The download does not match its checksum.".to_owned()
@@ -2224,11 +2260,11 @@ async fn install_success_stops_daemon_and_restarts() {
     );
     assert!(!worker.act(Action::OfferUpdate).await);
     assert!(
-        worker.act(page(FromPage::InstallUpdate)).await,
+        worker.act(page(install("1.9.0"))).await,
         "the old tray quits once the new one runs"
     );
     assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
-    assert_eq!(update_results(&desk.take()), Vec::new());
+    assert_eq!(install_results(&desk.take()), Vec::new());
     // The daemon was stopped, so the next command starts the new one.
     // Only "no daemon" counts: a probe that fails is tried again.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -2264,11 +2300,11 @@ async fn restart_failure_reports() {
     );
     assert!(!worker.act(Action::OfferUpdate).await);
     assert!(
-        !worker.act(page(FromPage::InstallUpdate)).await,
+        !worker.act(page(install("1.9.0"))).await,
         "the old tray keeps running"
     );
     assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
-    assert_eq!(update_results(&desk.take()), [(false, FAILED.to_owned())]);
+    assert_eq!(install_results(&desk.take()), [(false, FAILED.to_owned())]);
     assert_eq!(desk.notes().last().map(String::as_str), Some(FAILED));
     // The new kv is in place: there is nothing left to offer.
     assert_eq!(update_line(&worker.model().await), None);
@@ -2307,7 +2343,7 @@ async fn checking_by_hand_answers_in_settings() {
 
     assert!(!worker.act(page(FromPage::CheckUpdates)).await);
     assert_eq!(
-        update_results(&desk.take()),
+        check_results(&desk.take()),
         [(
             true,
             format!("kv {} is the latest.", env!("CARGO_PKG_VERSION"))
@@ -2315,7 +2351,7 @@ async fn checking_by_hand_answers_in_settings() {
     );
     assert!(!worker.act(page(FromPage::CheckUpdates)).await);
     assert_eq!(
-        update_results(&desk.take()),
+        check_results(&desk.take()),
         [(
             false,
             "GitHub is limiting requests; try again later.".to_owned()
@@ -2324,7 +2360,7 @@ async fn checking_by_hand_answers_in_settings() {
     assert!(!worker.act(page(FromPage::CheckUpdates)).await);
     let pages = desk.take();
     assert_eq!(
-        update_results(&pages),
+        check_results(&pages),
         [(true, "kv 1.9.0 is out.".to_owned())]
     );
     assert_eq!(
@@ -2381,10 +2417,115 @@ async fn a_daemon_that_does_not_stop_keeps_the_old_tray() {
     );
     assert!(!worker.act(Action::OfferUpdate).await);
     assert!(
-        !worker.act(page(FromPage::InstallUpdate)).await,
+        !worker.act(page(install("1.9.0"))).await,
         "the old tray keeps running"
     );
     assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
-    assert_eq!(update_results(&desk.take()), [(false, STUCK.to_owned())]);
+    assert_eq!(install_results(&desk.take()), [(false, STUCK.to_owned())]);
     assert_eq!(desk.notes().last().map(String::as_str), Some(STUCK));
+}
+
+/// A newer version found while the confirmation was open is not installed
+/// on the strength of the older one: the confirmation asks again.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_version_the_user_agreed_to_is_installed() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Err(UpdateError::ChecksumMismatch));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(desk.take().contains(&update_ask("1.9.0")));
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.1")))))
+            .await
+    );
+    desk.take();
+
+    assert!(!worker.act(page(install("1.9.0"))).await);
+    let pages = desk.take();
+    assert_eq!(*updates.installed.lock().unwrap(), Vec::<Version>::new());
+    let asked = pages.iter().position(|p| *p == update_ask("1.9.1"));
+    let said = pages
+        .iter()
+        .position(|p| matches!(p, ToPage::UpdateResult { .. }));
+    assert!(asked < said, "asks again, then says why: {pages:?}");
+    assert_eq!(
+        install_results(&pages),
+        [(
+            false,
+            "The update on offer is kv 1.9.1 now, not 1.9.0. Choose Update to install it."
+                .to_owned()
+        )]
+    );
+
+    // Agreed to again, for the version on offer.
+    assert!(!worker.act(page(install("1.9.1"))).await);
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 1)]);
+}
+
+/// A check Settings asks for runs beside the loop: the tray keeps
+/// answering (here, a lock) while GitHub is slow, and the answer still
+/// reaches Settings.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_check_by_hand_does_not_hold_up_the_loop() {
+    let updates = Updates::default();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *updates.check_gate.lock().unwrap() = Some(gate);
+    updates
+        .checks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(offer("1.9.0"))));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates).await;
+    assert!(!worker.act(Action::Open(Tab::Home)).await);
+    desk.take();
+    let shown: Arc<Mutex<Vec<Model>>> = Arc::default();
+    let (actions, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let record = shown.clone();
+    let running = tokio::spawn(worker.run(inbox, move |model| {
+        record.lock().unwrap().push(model);
+    }));
+
+    actions.send(page(FromPage::CheckUpdates)).unwrap();
+    actions.send(Action::Lock).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !shown
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.icon == IconState::Locked)
+    {
+        assert!(Instant::now() < deadline, "the check held up the lock");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(check_results(&desk.pages.lock().unwrap()), []);
+
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let said = check_results(&desk.pages.lock().unwrap());
+        if !said.is_empty() {
+            assert_eq!(said, [(true, "kv 1.9.0 is out.".to_owned())]);
+            break;
+        }
+        assert!(Instant::now() < deadline, "the check never answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Seen in Settings: not said again as a notification.
+    assert_eq!(desk.notes(), Vec::<String>::new());
+
+    actions.send(Action::Quit).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the loop stops on Quit")
+        .unwrap();
 }
