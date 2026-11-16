@@ -37,6 +37,8 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+# The work folder an update downloads into, removed whatever happens.
+tempfile = "3.27"
 tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["aws-lc-rs"] }
@@ -118,7 +120,6 @@ windows-sys = { version = "0.61", features = [
 rcgen = "0.14"
 redis = { version = "1.7", default-features = false, features = ["tokio-comp"] }
 rmcp = { version = "3.9", default-features = false, features = ["client", "transport-child-process"] }
-tempfile = "3.27"
 tokio-rustls = "0.26"
 wiremock = "0.6"
 

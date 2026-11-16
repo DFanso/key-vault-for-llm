@@ -13,7 +13,9 @@ use crate::notify::Level;
 
 pub mod archive;
 pub mod check;
+pub mod install;
 pub mod state;
+pub mod swap;
 
 /// Where the latest release is described. Nothing can change it: not an
 /// environment variable, a flag or a setting.
