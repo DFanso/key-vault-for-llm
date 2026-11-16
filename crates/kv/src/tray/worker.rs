@@ -19,6 +19,7 @@ use kv_core::proto::{
 };
 use kv_core::secret::{Secret, SecretText, SecretValue};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 use super::model::{Action, Model, View};
 use super::notices::{self, Notice};
@@ -32,6 +33,7 @@ use crate::paths::Paths;
 use crate::sharefile;
 use crate::tui::app::{Effect, Outcome, ShareDone};
 use crate::tui::{DeviceAnswer, DevicePrompt, Driver, Proof};
+use crate::update::install::Installed;
 use crate::update::{self, Offer, UpdateError, check, state};
 use kv_core::envvars;
 use kv_core::import::{self, Format, Imported};
@@ -49,6 +51,8 @@ const REASON: &str = "open kv tray, where you approve agent requests";
 
 /// A check for an update, under way.
 type Check = BoxFuture<'static, Result<Option<Offer>, UpdateError>>;
+/// An update downloading and swapping in, under way.
+type Install = BoxFuture<'static, Result<Installed, UpdateError>>;
 
 /// What the worker needs from the desktop around it.
 pub trait Desktop: Send {
@@ -135,8 +139,9 @@ pub struct Worker<D> {
     saved: Option<PathBuf>,
     /// The notification on show for each waiting request, by request id.
     posted: BTreeMap<u64, String>,
-    /// Checks for, and installs, a newer kv.
-    updater: Box<dyn Updater>,
+    /// Checks for, and installs, a newer kv. Shared with the thread the
+    /// handover to a new tray runs on.
+    updater: Arc<dyn Updater>,
     /// The newer kv the last check found.
     offer: Option<Offer>,
     /// When the next background check is due.
@@ -149,6 +154,11 @@ pub struct Worker<D> {
     /// Settings asked for the check under way or about to start, so its
     /// answer goes there.
     check_manual: bool,
+    /// The update the user agreed to, not started yet.
+    install_wanted: Option<Offer>,
+    /// An update is under way, from download to handover: a second one is
+    /// not started, and checks wait.
+    installing: bool,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -171,13 +181,15 @@ impl<D: Desktop> Worker<D> {
             overview: None,
             prompting: None,
             posted: BTreeMap::new(),
-            updater,
+            updater: Arc::from(updater),
             offer: None,
             next_check: Instant::now() + state::TRAY_FIRST,
             auto_checks: update::is_release_build()
                 && update::checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()),
             check_wanted: false,
             check_manual: false,
+            install_wanted: None,
+            installing: false,
         }
     }
 
@@ -230,10 +242,19 @@ impl<D: Desktop> Worker<D> {
     /// Carries out one action, a device prompt and a check for updates
     /// included. Returns true for Quit.
     pub async fn act(&mut self, action: Action) -> bool {
-        let next = self.begin(action).await;
+        let mut next = self.begin(action).await;
         if std::mem::take(&mut self.check_wanted) {
             let found = self.updater.check().await.map_err(|e| e.to_string());
             self.begin(Action::UpdateChecked(found)).await;
+        }
+        if let Some(offer) = self.install_wanted.take() {
+            let result = self.updater.install(offer).await;
+            if let Some(installed) = self.installed(result).await {
+                let handed = self.updater.restart(&installed);
+                if self.handed_over(handed) {
+                    next = Next::Quit;
+                }
+            }
         }
         match next {
             Next::Done => false,
@@ -263,6 +284,11 @@ impl<D: Desktop> Worker<D> {
         // A check for an update, while one runs: in the background, or one
         // Settings asked for.
         let mut checking: Option<Check> = None;
+        // An update the user agreed to, while it downloads and swaps in;
+        // then the handover to a tray on the new kv, which waits and starts
+        // processes, so it runs on a thread of its own.
+        let mut installing: Option<Install> = None;
+        let mut handing_over: Option<JoinHandle<Result<(), String>>> = None;
         loop {
             tokio::select! {
                 answer = async { prompt.as_mut().expect("guarded").await }, if prompt.is_some() => {
@@ -274,6 +300,25 @@ impl<D: Desktop> Worker<D> {
                     checking = None;
                     let found = found.map_err(|e| e.to_string());
                     self.begin(Action::UpdateChecked(found)).await;
+                }
+                result = async { installing.as_mut().expect("guarded").await }, if installing.is_some() => {
+                    installing = None;
+                    if let Some(installed) = self.installed(result).await {
+                        let updater = self.updater.clone();
+                        handing_over = Some(tokio::task::spawn_blocking(move || {
+                            updater.restart(&installed)
+                        }));
+                    }
+                }
+                handed = async { handing_over.as_mut().expect("guarded").await }, if handing_over.is_some() => {
+                    handing_over = None;
+                    let handed = handed.unwrap_or_else(|e| {
+                        Err(format!("The handover to the new kv tray stopped: {e}"))
+                    });
+                    if self.handed_over(handed) {
+                        self.withdraw_all();
+                        return;
+                    }
                 }
                 action = actions.recv() => {
                     let Some(action) = action else {
@@ -301,7 +346,7 @@ impl<D: Desktop> Worker<D> {
                     }
                 }
                 _ = tick.tick() => {
-                    if checking.is_none() {
+                    if checking.is_none() && !self.installing {
                         checking = self.due_check();
                     }
                 }
@@ -309,6 +354,9 @@ impl<D: Desktop> Worker<D> {
             // Settings asked for a check: one already under way answers it.
             if std::mem::take(&mut self.check_wanted) && checking.is_none() {
                 checking = Some(self.updater.check());
+            }
+            if let Some(offer) = self.install_wanted.take() {
+                installing = Some(self.updater.install(offer));
             }
             show(self.model().await);
         }
@@ -586,11 +634,18 @@ impl<D: Desktop> Worker<D> {
             FromPage::OfferUpdate => self.offer_update(),
             // Started by `run` beside its loop (or by `act`), not here: a
             // slow answer must not hold up anything else.
+            FromPage::CheckUpdates if self.installing => {
+                self.desktop.page(ToPage::UpdateResult {
+                    kind: UpdateKind::Check,
+                    ok: false,
+                    message: "An update is being installed now.".into(),
+                });
+            }
             FromPage::CheckUpdates => {
                 self.check_wanted = true;
                 self.check_manual = true;
             }
-            FromPage::InstallUpdate { version } => return self.install_update(&version).await,
+            FromPage::InstallUpdate { version } => self.install_update(&version),
             // Only an https page on GitHub: the address came from GitHub's
             // answer, and the system opens whatever scheme it is given.
             FromPage::OpenNotes => {
@@ -625,9 +680,14 @@ impl<D: Desktop> Worker<D> {
         remembered.last_check = Some(unix_now());
         if let Ok(offer) = &found {
             remembered.latest = offer.as_ref().map(|o| o.version.to_string());
-            self.offer = offer.clone();
+            // One being installed decides what is left to offer.
+            if !self.installing {
+                self.offer = offer.clone();
+            }
         }
-        if let Ok(Some(offer)) = &found {
+        if let Ok(Some(offer)) = &found
+            && !self.installing
+        {
             let version = offer.version.to_string();
             if remembered.announced.as_deref() != Some(&version) {
                 if !manual {
@@ -683,19 +743,21 @@ impl<D: Desktop> Worker<D> {
         self.desktop.page(ask);
     }
 
-    /// Installs the update on offer, which the user agreed to: only if it
-    /// is still `confirmed`, the version the confirmation showed. Once it is
-    /// in place the daemon stops (which locks the vault) and a tray on the
-    /// new binary takes over, and this one quits. If the install fails
-    /// nothing has changed and this tray keeps running; if the new tray
-    /// does not come up, this one keeps running on and says what to do.
-    async fn install_update(&mut self, confirmed: &str) -> Next {
+    /// Starts installing the update on offer, which the user agreed to:
+    /// only if it is still `confirmed`, the version the confirmation showed.
+    /// The download and swap run beside the loop (see `run`), and
+    /// [`installed`](Self::installed) takes over when they end. A second
+    /// request while one runs is dropped: the page hears how the first went.
+    fn install_update(&mut self, confirmed: &str) {
+        if self.installing {
+            return;
+        }
         if let Some(window) = &mut self.window {
             window.asking_update = false;
         }
         let Some(offer) = self.offer.clone() else {
             self.install_result(false, "There is no update on offer now.".into());
-            return Next::Done;
+            return;
         };
         if offer.version.to_string() != confirmed {
             // A check found another version while the confirmation was
@@ -709,13 +771,25 @@ impl<D: Desktop> Worker<D> {
                     offer.version
                 ),
             );
-            return Next::Done;
+            return;
         }
-        let installed = match self.updater.install(offer).await {
+        self.installing = true;
+        self.install_wanted = Some(offer);
+    }
+
+    /// Takes in how the download and swap went. Once the new kv is in
+    /// place the daemon stops (which locks the vault), and the answer is
+    /// what to hand over to: a tray on the new binary, which then takes
+    /// over while this one quits (see [`handed_over`](Self::handed_over)).
+    /// If the install failed nothing has changed; if the daemon did not
+    /// stop, this tray keeps running and says what to do.
+    async fn installed(&mut self, result: Result<Installed, UpdateError>) -> Option<Installed> {
+        let installed = match result {
             Ok(installed) => installed,
             // An earlier update from this tray went in, but its handover
             // did not: nothing is left to install.
             Err(UpdateError::AlreadyInstalled(version)) => {
+                self.installing = false;
                 self.offer = None;
                 self.send_state();
                 self.install_result(
@@ -725,11 +799,12 @@ impl<D: Desktop> Worker<D> {
                          finish the update."
                     ),
                 );
-                return Next::Done;
+                return None;
             }
             Err(e) => {
+                self.installing = false;
                 self.install_result(false, format!("{}.", sentence(&e.to_string())));
-                return Next::Done;
+                return None;
             }
         };
         // The new kv is in place: nothing is left to offer.
@@ -743,14 +818,23 @@ impl<D: Desktop> Worker<D> {
                 installed.version,
                 crate::update::swap::way_back(&installed.swapped)
             );
+            self.installing = false;
             self.update_failed(message);
-            return Next::Done;
+            return None;
         }
-        match self.updater.restart(&installed) {
-            Ok(()) => Next::Quit,
+        Some(installed)
+    }
+
+    /// Takes in how the handover went: true if a tray on the new kv took
+    /// over and this one should quit; otherwise it keeps running and says
+    /// what to do.
+    fn handed_over(&mut self, handed: Result<(), String>) -> bool {
+        self.installing = false;
+        match handed {
+            Ok(()) => true,
             Err(message) => {
                 self.update_failed(message);
-                Next::Done
+                false
             }
         }
     }

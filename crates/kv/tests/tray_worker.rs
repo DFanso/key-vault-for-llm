@@ -129,6 +129,8 @@ struct Updates {
     restarted: Arc<Mutex<Vec<Version>>>,
     /// When set, the next check answers only once this is sent to.
     check_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    /// When set, the next install ends only once this is sent to.
+    install_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 impl Updater for Updates {
@@ -146,7 +148,13 @@ impl Updater for Updates {
     fn install(&self, offer: Offer) -> BoxFuture<'static, Result<Installed, UpdateError>> {
         self.installed.lock().unwrap().push(offer.version.clone());
         let next = self.installs.lock().unwrap().pop_front();
-        Box::pin(async move { next.expect("an install was scripted") })
+        let gate = self.install_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            next.expect("an install was scripted")
+        })
     }
 
     fn restart(&self, installed: &Installed) -> Result<(), String> {
@@ -2560,4 +2568,59 @@ async fn a_slow_check_by_hand_does_not_hold_up_the_loop() {
         .await
         .expect("the loop stops on Quit")
         .unwrap();
+}
+
+/// An update downloads beside the loop: the tray keeps answering (here, a
+/// lock) meanwhile, a second Update is not started, and once the update is
+/// in, the tray hands over and the loop ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_downloads_beside_the_loop() {
+    let updates = Updates::default();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *updates.install_gate.lock().unwrap() = Some(gate);
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    desk.take();
+    let shown: Arc<Mutex<Vec<Model>>> = Arc::default();
+    let (actions, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let record = shown.clone();
+    let running = tokio::spawn(worker.run(inbox, move |model| {
+        record.lock().unwrap().push(model);
+    }));
+
+    actions.send(page(install("1.9.0"))).unwrap();
+    actions.send(page(install("1.9.0"))).unwrap();
+    actions.send(Action::Lock).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !shown
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.icon == IconState::Locked)
+    {
+        assert!(Instant::now() < deadline, "the download held up the lock");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.pages.lock().unwrap()), []);
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the old tray quits once the new one runs")
+        .unwrap();
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.take()), []);
 }
