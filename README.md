@@ -590,6 +590,61 @@ program can give it a lasting key to the vault. On Windows, cancel every
 Hello prompt you did not start, and keep using the passphrase where agents
 run unattended.
 
+## Updating kv
+
+```sh
+kv update --check             # say whether a newer kv is out, install nothing
+kv update                     # show the release notes, ask, then install
+kv update --yes               # install without asking
+```
+
+`kv update` asks `Update to kv X.Y.Z? [y/N]` before it does anything. When
+stdin is not a terminal there is nothing to ask on, so it refuses unless you
+pass `--yes`. Updating locks the vault and stops anything agents have running
+now: waiting approvals, programs, MCP servers and database connections. When
+it finishes it says `Updated to kv X.Y.Z. Unlock to continue.`
+
+kv looks for a new release on its own, only in a build installed from a
+release:
+
+- The tray checks 3 minutes after it starts and then every 12 hours. It tells
+  you with a notification and an `Update to kv X.Y.Z…` item in its menu.
+- `kv status` and `kv tui` check at most once a day, and only when the tray is
+  not running. They print `kv X.Y.Z is out: run `kv update`.`
+
+Set `KV_UPDATE_CHECK=off` in your shell profile to turn these off. `kv update`
+and `kv update --check` still check when you run them.
+
+On macOS and Windows, `kv update` will not run while the tray is running. It
+points you to the tray's menu instead, so the tray restarts on the new
+version. On Linux you can run `kv update` with the tray open.
+
+kv trusts the latest release on GitHub (`DFanso/key-vault-for-llm`) and
+nothing else: no setting changes where it looks. It downloads the archive for
+your platform, checks its sha256 against the `.sha256` file published beside
+it, and only installs a version newer than the one you have. It never installs
+without asking, and a pre-release is never offered.
+
+After an update the vault is locked, so run `kv unlock`. On macOS, the new
+kv binary can no longer read the Touch ID key until you allow it once; see
+[Touch ID and Windows Hello](#touch-id-and-windows-hello) and choose Always
+Allow.
+
+The old kv is kept so you can go back by hand. On macOS and Linux it is
+`kv.previous`, next to `kv`. On Windows it is `kv.exe.old`, and kv removes
+it the next time a kv command runs, so it is only there until you start the new
+kv once. To go back, stop kv and move the old file over `kv` (if `kv` is a
+link, use the folder of the file it points to):
+
+```sh
+kv stop
+mv /path/to/kv.previous /path/to/kv
+```
+
+A kv built from source (`cargo install`, `cargo build`) does not update
+itself: `kv update` tells you to install from a release instead. Update it by
+building again.
+
 ## What kv protects against
 
 kv keeps secrets out of the model's context and transcripts, and limits what
