@@ -81,8 +81,9 @@ wry = { version = "0.57", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
-# Release archives on unix are `.tar.xz`; both readers are pure Rust.
-lzma-rs = "0.3"
+# Release archives on unix are `.tar.xz`; both readers are pure Rust and
+# stream, so memory stays small however the archive is crafted.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
 tar = { version = "0.4", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
@@ -120,7 +121,7 @@ tokio-rustls = "0.26"
 wiremock = "0.6"
 
 [target.'cfg(unix)'.dev-dependencies]
-lzma-rs = "0.3"
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
 tar = { version = "0.4", default-features = false }
 
 [target.'cfg(windows)'.dev-dependencies]

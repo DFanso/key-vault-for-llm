@@ -1,6 +1,8 @@
 //! Checking a release archive's checksum and unpacking the binary from it.
 
 use kv::update::UpdateError;
+#[cfg(any(unix, windows))]
+use kv::update::archive::extract_binary_with_limit;
 use kv::update::archive::{extract_binary, parse_sha256, verify_sha256};
 
 const HEX: &str = "152f4f8bc9bda7f572ca1a3cdb590ac676f74c9f816efc2c746073fd6ff3a756";
@@ -45,13 +47,15 @@ fn checksum_mismatch() {
 #[cfg(unix)]
 mod tar_xz {
     use super::*;
-    use std::io::Cursor;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
     enum Item<'a> {
         File(&'a str, &'a [u8]),
         Symlink(&'a str, &'a str),
+        Hardlink(&'a str, &'a str),
+        Device(&'a str, tar::EntryType),
     }
 
     fn header(path: &str, kind: tar::EntryType, size: u64) -> tar::Header {
@@ -73,9 +77,19 @@ mod tar_xz {
                     h.set_cksum();
                     builder.append(&h, *data).unwrap();
                 }
-                Item::Symlink(path, target) => {
-                    let mut h = header(path, tar::EntryType::Symlink, 0);
+                Item::Symlink(path, target) | Item::Hardlink(path, target) => {
+                    let kind = if matches!(item, Item::Symlink(..)) {
+                        tar::EntryType::Symlink
+                    } else {
+                        tar::EntryType::Link
+                    };
+                    let mut h = header(path, kind, 0);
                     h.set_link_name(target).unwrap();
+                    h.set_cksum();
+                    builder.append(&h, std::io::empty()).unwrap();
+                }
+                Item::Device(path, kind) => {
+                    let mut h = header(path, *kind, 0);
                     h.set_cksum();
                     builder.append(&h, std::io::empty()).unwrap();
                 }
@@ -83,7 +97,10 @@ mod tar_xz {
         }
         let tar_bytes = builder.into_inner().unwrap();
         let mut xz = Vec::new();
-        lzma_rs::xz_compress(&mut Cursor::new(tar_bytes), &mut xz).unwrap();
+        let mut writer =
+            lzma_rust2::XzWriter::new(&mut xz, lzma_rust2::XzOptions::with_preset(0)).unwrap();
+        writer.write_all(&tar_bytes).unwrap();
+        writer.finish().unwrap();
         let path = dir.join("kv-t.tar.xz");
         std::fs::write(&path, xz).unwrap();
         path
@@ -129,6 +146,53 @@ mod tar_xz {
             Err(UpdateError::Malformed(_))
         ));
         assert!(!out.exists());
+    }
+
+    #[test]
+    fn hardlink_entry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = build(dir.path(), &[Item::Hardlink("kv-t/kv", "/etc/passwd")]);
+        let out = dir.path().join("out");
+        assert!(matches!(
+            extract_binary(&archive, &out),
+            Err(UpdateError::Malformed(_))
+        ));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn device_entries_are_refused() {
+        for kind in [
+            tar::EntryType::Char,
+            tar::EntryType::Block,
+            tar::EntryType::Fifo,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = build(dir.path(), &[Item::Device("kv-t/kv", kind)]);
+            let out = dir.path().join("out");
+            assert!(matches!(
+                extract_binary(&archive, &out),
+                Err(UpdateError::Malformed(_))
+            ));
+            assert!(!out.exists());
+        }
+    }
+
+    #[test]
+    fn oversize_binary_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        // 64 KiB of zeros compresses to almost nothing.
+        let zeros = vec![0u8; 64 * 1024];
+        let archive = build(dir.path(), &[Item::File("kv-t/kv", &zeros)]);
+        let out = dir.path().join("out");
+        assert!(matches!(
+            extract_binary_with_limit(&archive, &out, 1000),
+            Err(UpdateError::TooLarge(_))
+        ));
+        assert!(!out.exists());
+        // Exactly at the limit is fine.
+        extract_binary_with_limit(&archive, &out, 64 * 1024).unwrap();
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), 64 * 1024);
     }
 
     #[test]
@@ -213,6 +277,19 @@ mod zip_archive {
             extract_binary(&archive, &dir.path().join("out.exe")),
             Err(UpdateError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn oversize_binary_is_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let zeros = vec![0u8; 64 * 1024];
+        let archive = build(dir.path(), &[("kv-t/kv.exe", &zeros)]);
+        let out = dir.path().join("out.exe");
+        assert!(matches!(
+            extract_binary_with_limit(&archive, &out, 1000),
+            Err(UpdateError::TooLarge(_))
+        ));
+        assert!(!out.exists());
     }
 
     #[test]

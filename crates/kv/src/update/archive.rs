@@ -13,6 +13,10 @@ use super::UpdateError;
 /// The most the extracted binary may take: 256 MiB.
 const MAX_BINARY: u64 = 256 * 1024 * 1024;
 
+/// Room in the unpacked tar stream for headers and the other entries.
+#[cfg(unix)]
+const TAR_OVERHEAD: u64 = 1024 * 1024;
+
 /// The name of the binary inside a release archive.
 #[cfg(unix)]
 const BINARY: &str = "kv";
@@ -82,23 +86,23 @@ fn is_binary_entry(path: &Path) -> Result<bool, UpdateError> {
     Ok(depth <= 2)
 }
 
-/// Copies `reader` to a new file at `out`, at most `MAX_BINARY` bytes, and
+/// Copies `reader` to a new file at `out`, at most `limit` bytes, and
 /// makes it executable. A failure removes the partial file.
-fn write_binary(reader: &mut dyn Read, out: &Path) -> Result<(), UpdateError> {
-    let result = copy_capped(reader, out);
+fn write_binary(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), UpdateError> {
+    let result = copy_capped(reader, out, limit);
     if result.is_err() {
         let _ = fs::remove_file(out);
     }
     result
 }
 
-fn copy_capped(reader: &mut dyn Read, out: &Path) -> Result<(), UpdateError> {
+fn copy_capped(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), UpdateError> {
     let write_err =
         |e: io::Error| UpdateError::Swap(format!("could not write {}: {e}", out.display()));
     let mut file = File::create(out).map_err(write_err)?;
-    let copied = io::copy(&mut reader.take(MAX_BINARY + 1), &mut file)
+    let copied = io::copy(&mut reader.take(limit.saturating_add(1)), &mut file)
         .map_err(|e| UpdateError::Malformed(format!("the archive is damaged: {e}")))?;
-    if copied > MAX_BINARY {
+    if copied > limit {
         return Err(UpdateError::TooLarge("the unpacked kv binary"));
     }
     file.flush().map_err(write_err)?;
@@ -119,34 +123,26 @@ fn no_binary() -> UpdateError {
 /// makes it executable.
 #[cfg(unix)]
 pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
-    // lzma-rs only writes into a sink, so the tar is held in memory, capped.
-    struct Capped(Vec<u8>);
-    impl Write for Capped {
-        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-            if self.0.len() as u64 + data.len() as u64 > MAX_BINARY + 1024 * 1024 {
-                return Err(io::Error::other("too large"));
-            }
-            self.0.extend_from_slice(data);
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
+    extract_binary_with_limit(archive, out, MAX_BINARY)
+}
 
+/// `extract_binary` with the size limit as a parameter, so tests can reach
+/// the limit with a small archive.
+#[cfg(unix)]
+pub fn extract_binary_with_limit(
+    archive: &Path,
+    out: &Path,
+    limit: u64,
+) -> Result<(), UpdateError> {
     let file = File::open(archive)
         .map_err(|e| UpdateError::Malformed(format!("could not read download: {e}")))?;
-    let mut tar_bytes = Capped(Vec::new());
-    if let Err(e) = lzma_rs::xz_decompress(&mut io::BufReader::new(file), &mut tar_bytes) {
-        return Err(if tar_bytes.0.len() as u64 > MAX_BINARY {
-            UpdateError::TooLarge("the unpacked archive")
-        } else {
-            UpdateError::Malformed(format!("the archive is damaged: {e}"))
-        });
-    }
+    // Both the xz and the tar reader stream, so only small buffers are held.
+    // The unpacked stream is capped too, so a crafted archive stops early
+    // however its entries are laid out.
+    let xz = lzma_rust2::XzReader::new(io::BufReader::new(file), false);
+    let mut tar = tar::Archive::new(xz.take(limit.saturating_add(TAR_OVERHEAD)));
 
     let damaged = |e: io::Error| UpdateError::Malformed(format!("the archive is damaged: {e}"));
-    let mut tar = tar::Archive::new(tar_bytes.0.as_slice());
     for entry in tar.entries().map_err(damaged)? {
         let mut entry = entry.map_err(damaged)?;
         let kind = entry.header().entry_type();
@@ -162,7 +158,10 @@ pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
         }
         let path = entry.path().map_err(damaged)?.into_owned();
         if kind.is_file() && is_binary_entry(&path)? {
-            return write_binary(&mut entry, out);
+            if entry.size() > limit {
+                return Err(UpdateError::TooLarge("the unpacked kv binary"));
+            }
+            return write_binary(&mut entry, out, limit);
         }
     }
     Err(no_binary())
@@ -185,10 +184,10 @@ pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
             ));
         }
         if entry.is_file() && is_binary_entry(Path::new(entry.name()))? {
-            if entry.size() > MAX_BINARY {
+            if entry.size() > limit {
                 return Err(UpdateError::TooLarge("the unpacked kv binary"));
             }
-            return write_binary(&mut entry, out);
+            return write_binary(&mut entry, out, limit);
         }
     }
     Err(no_binary())
