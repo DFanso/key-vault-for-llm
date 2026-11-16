@@ -611,8 +611,9 @@ release:
 
 - The tray checks 3 minutes after it starts and then every 12 hours. It tells
   you with a notification and an `Update to kv X.Y.Z…` item in its menu.
-- `kv status` and `kv tui` check at most once a day, and only when the tray is
-  not running. They print ``kv X.Y.Z is out: run `kv update`.``
+- `kv status` and `kv tui` ask GitHub at most once a day, and only when the
+  tray is not running. Once a newer kv is known, every run prints
+  ``kv X.Y.Z is out: run `kv update`.`` until you update.
 
 To turn these off, set `KV_UPDATE_CHECK=off`:
 
