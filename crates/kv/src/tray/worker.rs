@@ -684,20 +684,36 @@ impl<D: Desktop> Worker<D> {
         };
         // The new kv is in place: nothing is left to offer.
         self.offer = None;
-        self.driver.stop().await;
+        // A daemon left running would stay on the old binary, perhaps
+        // unlocked, beside a new tray: hand over only once it has stopped.
+        if let Outcome::Failed(_) = self.driver.stop().await {
+            let message = format!(
+                "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then quit kv \
+                 tray and start it again.",
+                installed.version
+            );
+            self.update_failed(message);
+            return Next::Done;
+        }
         match self.updater.restart(&installed.version) {
             Ok(()) => Next::Quit,
             Err(message) => {
-                // Locked, with nothing left to offer.
-                self.send_state();
-                self.desktop.page(ToPage::UpdateResult {
-                    ok: false,
-                    message: message.clone(),
-                });
-                self.desktop.notify(&message);
+                self.update_failed(message);
                 Next::Done
             }
         }
+    }
+
+    /// Tells the window and the user that an update went in but this tray
+    /// could not hand over, and why; this tray keeps running.
+    fn update_failed(&self, message: String) {
+        // With nothing left to offer, and locked if the daemon stopped.
+        self.send_state();
+        self.desktop.page(ToPage::UpdateResult {
+            ok: false,
+            message: message.clone(),
+        });
+        self.desktop.notify(&message);
     }
 
     /// Saves the open form with what the page sent. The form stays open,

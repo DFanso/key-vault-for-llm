@@ -140,8 +140,8 @@ fn a_successor_that_never_comes_up_leaves_the_old_tray_in_charge() {
         restart_after_update(&lock, &exe, &semver::Version::new(1, 9, 0), &paths).unwrap_err();
     assert_eq!(
         error,
-        "kv 1.9.0 is installed, but the new tray didn't start. Run `kv tray`, or log out and \
-         back in."
+        "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray and start it again, \
+         or log out and back in."
     );
     let tried = std::fs::read_to_string(home.path().join("args")).unwrap();
     assert_eq!(tried, "tray --after-update 1.9.0\n".repeat(3));

@@ -2239,8 +2239,8 @@ async fn install_success_stops_daemon_and_restarts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_failure_reports() {
-    const FAILED: &str = "kv 1.9.0 is installed, but the new tray didn't start. Run `kv tray`, \
-                          or log out and back in.";
+    const FAILED: &str = "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray \
+                          and start it again, or log out and back in.";
     let updates = Updates::default();
     updates
         .installs
@@ -2339,4 +2339,43 @@ async fn checking_by_hand_answers_in_settings() {
     assert!(!worker.act(Action::UpdateChecked(Ok(Some(elsewhere)))).await);
     assert!(!worker.act(page(FromPage::OpenNotes)).await);
     assert_eq!(desk.opened.lock().unwrap().len(), 1);
+}
+
+/// A daemon that will not stop (here, one that hangs up on every request)
+/// is not left behind on the old binary: the old tray keeps running.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_does_not_stop_keeps_the_old_tray() {
+    const STUCK: &str = "kv 1.9.0 is installed, but the kv daemon didn't stop. Run `kv stop`, \
+                         then quit kv tray and start it again.";
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::under(dir.path());
+    paths.ensure_runtime_dir().unwrap();
+    let listener = tokio::net::UnixListener::bind(&paths.control_endpoint().path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    let desk = Desk::default();
+    let mut worker = Worker::new(paths, None, desk.clone(), Box::new(updates.clone()));
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(
+        !worker.act(page(FromPage::InstallUpdate)).await,
+        "the old tray keeps running"
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+    assert_eq!(update_results(&desk.take()), [(false, STUCK.to_owned())]);
+    assert_eq!(desk.notes().last().map(String::as_str), Some(STUCK));
 }

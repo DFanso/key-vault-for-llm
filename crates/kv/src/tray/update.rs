@@ -83,8 +83,8 @@ impl Updater for Release {
     fn restart(&self, version: &Version) -> Result<(), String> {
         let exe = self.installed.as_ref().map_err(|e| {
             format!(
-                "kv {version} is installed, but the new tray didn't start ({e}). Run `kv tray`, \
-                 or log out and back in."
+                "kv {version} is installed, but the new tray didn't start ({e}). Quit kv tray \
+                 and start it again, or log out and back in."
             )
         })?;
         restart_after_update(&self.lock, exe, version, &self.paths)
@@ -112,8 +112,8 @@ pub fn restart_after_update(
     }
     *held = super::lock_single(paths).ok();
     Err(format!(
-        "kv {version} is installed, but the new tray didn't start. Run `kv tray`, or log out and \
-         back in."
+        "kv {version} is installed, but the new tray didn't start. Quit kv tray and start it \
+         again, or log out and back in."
     ))
 }
 
