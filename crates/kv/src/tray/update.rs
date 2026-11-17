@@ -175,8 +175,18 @@ fn successor_came_up(exe: &Path, version: &Version, ready: &Path, wait: Duration
         // A console of its own that is never shown, as for the daemon.
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let Ok(mut child) = command.spawn() else {
-        return false;
+    // A file written a moment ago can be briefly "busy" on Linux while a
+    // child another thread is starting still holds it open.
+    let mut tries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
     };
     let deadline = Instant::now() + wait;
     loop {
