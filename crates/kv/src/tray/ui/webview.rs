@@ -32,6 +32,8 @@ const HEIGHT: f64 = 600.0;
 /// The menu's size, in logical pixels: it fits the page's menu exactly.
 const MENU_WIDTH: f64 = 300.0;
 const MENU_HEIGHT: f64 = 330.0;
+/// How much taller the menu is with its line for an update on offer.
+const UPDATE_LINE: f64 = 40.0;
 /// The space between the window and the tray icon or the screen's edge, in
 /// physical pixels.
 const GAP: i32 = 12;
@@ -59,23 +61,27 @@ pub struct KvWindow {
     window: Window,
     /// Whether it is showing as the small menu, which stays on top.
     menu: Cell<bool>,
+    /// Whether the menu has its line for an update on offer.
+    update_line: Cell<bool>,
 }
 
 impl KvWindow {
     /// Opens the window in front, beside `anchor`: as the small menu when
-    /// `menu`, else the full window. What the page sends goes to `actions`,
-    /// but a request to hide or grow the window goes to the event loop.
+    /// `menu`, else the full window; `update_line` is whether the menu has
+    /// a line for an update. What the page sends goes to `actions`, but a
+    /// request to hide or grow the window goes to the event loop.
     pub fn open(
         target: &EventLoopWindowTarget<Message>,
         actions: UnboundedSender<Action>,
         proxy: EventLoopProxy<Message>,
         anchor: Option<Anchor>,
         menu: bool,
+        update_line: bool,
     ) -> Result<Self, String> {
         let logo = Icon::from_rgba(icon::logo_rgba(), icon::LOGO_SIZE, icon::LOGO_SIZE).ok();
         let builder = WindowBuilder::new()
             .with_title("kv")
-            .with_inner_size(size(menu))
+            .with_inner_size(size(menu, update_line))
             .with_resizable(false)
             .with_decorations(false)
             .with_always_on_top(menu)
@@ -145,6 +151,7 @@ impl KvWindow {
             webview,
             window,
             menu: Cell::new(menu),
+            update_line: Cell::new(update_line),
         };
         opened.show_at(anchor, menu);
         Ok(opened)
@@ -217,10 +224,17 @@ impl KvWindow {
         self.raise();
     }
 
+    /// Sets whether the menu has a line for an update on offer, which
+    /// makes it taller from the next time it shows.
+    pub fn set_update_line(&self, on: bool) {
+        self.update_line.set(on);
+    }
+
     /// Shows the small menu beside `anchor`.
     pub fn show_menu(&self, anchor: Option<Anchor>) {
         self.send(&ToPage::Menu { on: true });
-        self.window.set_inner_size(size(true));
+        self.window
+            .set_inner_size(size(true, self.update_line.get()));
         self.show_at(anchor, true);
     }
 
@@ -232,7 +246,7 @@ impl KvWindow {
 
     /// Grows the menu into the full window; the page has already switched.
     pub fn expand(&self, anchor: Option<Anchor>) {
-        self.window.set_inner_size(size(false));
+        self.window.set_inner_size(size(false, false));
         self.show_at(anchor, false);
     }
 
@@ -282,7 +296,7 @@ impl KvWindow {
         // The size the window is about to have, not the one it reports: it
         // takes the new size a moment after being asked, so reading it back
         // here would place a window of the old size.
-        let wanted = size(menu);
+        let wanted = size(menu, self.update_line.get());
         let (w, h) = (
             wanted.width.min(area.size.width - 2.0 * gap),
             wanted.height.min(area.size.height - 2.0 * gap),
@@ -340,8 +354,10 @@ impl KvWindow {
     }
 }
 
-fn size(menu: bool) -> LogicalSize<f64> {
-    if menu {
+fn size(menu: bool, update_line: bool) -> LogicalSize<f64> {
+    if menu && update_line {
+        LogicalSize::new(MENU_WIDTH, MENU_HEIGHT + UPDATE_LINE)
+    } else if menu {
         LogicalSize::new(MENU_WIDTH, MENU_HEIGHT)
     } else {
         LogicalSize::new(WIDTH, HEIGHT)

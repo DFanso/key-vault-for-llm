@@ -47,6 +47,15 @@ enum Command {
     Stop,
     /// Show whether the vault is locked
     Status,
+    /// Check for a newer kv and install it after asking
+    Update {
+        /// Only check; install nothing
+        #[arg(long)]
+        check: bool,
+        /// Answer yes when there is no terminal to ask on
+        #[arg(long)]
+        yes: bool,
+    },
     /// List handles and their policies (never values)
     List {
         /// Print JSON instead of a table
@@ -89,6 +98,14 @@ enum Command {
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         login: Option<bool>,
+        /// Started by the tray an update replaced: wait for it to let go,
+        /// and say kv was updated to this version.
+        #[arg(long, value_name = "VERSION", hide = true, value_parser = semver::Version::parse)]
+        after_update: Option<semver::Version>,
+        /// Started by the tray an update replaced: create this file once
+        /// the icon is up, so that tray knows it can quit.
+        #[arg(long, value_name = "FILE", hide = true, requires = "after_update")]
+        ready_file: Option<std::path::PathBuf>,
     },
     /// kv.app's notification helper, which `kv tray` starts on macOS.
     #[command(hide = true)]
@@ -351,10 +368,19 @@ pub fn main() -> ExitCode {
             }
         };
     }
-    if let Command::Tray { login } = cli.command {
+    if let Command::Tray {
+        login,
+        after_update,
+        ready_file,
+    } = cli.command
+    {
         // The tray's event loop needs the main thread, so it runs before
         // any runtime; its worker starts one of its own.
-        return match tray(login) {
+        let after_update = after_update.map(|version| crate::tray::AfterUpdate {
+            version,
+            ready_file,
+        });
+        return match tray(login, after_update) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("kv: {e}");
@@ -379,7 +405,15 @@ pub fn main() -> ExitCode {
         std::process::exit(code);
     }
     match runtime.block_on(run(cli)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // A Windows update leaves the old binary beside the new one.
+            // This kv has now run a command, so it works: the old one can
+            // go, and a Windows update needs no helper to remove it.
+            if let Ok(installed) = crate::update::swap::installed_exe() {
+                crate::update::swap::clean_old(&installed);
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("kv: {e}");
             ExitCode::FAILURE
@@ -387,7 +421,7 @@ pub fn main() -> ExitCode {
     }
 }
 
-fn tray(login: Option<bool>) -> io::Result<()> {
+fn tray(login: Option<bool>, after_update: Option<crate::tray::AfterUpdate>) -> io::Result<()> {
     match login {
         Some(on) => {
             crate::tray::login::set(on)?;
@@ -398,7 +432,7 @@ fn tray(login: Option<bool>) -> io::Result<()> {
             }
             Ok(())
         }
-        None => crate::tray::run(Paths::from_env()?),
+        None => crate::tray::run(Paths::from_env()?, after_update),
     }
 }
 
@@ -477,8 +511,12 @@ async fn run(cli: Cli) -> Result<()> {
                 AgentResponse::Status { status } => println!("{}", describe_status(&status)),
                 other => return Err(unexpected(&other)),
             }
+            if let Some(notice) = crate::update::update_notice(&paths, unix_now()).await {
+                println!("{notice}");
+            }
             Ok(())
         }
+        Command::Update { check, yes } => update(&paths, check, yes).await,
         Command::List { json } => {
             let handles = match client::agent(&paths, None, &AgentRequest::ListHandles).await? {
                 AgentResponse::Handles { handles } => handles,
@@ -560,7 +598,20 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Tui => {
+            // The screen has no line for a message, and anything printed
+            // before it opens is wiped, so the notice comes after it
+            // closes. The check runs meanwhile; if it has not finished by
+            // then, there is no notice this time.
+            let notice = tokio::spawn({
+                let paths = paths.clone();
+                async move { crate::update::update_notice(&paths, unix_now()).await }
+            });
             crate::tui::run(paths).await?;
+            if notice.is_finished()
+                && let Ok(Some(notice)) = notice.await
+            {
+                eprintln!("{notice}");
+            }
             Ok(())
         }
         Command::Run { .. } => unreachable!("main runs kv run before this"),
@@ -954,6 +1005,112 @@ async fn send(
             "unexpected reply from the daemon: {other:?}"
         ))),
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `kv update`: checks for a newer release and, unless `check_only`,
+/// installs it after asking.
+async fn update(paths: &Paths, check_only: bool, yes: bool) -> Result<()> {
+    use crate::update::{self, check, install, state};
+
+    let failed = |e: update::UpdateError| CliError(e.to_string());
+    let current = update::current_version();
+    if !check_only {
+        if cfg!(any(target_os = "macos", windows)) && crate::tray::is_running(paths) {
+            return Err(CliError(
+                "kv tray is running: update from its menu (Update to kv X.Y.Z…) so it restarts \
+                 on the new version."
+                    .into(),
+            ));
+        }
+        if !update::is_release_build() {
+            return Err(CliError(
+                "this kv wasn't installed from a release; reinstall it from \
+                 https://github.com/DFanso/key-vault-for-llm/releases"
+                    .into(),
+            ));
+        }
+    }
+    let target =
+        update::target().ok_or_else(|| CliError("kv has no releases for this platform".into()))?;
+    let client = check::client().map_err(|e| CliError(format!("cannot start the check: {e}")))?;
+    let offer = check::latest(&client, update::LATEST_URL, &current, target)
+        .await
+        .map_err(failed)?;
+    // Remember the answer, so kv status doesn't ask again today.
+    let mut remembered = state::load(&paths.update_state_file());
+    remembered.last_check = Some(unix_now());
+    remembered.latest = offer.as_ref().map(|o| o.version.to_string());
+    let _ = paths
+        .update_state_file()
+        .parent()
+        .map(std::fs::create_dir_all);
+    let _ = state::save(&paths.update_state_file(), &remembered);
+
+    let Some(offer) = offer else {
+        println!("kv {current} is the latest.");
+        return Ok(());
+    };
+    println!("kv {} is out.", offer.version);
+    println!("Release notes: {}", offer.notes_url);
+    if check_only {
+        return Ok(());
+    }
+    println!(
+        "Updating locks the vault and stops anything agents have running now: waiting \
+         approvals, programs, MCP servers and database connections."
+    );
+    if io::stdin().is_terminal() {
+        eprint!("Update to kv {}? [y/N] ", offer.version);
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            println!("not updated");
+            return Ok(());
+        }
+    } else if !yes {
+        return Err(CliError(
+            "no terminal to ask on; pass --yes to update anyway".into(),
+        ));
+    }
+    let installed = update::swap::installed_exe()?;
+    let opts = install::InstallOptions {
+        installed,
+        release_build: update::is_release_build(),
+    };
+    let download = check::download_client()
+        .map_err(|e| CliError(format!("cannot start the download: {e}")))?;
+    println!("Downloading kv {}…", offer.version);
+    let done = match install::install(&download, &offer, &opts).await {
+        Ok(done) => done,
+        // Another kv update got there first.
+        Err(update::UpdateError::AlreadyInstalled(version)) => {
+            println!("kv {version} is already installed: kv is up to date.");
+            return Ok(());
+        }
+        Err(e) => return Err(failed(e)),
+    };
+    // A daemon left running stays on the old binary, perhaps unlocked.
+    if stop_or_lock(paths, ControlCommand::Stop).await.is_err() {
+        return Err(CliError(format!(
+            "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then start kv \
+             again.",
+            done.version
+        )));
+    }
+    println!("Updated to kv {}. Unlock to continue.", done.version);
+    if cfg!(target_os = "macos") {
+        println!(
+            "macOS will ask for your login password once before Touch ID works again; choose \
+             Always Allow."
+        );
+    }
+    Ok(())
 }
 
 /// `lock` and `stop` succeed without doing anything when no daemon runs.

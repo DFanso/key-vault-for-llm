@@ -294,12 +294,15 @@ impl Center {
         content.setTitle(&NSString::from_str(&notice.title));
         content.setSubtitle(&NSString::from_str(&notice.subtitle));
         content.setBody(&NSString::from_str(&notice.body));
-        let category = if notice.can_grant {
-            CATEGORY
-        } else {
-            CATEGORY_ONCE
-        };
-        content.setCategoryIdentifier(&NSString::from_str(category));
+        // Without a category a notification has no buttons.
+        if notice.answers {
+            let category = if notice.can_grant {
+                CATEGORY
+            } else {
+                CATEGORY_ONCE
+            };
+            content.setCategoryIdentifier(&NSString::from_str(category));
+        }
         content.setThreadIdentifier(&NSString::from_str(THREAD));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(

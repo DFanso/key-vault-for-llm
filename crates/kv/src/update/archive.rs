@@ -1,0 +1,310 @@
+//! Checking a downloaded release archive and taking the `kv` binary out of
+//! it. Archives are untrusted: nothing is written except the one binary,
+//! and only after its path and type pass.
+
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::{Component, Path};
+
+use sha2::{Digest, Sha256};
+
+use super::UpdateError;
+
+/// The most the extracted binary may take: 256 MiB.
+const MAX_BINARY: u64 = 256 * 1024 * 1024;
+
+/// Room in the unpacked tar stream for headers and the other entries.
+#[cfg(unix)]
+const TAR_OVERHEAD: u64 = 1024 * 1024;
+
+/// The most memory the xz decoder may use for one block: 128 MiB. Real kv
+/// archives use a few MiB.
+#[cfg(unix)]
+const MAX_XZ_MEMORY_KB: u32 = 128 * 1024;
+
+/// The name of the binary inside a release archive.
+#[cfg(unix)]
+const BINARY: &str = "kv";
+/// The name of the binary inside a release archive.
+#[cfg(windows)]
+const BINARY: &str = "kv.exe";
+
+/// Reads the SHA-256 out of a `.sha256` file. The file holds 64 hex digits,
+/// optionally followed by a file name (`<hex> *name` or `<hex>  name`).
+pub fn parse_sha256(text: &str) -> Result<[u8; 32], UpdateError> {
+    let bad = || UpdateError::Malformed("the checksum file is not a SHA-256".to_string());
+    let text = text.trim();
+    if text.contains('\n') {
+        return Err(bad());
+    }
+    let digest = text.split_whitespace().next().ok_or_else(bad)?;
+    let mut out = [0u8; 32];
+    if digest.len() != 64 {
+        return Err(bad());
+    }
+    hex::decode_to_slice(digest, &mut out).map_err(|_| bad())?;
+    Ok(out)
+}
+
+/// Hashes `file` and compares it with `expected`. A difference is
+/// `ChecksumMismatch`.
+pub fn verify_sha256(file: &Path, expected: &[u8; 32]) -> Result<(), UpdateError> {
+    let read_err = |e: io::Error| UpdateError::Malformed(format!("could not read download: {e}"));
+    let mut reader = File::open(file).map_err(read_err)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(read_err)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    if hasher.finalize().as_slice() == expected {
+        Ok(())
+    } else {
+        Err(UpdateError::ChecksumMismatch)
+    }
+}
+
+/// Whether an archive entry is the binary. An entry with another name is
+/// never written, wherever it sits. One named like the binary must be at
+/// depth 2 or less and free of `..` and absolute parts, or the archive is
+/// refused.
+fn is_binary_entry(path: &Path) -> Result<bool, UpdateError> {
+    if path.file_name().and_then(|n| n.to_str()) != Some(BINARY) {
+        return Ok(false);
+    }
+    let mut depth = 0;
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            _ => {
+                return Err(UpdateError::Malformed(format!(
+                    "the archive has an unsafe path: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(depth <= 2)
+}
+
+/// Copies `reader` to a new file at `out`, at most `limit` bytes, and
+/// makes it executable. A failure removes the partial file.
+fn write_binary(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), UpdateError> {
+    let result = copy_capped(reader, out, limit);
+    if result.is_err() {
+        let _ = fs::remove_file(out);
+    }
+    result
+}
+
+fn copy_capped(reader: &mut dyn Read, out: &Path, limit: u64) -> Result<(), UpdateError> {
+    let write_err =
+        |e: io::Error| UpdateError::Swap(format!("could not write {}: {e}", out.display()));
+    let mut file = File::create(out).map_err(write_err)?;
+    copy_limited(reader, &mut file, limit, write_err)?;
+    file.flush().map_err(write_err)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o755))
+            .map_err(write_err)?;
+    }
+    Ok(())
+}
+
+/// Copies at most `limit` bytes from `reader` to `writer`; more is
+/// `TooLarge`. A read error means the archive is damaged (`Malformed`); a
+/// write error, such as a full disk, is not the archive's fault and goes
+/// through `write_err`.
+fn copy_limited(
+    reader: &mut dyn Read,
+    writer: &mut dyn Write,
+    limit: u64,
+    write_err: impl Fn(io::Error) -> UpdateError,
+) -> Result<u64, UpdateError> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut copied: u64 = 0;
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => return Ok(copied),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                return Err(UpdateError::Malformed(format!(
+                    "the archive is damaged: {e}"
+                )));
+            }
+        };
+        copied += n as u64;
+        if copied > limit {
+            return Err(UpdateError::TooLarge("unpacked kv binary"));
+        }
+        writer.write_all(&buf[..n]).map_err(&write_err)?;
+    }
+}
+
+fn no_binary() -> UpdateError {
+    UpdateError::Malformed(format!("the archive has no {BINARY}"))
+}
+
+/// Unpacks the release binary from `archive` (a `.tar.xz`) into `out` and
+/// makes it executable.
+#[cfg(unix)]
+pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
+    extract_binary_with_limit(archive, out, MAX_BINARY)
+}
+
+/// `extract_binary` with the size limit as a parameter, so tests can reach
+/// the limit with a small archive.
+#[cfg(unix)]
+pub fn extract_binary_with_limit(
+    archive: &Path,
+    out: &Path,
+    limit: u64,
+) -> Result<(), UpdateError> {
+    let file = File::open(archive)
+        .map_err(|e| UpdateError::Malformed(format!("could not read download: {e}")))?;
+    // Both the xz and the tar reader stream, so only small buffers are held.
+    // The unpacked stream is capped too, so a crafted archive stops early
+    // however its entries are laid out.
+    // A block header can declare any dictionary size, so cap what the
+    // decoder may allocate for it.
+    let xz = lzma_rust2::XzReader::new_mem_limit(io::BufReader::new(file), false, MAX_XZ_MEMORY_KB);
+    let mut tar = tar::Archive::new(xz.take(limit.saturating_add(TAR_OVERHEAD)));
+
+    let damaged = |e: io::Error| {
+        if e.kind() == io::ErrorKind::OutOfMemory {
+            UpdateError::TooLarge("archive's decompression memory")
+        } else {
+            UpdateError::Malformed(format!("the archive is damaged: {e}"))
+        }
+    };
+    for entry in tar.entries().map_err(damaged)? {
+        let mut entry = entry.map_err(damaged)?;
+        let kind = entry.header().entry_type();
+        if kind.is_symlink()
+            || kind.is_hard_link()
+            || kind.is_character_special()
+            || kind.is_block_special()
+            || kind.is_fifo()
+        {
+            return Err(UpdateError::Malformed(
+                "the archive has a link or device entry".to_string(),
+            ));
+        }
+        let path = entry.path().map_err(damaged)?.into_owned();
+        if kind.is_file() && is_binary_entry(&path)? {
+            if entry.size() > limit {
+                return Err(UpdateError::TooLarge("unpacked kv binary"));
+            }
+            return write_binary(&mut entry, out, limit);
+        }
+    }
+    Err(no_binary())
+}
+
+/// Unpacks the release binary from `archive` (a `.zip`) into `out`.
+#[cfg(windows)]
+pub fn extract_binary(archive: &Path, out: &Path) -> Result<(), UpdateError> {
+    extract_binary_with_limit(archive, out, MAX_BINARY)
+}
+
+/// `extract_binary` with the size limit as a parameter, so tests can reach
+/// the limit with a small archive.
+#[cfg(windows)]
+pub fn extract_binary_with_limit(
+    archive: &Path,
+    out: &Path,
+    limit: u64,
+) -> Result<(), UpdateError> {
+    let damaged =
+        |e: &dyn std::fmt::Display| UpdateError::Malformed(format!("the archive is damaged: {e}"));
+    let file = File::open(archive)
+        .map_err(|e| UpdateError::Malformed(format!("could not read download: {e}")))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| damaged(&e))?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i).map_err(|e| damaged(&e))?;
+        // A zip made on unix can carry a symlink in its mode bits.
+        if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
+            return Err(UpdateError::Malformed(
+                "the archive has a link or device entry".to_string(),
+            ));
+        }
+        let name = entry.name().map_err(|e| damaged(&e))?;
+        if entry.is_file() && is_binary_entry(Path::new(&*name))? {
+            if entry.size() > limit {
+                return Err(UpdateError::TooLarge("unpacked kv binary"));
+            }
+            return write_binary(&mut entry, out, limit);
+        }
+    }
+    Err(no_binary())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A disk that is full.
+    struct Full;
+
+    impl Write for Full {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::StorageFull, "no space left"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An archive stream that breaks off.
+    struct Broken;
+
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad block"))
+        }
+    }
+
+    fn swap(e: io::Error) -> UpdateError {
+        UpdateError::Swap(format!("could not write: {e}"))
+    }
+
+    #[test]
+    fn a_full_disk_is_not_a_damaged_archive() {
+        let err = copy_limited(&mut &b"kv"[..], &mut Full, 10, swap).unwrap_err();
+        assert_eq!(
+            err,
+            UpdateError::Swap("could not write: no space left".into())
+        );
+    }
+
+    #[test]
+    fn a_read_error_is_a_damaged_archive() {
+        let err = copy_limited(&mut Broken, &mut Vec::new(), 10, swap).unwrap_err();
+        assert_eq!(
+            err,
+            UpdateError::Malformed("the archive is damaged: bad block".into())
+        );
+    }
+
+    #[test]
+    fn more_than_the_limit_is_too_large() {
+        let mut out = Vec::new();
+        assert_eq!(
+            copy_limited(&mut &b"12345"[..], &mut out, 4, swap).unwrap_err(),
+            UpdateError::TooLarge("unpacked kv binary")
+        );
+        let mut out = Vec::new();
+        assert_eq!(copy_limited(&mut &b"1234"[..], &mut out, 4, swap), Ok(4));
+        assert_eq!(out, b"1234");
+        assert_eq!(
+            UpdateError::TooLarge("unpacked kv binary").to_string(),
+            "the unpacked kv binary is larger than allowed"
+        );
+    }
+}

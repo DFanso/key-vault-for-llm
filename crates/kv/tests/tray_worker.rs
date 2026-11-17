@@ -5,26 +5,32 @@
 mod fake;
 mod live;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fake::Fake;
+use futures_util::future::BoxFuture;
 use kv::client;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
 use kv::tray::notices::Notice;
-use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
+use kv::tray::update::Updater;
+use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use kv::tray::worker::{Desktop, Worker};
 use kv::tui::app::ShareDone;
+use kv::update::install::Installed;
+use kv::update::swap::Swapped;
+use kv::update::{Asset, Offer, UpdateError};
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlCommand, HandleRequest, Overview,
     SessionInfo, Verdict,
 };
 use kv_core::secret::{SecretKind, SecretText};
 use live::{Daemon, PASS, TOKEN};
+use semver::Version;
 use tempfile::TempDir;
 
 const REASON: &str = "open kv tray, where you approve agent requests";
@@ -44,6 +50,8 @@ struct Desk {
     copy_fails: Arc<Mutex<bool>>,
     /// How often the tray asked to clear a copied value.
     clears: Arc<Mutex<usize>>,
+    /// The addresses opened in the browser.
+    opened: Arc<Mutex<Vec<String>>>,
 }
 
 impl Desktop for Desk {
@@ -91,6 +99,10 @@ impl Desktop for Desk {
     fn clear_copied(&self) {
         *self.clears.lock().unwrap() += 1;
     }
+
+    fn open_url(&self, url: &str) {
+        self.opened.lock().unwrap().push(url.to_owned());
+    }
 }
 
 impl Desk {
@@ -102,6 +114,118 @@ impl Desk {
     fn take(&self) -> Vec<ToPage> {
         std::mem::take(&mut *self.pages.lock().unwrap())
     }
+}
+
+/// Answers to give, in order.
+type Script<T> = Arc<Mutex<VecDeque<Result<T, UpdateError>>>>;
+
+/// An updater that answers from a script and records what it was asked.
+#[derive(Clone, Default)]
+struct Updates {
+    checks: Script<Option<Offer>>,
+    installs: Script<Installed>,
+    restart_fails: Arc<Mutex<Option<String>>>,
+    installed: Arc<Mutex<Vec<Version>>>,
+    restarted: Arc<Mutex<Vec<Version>>>,
+    /// When set, the next check answers only once this is sent to.
+    check_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+    /// When set, the next install ends only once this is sent to.
+    install_gate: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+}
+
+impl Updater for Updates {
+    fn check(&self) -> BoxFuture<'static, Result<Option<Offer>, UpdateError>> {
+        let next = self.checks.lock().unwrap().pop_front();
+        let gate = self.check_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            next.unwrap_or(Ok(None))
+        })
+    }
+
+    fn install(&self, offer: Offer) -> BoxFuture<'static, Result<Installed, UpdateError>> {
+        self.installed.lock().unwrap().push(offer.version.clone());
+        let next = self.installs.lock().unwrap().pop_front();
+        let gate = self.install_gate.lock().unwrap().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
+            next.expect("an install was scripted")
+        })
+    }
+
+    fn restart(&self, installed: &Installed) -> Result<(), String> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push(installed.version.clone());
+        match self.restart_fails.lock().unwrap().clone() {
+            Some(message) => Err(message),
+            None => Ok(()),
+        }
+    }
+}
+
+fn offer(version: &str) -> Offer {
+    let asset = |name: &str| Asset {
+        name: name.into(),
+        url: format!(
+            "https://github.com/DFanso/key-vault-for-llm/releases/download/v{version}/{name}"
+        )
+        .parse()
+        .unwrap(),
+        size: 1,
+    };
+    Offer {
+        version: Version::parse(version).unwrap(),
+        notes_url: format!("https://github.com/DFanso/key-vault-for-llm/releases/tag/v{version}"),
+        archive: asset("kv-aarch64-apple-darwin.tar.xz"),
+        checksum: asset("kv-aarch64-apple-darwin.tar.xz.sha256"),
+    }
+}
+
+fn installed(version: &str) -> Installed {
+    Installed {
+        version: Version::parse(version).unwrap(),
+        swapped: Swapped {
+            installed: "/opt/kv/bin/kv".into(),
+            backup: "/opt/kv/bin/kv.previous".into(),
+        },
+    }
+}
+
+/// What `pages` say about updates of `kind`.
+fn results(pages: &[ToPage], of: UpdateKind) -> Vec<(bool, String)> {
+    pages
+        .iter()
+        .filter_map(|page| match page {
+            ToPage::UpdateResult { kind, ok, message } if *kind == of => {
+                Some((*ok, message.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// What `pages` tell the confirmation about the update it asked for.
+fn install_results(pages: &[ToPage]) -> Vec<(bool, String)> {
+    let all = results(pages, UpdateKind::Install);
+    assert_eq!(results(pages, UpdateKind::Check), [], "no check results");
+    all
+}
+
+/// What `pages` tell Settings about the check it asked for.
+fn check_results(pages: &[ToPage]) -> Vec<(bool, String)> {
+    let all = results(pages, UpdateKind::Check);
+    assert_eq!(
+        results(pages, UpdateKind::Install),
+        [],
+        "no install results"
+    );
+    all
 }
 
 /// The last `State` in `pages`: whether locked, whether waiting for the
@@ -134,6 +258,13 @@ fn messages(pages: &[ToPage]) -> Vec<(String, Option<u64>)> {
 
 fn page(message: FromPage) -> Action {
     Action::Window(message)
+}
+
+/// The confirmation's Update, for `version`.
+fn install(version: &str) -> FromPage {
+    FromPage::InstallUpdate {
+        version: version.into(),
+    }
 }
 
 fn values(pairs: &[(&str, &str)]) -> BTreeMap<String, SecretText> {
@@ -180,6 +311,11 @@ async fn request_handle(daemon: &Daemon, name: &str) {
 
 /// A daemon with Touch ID set up and the vault locked, and a worker for it.
 async fn locked() -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
+    locked_updating(Updates::default()).await
+}
+
+/// `locked`, with `updates` for the worker's updater.
+async fn locked_updating(updates: Updates) -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
     let daemon = Daemon::start().await;
     let fake = Arc::new(Fake::default());
     let (slot, key) = device::enroll(fake.as_ref()).unwrap();
@@ -192,12 +328,17 @@ async fn locked() -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
         daemon.paths.clone(),
         Some(fake.clone() as Arc<dyn Device>),
         desk.clone(),
+        Box::new(updates),
     );
     (daemon, fake, desk, worker)
 }
 
 async fn unlocked() -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
-    let (daemon, fake, desk, mut worker) = locked().await;
+    unlocked_updating(Updates::default()).await
+}
+
+async fn unlocked_updating(updates: Updates) -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
+    let (daemon, fake, desk, mut worker) = locked_updating(updates).await;
     assert!(!worker.act(Action::Unlock).await);
     assert_eq!(desk.notes(), Vec::<String>::new());
     (daemon, fake, desk, worker)
@@ -242,7 +383,12 @@ async fn waiting(worker: &mut Worker<Desk>, answer: &str) -> Action {
 async fn without_a_daemon_the_icon_is_off_and_none_is_started() {
     let dir = TempDir::new().unwrap();
     let paths = Paths::under(dir.path());
-    let mut worker = Worker::new(paths.clone(), None, Desk::default());
+    let mut worker = Worker::new(
+        paths.clone(),
+        None,
+        Desk::default(),
+        Box::new(Updates::default()),
+    );
     let model = worker.model().await;
     assert_eq!(model.icon, IconState::Off);
     assert_eq!(model.tooltip, "kv: not running");
@@ -499,7 +645,12 @@ async fn the_window_asks_for_touch_id_when_it_opens() {
 async fn the_passphrase_typed_in_the_window_unlocks() {
     let (daemon, _fake, _desk, _worker) = locked().await;
     let desk = Desk::default();
-    let mut worker = Worker::new(daemon.paths.clone(), None, desk.clone());
+    let mut worker = Worker::new(
+        daemon.paths.clone(),
+        None,
+        desk.clone(),
+        Box::new(Updates::default()),
+    );
     // No device: the window opens on the passphrase field, asking nothing.
     assert!(!worker.act(Action::Open(Tab::Approvals)).await);
     worker.model().await;
@@ -1863,7 +2014,12 @@ async fn a_value_shows_in_the_window_once_touch_id_or_the_passphrase_confirms() 
 async fn without_a_device_the_window_asks_for_the_passphrase() {
     let daemon = Daemon::start().await;
     let desk = Desk::default();
-    let mut worker = Worker::new(daemon.paths.clone(), None, desk.clone());
+    let mut worker = Worker::new(
+        daemon.paths.clone(),
+        None,
+        desk.clone(),
+        Box::new(Updates::default()),
+    );
     assert!(!worker.act(Action::Open(Tab::Handles)).await);
     assert!(
         !worker
@@ -1981,4 +2137,490 @@ async fn clicking_a_notification_opens_its_request_and_none_are_posted_when_off(
     }));
     assert!(worker.act(Action::Quit).await);
     assert_eq!(desk.withdrawn.lock().unwrap().len(), 1);
+}
+
+/// The offer's line in the tray's menu, if there is one.
+fn update_line(model: &Model) -> Option<String> {
+    labels(&model.menu)
+        .into_iter()
+        .find(|label| label.starts_with("Update to kv"))
+}
+
+fn update_ask(version: &str) -> ToPage {
+    ToPage::UpdateAsk {
+        version: version.into(),
+        notes_url: format!("https://github.com/DFanso/key-vault-for-llm/releases/tag/v{version}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn announces_a_new_version_once() {
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::under(dir.path());
+    let desk = Desk::default();
+    let mut worker = Worker::new(
+        paths.clone(),
+        None,
+        desk.clone(),
+        Box::new(Updates::default()),
+    );
+    let found = |version: &str| Action::UpdateChecked(Ok(Some(offer(version))));
+    assert!(!worker.act(found("1.9.0")).await);
+    assert!(!worker.act(found("1.9.0")).await);
+    assert_eq!(desk.notes(), ["kv 1.9.0 is out. Open kv's menu to update."]);
+    assert_eq!(
+        update_line(&worker.model().await).as_deref(),
+        Some("Update to kv 1.9.0…")
+    );
+
+    // A failed check says nothing, and what was found stays on offer.
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Err(
+                "GitHub is limiting requests".into()
+            )))
+            .await
+    );
+    assert_eq!(desk.notes().len(), 1);
+    assert!(update_line(&worker.model().await).is_some());
+
+    // Remembered: a tray started again does not say it again.
+    let again = Desk::default();
+    let mut worker = Worker::new(
+        paths.clone(),
+        None,
+        again.clone(),
+        Box::new(Updates::default()),
+    );
+    assert!(!worker.act(found("1.9.0")).await);
+    assert_eq!(again.notes(), Vec::<String>::new());
+
+    // Where kv.app posts notifications, a newer one is posted, with no
+    // answers; a click on it opens the confirmation.
+    *again.notifying.lock().unwrap() = true;
+    assert!(!worker.act(found("1.9.1")).await);
+    let posted = again.posted.lock().unwrap().clone();
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert_eq!(posted[0].key, "update-1.9.1");
+    assert_eq!(posted[0].title, "kv 1.9.1 is out");
+    assert_eq!(posted[0].body, "Open kv's menu to update.");
+    assert!(!posted[0].answers);
+    assert_eq!(again.notes(), Vec::<String>::new());
+    assert!(
+        !worker
+            .act(Action::Notice {
+                key: "update-1.9.1".into(),
+                verdict: None,
+            })
+            .await
+    );
+    assert_eq!(*again.windows.lock().unwrap(), [Tab::Home]);
+    assert!(again.take().contains(&update_ask("1.9.1")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_failure_keeps_tray() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Err(UpdateError::ChecksumMismatch));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert_eq!(*desk.windows.lock().unwrap(), [Tab::Home]);
+    assert!(desk.take().contains(&update_ask("1.9.0")));
+
+    assert!(!worker.act(page(install("1.9.0"))).await);
+    assert_eq!(
+        install_results(&desk.take()),
+        [(
+            false,
+            "The download does not match its checksum.".to_owned()
+        )]
+    );
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+    // Nothing was stopped, and the update is still there to try again.
+    let model = worker.model().await;
+    assert_eq!(model.icon, IconState::Unlocked);
+    assert_eq!(update_line(&model).as_deref(), Some("Update to kv 1.9.0…"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_success_stops_daemon_and_restarts() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    let (daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(
+        worker.act(page(install("1.9.0"))).await,
+        "the old tray quits once the new one runs"
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.take()), Vec::new());
+    // The daemon was stopped, so the next command starts the new one.
+    // Only "no daemon" counts: a probe that fails is tried again.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let probe = client::agent_if_running(&daemon.paths, &AgentRequest::Status).await;
+        if matches!(probe, Ok(None)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon still runs; the last probe gave {probe:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_failure_reports() {
+    const FAILED: &str = "kv 1.9.0 is installed, but the new tray didn't start. Quit kv tray \
+                          and start it again, or log out and back in.";
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    *updates.restart_fails.lock().unwrap() = Some(FAILED.into());
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(
+        !worker.act(page(install("1.9.0"))).await,
+        "the old tray keeps running"
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.take()), [(false, FAILED.to_owned())]);
+    assert_eq!(desk.notes().last().map(String::as_str), Some(FAILED));
+    // The new kv is in place: there is nothing left to offer.
+    assert_eq!(update_line(&worker.model().await), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn checking_by_hand_answers_in_settings() {
+    let updates = Updates::default();
+    updates.checks.lock().unwrap().extend([
+        Ok(None),
+        Err(UpdateError::RateLimited),
+        Ok(Some(offer("1.9.0"))),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let desk = Desk::default();
+    let mut worker = Worker::new(
+        Paths::under(dir.path()),
+        None,
+        desk.clone(),
+        Box::new(updates),
+    );
+    assert!(!worker.act(Action::Open(Tab::Home)).await);
+    let opened = desk.take();
+    let version = |pages: &[ToPage]| {
+        pages.iter().rev().find_map(|page| match page {
+            ToPage::State {
+                version, update, ..
+            } => Some((version.clone(), update.clone())),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        version(&opened),
+        Some((env!("CARGO_PKG_VERSION").to_owned(), None))
+    );
+
+    assert!(!worker.act(page(FromPage::CheckUpdates)).await);
+    assert_eq!(
+        check_results(&desk.take()),
+        [(
+            true,
+            format!("kv {} is the latest.", env!("CARGO_PKG_VERSION"))
+        )]
+    );
+    assert!(!worker.act(page(FromPage::CheckUpdates)).await);
+    assert_eq!(
+        check_results(&desk.take()),
+        [(
+            false,
+            "GitHub is limiting requests; try again later.".to_owned()
+        )]
+    );
+    assert!(!worker.act(page(FromPage::CheckUpdates)).await);
+    let pages = desk.take();
+    assert_eq!(
+        check_results(&pages),
+        [(true, "kv 1.9.0 is out.".to_owned())]
+    );
+    assert_eq!(
+        version(&pages).and_then(|(_, update)| update).as_deref(),
+        Some("1.9.0")
+    );
+    // Seen in the window: not said again as a notification.
+    assert_eq!(desk.notes(), Vec::<String>::new());
+
+    // The release notes open in the browser, only from GitHub.
+    assert!(!worker.act(page(FromPage::OpenNotes)).await);
+    assert_eq!(
+        *desk.opened.lock().unwrap(),
+        ["https://github.com/DFanso/key-vault-for-llm/releases/tag/v1.9.0"]
+    );
+    let elsewhere = Offer {
+        notes_url: "file:///System/Applications/Calculator.app".into(),
+        ..offer("1.9.1")
+    };
+    assert!(!worker.act(Action::UpdateChecked(Ok(Some(elsewhere)))).await);
+    assert!(!worker.act(page(FromPage::OpenNotes)).await);
+    assert_eq!(desk.opened.lock().unwrap().len(), 1);
+}
+
+/// A daemon that will not stop (here, one that hangs up on every request)
+/// is not left behind on the old binary: the old tray keeps running.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_that_does_not_stop_keeps_the_old_tray() {
+    const STUCK: &str = "kv 1.9.0 is installed, but the kv daemon didn't stop. Run `kv stop`, \
+                         then quit kv tray and start it again. To go back, move kv.previous \
+                         over kv in /opt/kv/bin.";
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::under(dir.path());
+    paths.ensure_runtime_dir().unwrap();
+    let listener = tokio::net::UnixListener::bind(&paths.control_endpoint().path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    let desk = Desk::default();
+    let mut worker = Worker::new(paths, None, desk.clone(), Box::new(updates.clone()));
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(
+        !worker.act(page(install("1.9.0"))).await,
+        "the old tray keeps running"
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+    assert_eq!(install_results(&desk.take()), [(false, STUCK.to_owned())]);
+    assert_eq!(desk.notes().last().map(String::as_str), Some(STUCK));
+}
+
+/// An offer whose version an earlier update already put in place (its
+/// handover failed) is not installed again: the tray says how to finish.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_already_in_place_says_how_to_finish() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Err(UpdateError::AlreadyInstalled("1.9.0".into())));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    desk.take();
+    assert!(!worker.act(page(install("1.9.0"))).await);
+    assert_eq!(
+        install_results(&desk.take()),
+        [(
+            false,
+            "kv 1.9.0 is already installed. Quit kv tray and start it again to finish the \
+             update."
+                .to_owned()
+        )]
+    );
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+    assert_eq!(update_line(&worker.model().await), None);
+}
+
+/// A newer version found while the confirmation was open is not installed
+/// on the strength of the older one: the confirmation asks again.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_version_the_user_agreed_to_is_installed() {
+    let updates = Updates::default();
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Err(UpdateError::ChecksumMismatch));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    assert!(desk.take().contains(&update_ask("1.9.0")));
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.1")))))
+            .await
+    );
+    desk.take();
+
+    assert!(!worker.act(page(install("1.9.0"))).await);
+    let pages = desk.take();
+    assert_eq!(*updates.installed.lock().unwrap(), Vec::<Version>::new());
+    let asked = pages.iter().position(|p| *p == update_ask("1.9.1"));
+    let said = pages
+        .iter()
+        .position(|p| matches!(p, ToPage::UpdateResult { .. }));
+    assert!(asked < said, "asks again, then says why: {pages:?}");
+    assert_eq!(
+        install_results(&pages),
+        [(
+            false,
+            "The update on offer is kv 1.9.1 now, not 1.9.0. Choose Update to install it."
+                .to_owned()
+        )]
+    );
+
+    // Agreed to again, for the version on offer.
+    assert!(!worker.act(page(install("1.9.1"))).await);
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 1)]);
+}
+
+/// A check Settings asks for runs beside the loop: the tray keeps
+/// answering (here, a lock) while GitHub is slow, and the answer still
+/// reaches Settings.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_check_by_hand_does_not_hold_up_the_loop() {
+    let updates = Updates::default();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *updates.check_gate.lock().unwrap() = Some(gate);
+    updates
+        .checks
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(offer("1.9.0"))));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates).await;
+    assert!(!worker.act(Action::Open(Tab::Home)).await);
+    desk.take();
+    let shown: Arc<Mutex<Vec<Model>>> = Arc::default();
+    let (actions, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let record = shown.clone();
+    let running = tokio::spawn(worker.run(inbox, move |model| {
+        record.lock().unwrap().push(model);
+    }));
+
+    actions.send(page(FromPage::CheckUpdates)).unwrap();
+    actions.send(Action::Lock).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !shown
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.icon == IconState::Locked)
+    {
+        assert!(Instant::now() < deadline, "the check held up the lock");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(check_results(&desk.pages.lock().unwrap()), []);
+
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let said = check_results(&desk.pages.lock().unwrap());
+        if !said.is_empty() {
+            assert_eq!(said, [(true, "kv 1.9.0 is out.".to_owned())]);
+            break;
+        }
+        assert!(Instant::now() < deadline, "the check never answered");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Seen in Settings: not said again as a notification.
+    assert_eq!(desk.notes(), Vec::<String>::new());
+
+    actions.send(Action::Quit).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the loop stops on Quit")
+        .unwrap();
+}
+
+/// An update downloads beside the loop: the tray keeps answering (here, a
+/// lock) meanwhile, a second Update is not started, and once the update is
+/// in, the tray hands over and the loop ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_downloads_beside_the_loop() {
+    let updates = Updates::default();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    *updates.install_gate.lock().unwrap() = Some(gate);
+    updates
+        .installs
+        .lock()
+        .unwrap()
+        .push_back(Ok(installed("1.9.0")));
+    let (_daemon, _fake, desk, mut worker) = unlocked_updating(updates.clone()).await;
+    assert!(
+        !worker
+            .act(Action::UpdateChecked(Ok(Some(offer("1.9.0")))))
+            .await
+    );
+    assert!(!worker.act(Action::OfferUpdate).await);
+    desk.take();
+    let shown: Arc<Mutex<Vec<Model>>> = Arc::default();
+    let (actions, inbox) = tokio::sync::mpsc::unbounded_channel();
+    let record = shown.clone();
+    let running = tokio::spawn(worker.run(inbox, move |model| {
+        record.lock().unwrap().push(model);
+    }));
+
+    actions.send(page(install("1.9.0"))).unwrap();
+    actions.send(page(install("1.9.0"))).unwrap();
+    actions.send(Action::Lock).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !shown
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| m.icon == IconState::Locked)
+    {
+        assert!(Instant::now() < deadline, "the download held up the lock");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.pages.lock().unwrap()), []);
+    assert_eq!(*updates.restarted.lock().unwrap(), Vec::<Version>::new());
+
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .expect("the old tray quits once the new one runs")
+        .unwrap();
+    assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
+    assert_eq!(install_results(&desk.take()), []);
 }

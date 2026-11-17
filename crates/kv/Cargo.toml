@@ -11,6 +11,11 @@ readme = "../../README.md"
 keywords = ["mcp", "secrets", "ai-agents", "llm", "vault"]
 categories = ["command-line-utilities", "cryptography", "authentication", "development-tools"]
 
+[features]
+# Set by the release build (see dist-workspace.toml). Only such builds
+# update themselves; `cargo install --path` and source builds never do.
+release-build = []
+
 [dependencies]
 clap = { version = "4.6", features = ["derive", "env"] }
 base64 = "0.23"
@@ -28,8 +33,12 @@ rmcp = { version = "3.9", default-features = false, features = ["macros", "serve
 rpassword = "7.5"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
+# The work folder an update downloads into, removed whatever happens.
+tempfile = "3.27"
 tokio = { version = "1.53", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["aws-lc-rs"] }
@@ -74,10 +83,17 @@ wry = { version = "0.57", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
+# Release archives on unix are `.tar.xz`; both readers are pure Rust and
+# stream, so memory stays small however the archive is crafted.
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz"] }
+tar = { version = "0.4", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# The Windows release archive is a `.zip`: deflate only, pure Rust.
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
+# zip's deflate needs a backend chosen; this is the pure-Rust one.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 hkdf = "0.13"
-sha2 = "0.11"
 windows = { version = "0.62", features = [
     "Foundation",
     "Security_Credentials",
@@ -104,6 +120,12 @@ windows-sys = { version = "0.61", features = [
 rcgen = "0.14"
 redis = { version = "1.7", default-features = false, features = ["tokio-comp"] }
 rmcp = { version = "3.9", default-features = false, features = ["client", "transport-child-process"] }
-tempfile = "3.27"
 tokio-rustls = "0.26"
 wiremock = "0.6"
+
+[target.'cfg(unix)'.dev-dependencies]
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "encoder"] }
+tar = { version = "0.4", default-features = false }
+
+[target.'cfg(windows)'.dev-dependencies]
+zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }

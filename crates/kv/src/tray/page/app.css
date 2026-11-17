@@ -948,3 +948,9 @@ button:active:not(:disabled) { transform: scale(0.98); }
 /* Asking to show a handle's value. */
 #reveal-ask-text { margin: 4px 0 12px; }
 #reveal-ask .waiting { margin: 0 0 12px; }
+/* A newer kv: its line in the menu, the release notes link in the
+   confirmation, and the result of a check in Settings. */
+.menu-list button.accent, .menu-list button.accent .i { color: var(--accent); }
+.update-notes { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 4px 0; }
+#update-notes-url { overflow-wrap: anywhere; }
+#update-status.error { color: var(--red); }

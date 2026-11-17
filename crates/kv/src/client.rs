@@ -254,7 +254,9 @@ async fn wait_for(endpoint: &Endpoint) -> io::Result<ClientStream> {
 /// Starts `kv daemon` detached from this process. If another client starts
 /// one at the same moment, the loser exits when it finds the lock file held.
 fn spawn_daemon() -> io::Result<()> {
-    let mut command = Command::new(std::env::current_exe()?);
+    // After an update, the new kv: on Linux the running one's own path
+    // may name a replaced file.
+    let mut command = Command::new(crate::update::swap::running_exe()?);
     command
         .args(["daemon", "--autostart"])
         .stdin(Stdio::null())

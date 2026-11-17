@@ -22,7 +22,7 @@ pub use windows::*;
 /// it should be.
 pub fn runs_this_program(stream: &ClientStream) -> io::Result<bool> {
     let theirs = server_program(stream)?;
-    Ok(same_file(&theirs, &std::env::current_exe()?))
+    Ok(same_file(&theirs, &crate::update::swap::running_exe()?))
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {

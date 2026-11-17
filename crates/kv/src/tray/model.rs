@@ -6,6 +6,7 @@ use kv_core::proto::{Approval, Overview, Status, Verdict};
 use kv_core::vault::DeviceKind;
 
 use super::window::{FromPage, Tab};
+use crate::update::Offer;
 
 /// How long a request's label may be.
 const LABEL_LEN: usize = 60;
@@ -51,6 +52,11 @@ pub enum Action {
         key: String,
         verdict: Option<Verdict>,
     },
+    /// The confirmation for the update on offer, in kv's window.
+    OfferUpdate,
+    /// What a background check for an update found, or why it failed.
+    /// Never on a menu.
+    UpdateChecked(Result<Option<Offer>, String>),
 }
 
 impl Action {
@@ -75,6 +81,8 @@ impl Action {
             Action::Quit => "quit".into(),
             Action::Decide { id, verdict } => format!("decide:{id}:{}", verdict_name(*verdict)),
             Action::Notice { .. } => "notice".into(),
+            Action::OfferUpdate => "update".into(),
+            Action::UpdateChecked(_) => "update-checked".into(),
         }
     }
 
@@ -90,6 +98,7 @@ impl Action {
             "login:on" => Action::Login(true),
             "login:off" => Action::Login(false),
             "quit" => Action::Quit,
+            "update" => Action::OfferUpdate,
             _ => {
                 let rest = id.strip_prefix("decide:")?;
                 let (request, verdict) = rest.split_once(':')?;
@@ -150,6 +159,8 @@ pub struct View<'a> {
     pub device: Option<DeviceKind>,
     /// Whether the login item is on.
     pub login: bool,
+    /// The newer kv on offer, if a check found one.
+    pub update: Option<&'a semver::Version>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +205,12 @@ impl Model {
             checked: view.login,
             action: Action::Login(!view.login),
         });
+        if let Some(version) = view.update {
+            menu.push(action(
+                &format!("Update to kv {version}…"),
+                Action::OfferUpdate,
+            ));
+        }
         menu.push(action("Quit kv tray", Action::Quit));
         Model {
             icon,

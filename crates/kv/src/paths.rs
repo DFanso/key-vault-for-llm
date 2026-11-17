@@ -62,6 +62,18 @@ impl Paths {
         self.runtime.join("tray.lock")
     }
 
+    /// Created by a tray an update started, once its icon is up, for the
+    /// tray it replaces to see.
+    pub fn tray_ready_file(&self) -> PathBuf {
+        self.runtime.join("tray.ready")
+    }
+
+    /// What kv last learned about a newer release, beside the audit log. It
+    /// holds no secret.
+    pub fn update_state_file(&self) -> PathBuf {
+        self.audit.with_file_name("update.json")
+    }
+
     /// The window's appearance, as the user last picked it in kv tray. Kept
     /// beside the vault; it holds no secret.
     pub fn tray_theme_file(&self) -> PathBuf {

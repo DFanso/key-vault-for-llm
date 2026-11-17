@@ -68,6 +68,16 @@
     revealAsking: null,
     // Whether a dialog is open, as the tray last heard.
     busy: false,
+    // The kv running, and the newer one on offer, if a check found one.
+    version: "",
+    update: null,
+    // The update the confirmation asks about, while it is open; whether
+    // it is installing; and whether a check from Settings is running.
+    updateAsk: null,
+    updating: false,
+    checking: false,
+    // What the last check from Settings said, and the offer it was about.
+    updateResult: null,
   };
 
   const REVEAL_SECS = 60;
@@ -336,6 +346,8 @@
         page.overview = message.overview;
         if (typeof message.login === "boolean") page.login = message.login;
         if (message.theme) setTheme(message.theme);
+        page.version = message.version || "";
+        page.update = message.update || null;
         if (page.locked) {
           closeRowMenu(false);
           closeForm(false);
@@ -439,6 +451,12 @@
       case "message":
         say(message.text, message.request);
         break;
+      case "update_ask":
+        openUpdate(message);
+        break;
+      case "update_result":
+        updateResult(message);
+        break;
     }
   }
 
@@ -513,6 +531,7 @@
     show($("menu"), page.menu);
     show($("unlock"), !page.menu && page.locked);
     show($("app"), !page.menu && !page.locked);
+    drawUpdate();
     if (page.menu) {
       drawMenu();
     } else if (page.locked) {
@@ -572,6 +591,99 @@
     $("menu-lock-text").textContent = lockText;
     lock.disabled = prompting;
     $("menu-login").setAttribute("aria-checked", String(page.login));
+  }
+
+  // The newer kv on offer, where it shows: the menu's line and Settings.
+  function drawUpdate() {
+    const offered = Boolean(page.update);
+    show($("menu-update"), offered);
+    $("menu-update-text").textContent = offered ? `Update to kv ${page.update}…` : "";
+    $("settings-version").textContent = page.version ? `kv ${page.version}` : "kv";
+    show($("settings-update"), offered);
+    $("check-updates").disabled = page.checking;
+    // A check's answer stays until the offer changes.
+    const result = page.updateResult;
+    let text = offered ? `kv ${page.update} is out.` : "Updates come from kv's releases on GitHub.";
+    let failed = false;
+    if (page.checking) {
+      text = "Checking…";
+    } else if (result && result.update === page.update) {
+      text = result.message;
+      failed = !result.ok;
+    }
+    const status = $("update-status");
+    status.textContent = text;
+    status.classList.toggle("error", failed);
+  }
+
+  // The confirmation for an update: what it stops, its release notes, and
+  // Update or Not now. While an update runs it stays busy until the
+  // update's result comes.
+  function openUpdate(ask) {
+    page.updateAsk = ask;
+    $("update-title").textContent = `Update to kv ${ask.version}?`;
+    $("update-notes-url").textContent = ask.notes_url;
+    $("update-error").textContent = "";
+    show($("update-progress"), page.updating);
+    $("update-ok").disabled = page.updating;
+    $("update-cancel").disabled = page.updating;
+    $("update-cancel").textContent = "Not now";
+    const dialog = $("update-dialog");
+    if (!dialog.open) dialog.showModal();
+    $("update-ok").focus();
+  }
+
+  // Not while an update runs: it would leave nothing to show its result.
+  function closeUpdate() {
+    if (page.updating) return;
+    page.updateAsk = null;
+    const dialog = $("update-dialog");
+    if (dialog.open) dialog.close();
+  }
+
+  function submitUpdate(event) {
+    event.preventDefault();
+    if (!page.updateAsk || page.updating) return;
+    page.updating = true;
+    $("update-error").textContent = "";
+    const progress = $("update-progress");
+    progress.textContent = `Downloading and checking kv ${page.updateAsk.version}…`;
+    show(progress, true);
+    $("update-ok").disabled = true;
+    $("update-cancel").disabled = true;
+    // The version the user agreed to: the tray installs only that one.
+    send({ type: "install_update", version: page.updateAsk.version });
+  }
+
+  function checkUpdates() {
+    if (page.checking) return;
+    page.checking = true;
+    drawUpdate();
+    send({ type: "check_updates" });
+  }
+
+  // How a check or an update went: an update's in the confirmation, a
+  // check's in Settings, whichever else is under way.
+  function updateResult(result) {
+    if (result.kind === "install") {
+      page.updating = false;
+      if (!$("update-dialog").open) {
+        say(result.message);
+        return;
+      }
+      show($("update-progress"), false);
+      $("update-error").textContent = result.message;
+      // An update that went in but whose tray did not start again leaves
+      // nothing to install.
+      $("update-ok").disabled = !page.update;
+      $("update-cancel").disabled = false;
+      $("update-cancel").textContent = page.update ? "Not now" : "Close";
+      return;
+    }
+    page.checking = false;
+    page.updateResult = { update: page.update, ok: result.ok, message: result.message };
+    drawUpdate();
+    if (!result.ok && page.screen !== "settings") say(result.message);
   }
 
   // From the menu to the full window, on `screen` once unlocked.
@@ -2154,7 +2266,7 @@
       if (event.key === "Escape") send({ type: "hide" });
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
-        const items = [...document.querySelectorAll("#menu-waiting:not(.static), .menu-list button:not(:disabled)")];
+        const items = [...document.querySelectorAll("#menu-waiting:not(.static), .menu-list button:not(:disabled):not([hidden])")];
         const at = items.indexOf(document.activeElement);
         const next = event.key === "ArrowDown" ? at + 1 : at - 1;
         items[(next + items.length) % items.length].focus();
@@ -2355,6 +2467,16 @@
       send({ type: "login", on: page.login });
     });
     $("menu-quit").addEventListener("click", () => send({ type: "quit" }));
+    $("menu-update").addEventListener("click", () => send({ type: "offer_update" }));
+    $("settings-update").addEventListener("click", () => send({ type: "offer_update" }));
+    $("check-updates").addEventListener("click", checkUpdates);
+    $("update-form").addEventListener("submit", submitUpdate);
+    $("update-cancel").addEventListener("click", closeUpdate);
+    $("update-notes").addEventListener("click", () => send({ type: "open_notes" }));
+    $("update-dialog").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeUpdate();
+    });
     $("menu-hide").addEventListener("click", () => send({ type: "hide" }));
     const quick = {
       add: () => openRequest({ kind: "new" }),

@@ -34,7 +34,13 @@ mod macos {
     pub fn set(on: bool) -> io::Result<()> {
         let home = dirs::home_dir()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
-        set_at(&home, &std::env::current_exe()?, on)
+        let update_check = std::env::var("KV_UPDATE_CHECK").ok();
+        set_at(
+            &home,
+            &std::env::current_exe()?,
+            update_check.as_deref(),
+            on,
+        )
     }
 
     pub fn plist_path(home: &Path) -> PathBuf {
@@ -46,13 +52,16 @@ mod macos {
         plist_path(home).exists()
     }
 
-    pub fn set_at(home: &Path, exe: &Path, on: bool) -> io::Result<()> {
+    /// Writes (`on`) or removes the LaunchAgent under `home`. With
+    /// `update_check`, the tray it starts gets `KV_UPDATE_CHECK` set to it:
+    /// a login item does not see the shell profile.
+    pub fn set_at(home: &Path, exe: &Path, update_check: Option<&str>, on: bool) -> io::Result<()> {
         let path = plist_path(home);
         if on {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            std::fs::write(&path, plist(exe))
+            std::fs::write(&path, plist(exe, update_check))
         } else {
             match std::fs::remove_file(&path) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -61,8 +70,19 @@ mod macos {
         }
     }
 
-    /// A LaunchAgent that runs `<exe> tray` at login.
-    pub fn plist(exe: &Path) -> String {
+    /// A LaunchAgent that runs `<exe> tray` at login, with
+    /// `KV_UPDATE_CHECK` set to `update_check` when there is one.
+    pub fn plist(exe: &Path, update_check: Option<&str>) -> String {
+        let environment = update_check.map_or_else(String::new, |value| {
+            format!(
+                "\t<key>EnvironmentVariables</key>\n\
+                 \t<dict>\n\
+                 \t\t<key>KV_UPDATE_CHECK</key>\n\
+                 \t\t<string>{}</string>\n\
+                 \t</dict>\n",
+                escape(value)
+            )
+        });
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -80,6 +100,7 @@ mod macos {
              \t<true/>\n\
              \t<key>ProcessType</key>\n\
              \t<string>Interactive</string>\n\
+             {environment}\
              </dict>\n\
              </plist>\n",
             escape(&exe.to_string_lossy())

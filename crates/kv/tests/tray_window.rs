@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use kv::audit::Entry;
-use kv::tray::window::{FormRequest, FromPage, Stays, Tab, Theme, ToPage};
+use kv::tray::window::{FormRequest, FromPage, Stays, Tab, Theme, ToPage, UpdateKind};
 use kv::tui::app::ShareDone;
 use kv_core::proto::Verdict;
 use kv_core::secret::{SecretKind, SecretText};
@@ -103,6 +103,15 @@ fn what_the_page_sends_is_read() {
             FromPage::Login { on: true },
         ),
         (r#"{"type":"quit"}"#, FromPage::Quit),
+        (r#"{"type":"offer_update"}"#, FromPage::OfferUpdate),
+        (r#"{"type":"check_updates"}"#, FromPage::CheckUpdates),
+        (
+            r#"{"type":"install_update","version":"1.9.0"}"#,
+            FromPage::InstallUpdate {
+                version: "1.9.0".into(),
+            },
+        ),
+        (r#"{"type":"open_notes"}"#, FromPage::OpenNotes),
         (
             r#"{"type":"reveal","handle":"openrouter"}"#,
             FromPage::Reveal {
@@ -239,10 +248,38 @@ fn what_the_tray_sends_is_a_call_to_kv_receive() {
         overview: None,
         login: false,
         theme: Theme::Light,
+        version: "1.8.0".into(),
+        update: Some("1.9.0".into()),
     };
     assert_eq!(
         locked.script(),
-        r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null,"login":false,"theme":"light"})"#
+        r#"kv.receive({"type":"state","locked":true,"device":"Touch ID","waiting_for_device":false,"overview":null,"login":false,"theme":"light","version":"1.8.0","update":"1.9.0"})"#
+    );
+    assert_eq!(
+        ToPage::UpdateAsk {
+            version: "1.9.0".into(),
+            notes_url: "https://github.com/DFanso/key-vault-for-llm/releases/tag/v1.9.0".into(),
+        }
+        .script(),
+        r#"kv.receive({"type":"update_ask","version":"1.9.0","notes_url":"https://github.com/DFanso/key-vault-for-llm/releases/tag/v1.9.0"})"#
+    );
+    assert_eq!(
+        ToPage::UpdateResult {
+            kind: UpdateKind::Check,
+            ok: true,
+            message: "kv 1.8.0 is the latest.".into(),
+        }
+        .script(),
+        r#"kv.receive({"type":"update_result","kind":"check","ok":true,"message":"kv 1.8.0 is the latest."})"#
+    );
+    assert_eq!(
+        ToPage::UpdateResult {
+            kind: UpdateKind::Install,
+            ok: false,
+            message: "The download does not match its checksum.".into(),
+        }
+        .script(),
+        r#"kv.receive({"type":"update_result","kind":"install","ok":false,"message":"The download does not match its checksum."})"#
     );
     assert_eq!(ToPage::Hidden.script(), r#"kv.receive({"type":"hidden"})"#);
     assert_eq!(

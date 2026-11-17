@@ -286,6 +286,19 @@ pub enum FromPage {
         on: bool,
     },
     Quit,
+    /// Show the confirmation for the update on offer (the menu's line, or
+    /// Settings' button).
+    OfferUpdate,
+    /// Check for an update now (Settings). The page hears `UpdateResult`.
+    CheckUpdates,
+    /// Install the update on offer: the user agreed in the confirmation.
+    /// Only if it is still `version`, the one the confirmation showed.
+    InstallUpdate {
+        version: String,
+    },
+    /// Open the release notes of the update on offer in the browser. The
+    /// tray opens the address it has itself, never one from the page.
+    OpenNotes,
 }
 
 impl FromPage {
@@ -374,6 +387,10 @@ pub enum ToPage {
         /// Whether kv tray starts at login.
         login: bool,
         theme: Theme,
+        /// The version of kv running.
+        version: String,
+        /// The newer version on offer, if a check found one.
+        update: Option<String>,
     },
     Show {
         tab: Tab,
@@ -429,12 +446,35 @@ pub enum ToPage {
     ShareError {
         message: String,
     },
+    /// Ask whether to update to `version`, with what updating stops and a
+    /// link to its release notes.
+    UpdateAsk {
+        version: String,
+        notes_url: String,
+    },
+    /// How a check for updates, or an update, went: `kind` says which, so
+    /// the page shows it in Settings or in the confirmation.
+    UpdateResult {
+        kind: UpdateKind,
+        ok: bool,
+        message: String,
+    },
     /// What an action from the window came to; `request` names the card it
     /// belongs on.
     Message {
         text: String,
         request: Option<u64>,
     },
+}
+
+/// What an `UpdateResult` is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateKind {
+    /// A check Settings asked for.
+    Check,
+    /// An update the confirmation asked for.
+    Install,
 }
 
 impl ToPage {

@@ -7,10 +7,11 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::future::BoxFuture;
 use zeroize::Zeroizing;
 
 use kv_core::proto::{
@@ -18,10 +19,12 @@ use kv_core::proto::{
 };
 use kv_core::secret::{Secret, SecretText, SecretValue};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
 use super::model::{Action, Model, View};
-use super::notices::Notice;
-use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage};
+use super::notices::{self, Notice};
+use super::update::Updater;
+use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use crate::client;
 use crate::device::Device;
 use crate::forms::{self, Form, Purpose};
@@ -30,6 +33,8 @@ use crate::paths::Paths;
 use crate::sharefile;
 use crate::tui::app::{Effect, Outcome, ShareDone};
 use crate::tui::{DeviceAnswer, DevicePrompt, Driver, Proof};
+use crate::update::install::Installed;
+use crate::update::{self, Offer, UpdateError, check, state};
 use kv_core::envvars;
 use kv_core::import::{self, Format, Imported};
 use kv_core::policy::Policy;
@@ -43,6 +48,11 @@ const MAX_MESSAGE_SHARE: usize = 4000;
 
 /// What a Touch ID prompt from the tray says kv is trying to do.
 const REASON: &str = "open kv tray, where you approve agent requests";
+
+/// A check for an update, under way.
+type Check = BoxFuture<'static, Result<Option<Offer>, UpdateError>>;
+/// An update downloading and swapping in, under way.
+type Install = BoxFuture<'static, Result<Installed, UpdateError>>;
 
 /// What the worker needs from the desktop around it.
 pub trait Desktop: Send {
@@ -70,6 +80,8 @@ pub trait Desktop: Send {
     /// Takes a value `copy` put on the clipboard off it now, unless
     /// something else was copied since. Called as the tray quits.
     fn clear_copied(&self) {}
+    /// Opens `url` in the user's browser.
+    fn open_url(&self, _url: &str) {}
 }
 
 /// Who asked for something, and so hears how it went.
@@ -100,6 +112,9 @@ struct Window {
     tab: Tab,
     /// The open form, and what saving it means.
     form: Option<(Purpose, Form)>,
+    /// Whether the update confirmation was asked for, so a page that loads
+    /// late still shows it.
+    asking_update: bool,
 }
 
 pub struct Worker<D> {
@@ -124,10 +139,35 @@ pub struct Worker<D> {
     saved: Option<PathBuf>,
     /// The notification on show for each waiting request, by request id.
     posted: BTreeMap<u64, String>,
+    /// Checks for, and installs, a newer kv. Shared with the thread the
+    /// handover to a new tray runs on.
+    updater: Arc<dyn Updater>,
+    /// The newer kv the last check found.
+    offer: Option<Offer>,
+    /// When the next background check is due.
+    next_check: Instant,
+    /// Whether the tray checks in the background: only a release build,
+    /// which can update itself, and only with `KV_UPDATE_CHECK` not off.
+    auto_checks: bool,
+    /// Settings asked for a check that has not started yet.
+    check_wanted: bool,
+    /// Settings asked for the check under way or about to start, so its
+    /// answer goes there.
+    check_manual: bool,
+    /// The update the user agreed to, not started yet.
+    install_wanted: Option<Offer>,
+    /// An update is under way, from download to handover: a second one is
+    /// not started, and checks wait.
+    installing: bool,
 }
 
 impl<D: Desktop> Worker<D> {
-    pub fn new(paths: Paths, device: Option<Arc<dyn Device>>, desktop: D) -> Self {
+    pub fn new(
+        paths: Paths,
+        device: Option<Arc<dyn Device>>,
+        desktop: D,
+        updater: Box<dyn Updater>,
+    ) -> Self {
         Self {
             driver: Driver::with_device(paths.clone(), device).with_reason(REASON),
             theme: Theme::load(&paths.tray_theme_file()),
@@ -141,6 +181,15 @@ impl<D: Desktop> Worker<D> {
             overview: None,
             prompting: None,
             posted: BTreeMap::new(),
+            updater: Arc::from(updater),
+            offer: None,
+            next_check: Instant::now() + state::TRAY_FIRST,
+            auto_checks: update::is_release_build()
+                && update::checks_enabled(std::env::var_os("KV_UPDATE_CHECK").as_deref()),
+            check_wanted: false,
+            check_manual: false,
+            install_wanted: None,
+            installing: false,
         }
     }
 
@@ -186,13 +235,28 @@ impl<D: Desktop> Worker<D> {
             overview: self.overview.as_ref(),
             device: self.driver.device(),
             login: self.desktop.login_is_on(),
+            update: self.offer.as_ref().map(|offer| &offer.version),
         })
     }
 
-    /// Carries out one action, a device prompt included. Returns true for
-    /// Quit.
+    /// Carries out one action, a device prompt and a check for updates
+    /// included. Returns true for Quit.
     pub async fn act(&mut self, action: Action) -> bool {
-        match self.begin(action).await {
+        let mut next = self.begin(action).await;
+        if std::mem::take(&mut self.check_wanted) {
+            let found = self.updater.check().await.map_err(|e| e.to_string());
+            self.begin(Action::UpdateChecked(found)).await;
+        }
+        if let Some(offer) = self.install_wanted.take() {
+            let result = self.updater.install(offer).await;
+            if let Some(installed) = self.installed(result).await {
+                let handed = self.updater.restart(&installed);
+                if self.handed_over(handed) {
+                    next = Next::Quit;
+                }
+            }
+        }
+        match next {
             Next::Done => false,
             Next::Prompt(purpose) => {
                 let answer = self.ask(&purpose).await;
@@ -207,8 +271,9 @@ impl<D: Desktop> Worker<D> {
     }
 
     /// Shows a model every tick and after every action until Quit, or until
-    /// the UI drops its sender. A device prompt runs beside the loop, so the
-    /// icon and the window stay current while the user decides.
+    /// the UI drops its sender. A device prompt and a check for updates run
+    /// beside the loop, so the icon and the window stay current, and
+    /// requests are answered, while they do.
     pub async fn run(
         mut self,
         mut actions: UnboundedReceiver<Action>,
@@ -216,12 +281,44 @@ impl<D: Desktop> Worker<D> {
     ) {
         let mut tick = tokio::time::interval(TICK);
         let mut prompt = None;
+        // A check for an update, while one runs: in the background, or one
+        // Settings asked for.
+        let mut checking: Option<Check> = None;
+        // An update the user agreed to, while it downloads and swaps in;
+        // then the handover to a tray on the new kv, which waits and starts
+        // processes, so it runs on a thread of its own.
+        let mut installing: Option<Install> = None;
+        let mut handing_over: Option<JoinHandle<Result<(), String>>> = None;
         loop {
             tokio::select! {
                 answer = async { prompt.as_mut().expect("guarded").await }, if prompt.is_some() => {
                     prompt = None;
                     let purpose = self.prompting.take().unwrap_or(Prompting::Unlock(Asker::Menu));
                     self.finish_prompt(purpose, answer).await;
+                }
+                found = async { checking.as_mut().expect("guarded").await }, if checking.is_some() => {
+                    checking = None;
+                    let found = found.map_err(|e| e.to_string());
+                    self.begin(Action::UpdateChecked(found)).await;
+                }
+                result = async { installing.as_mut().expect("guarded").await }, if installing.is_some() => {
+                    installing = None;
+                    if let Some(installed) = self.installed(result).await {
+                        let updater = self.updater.clone();
+                        handing_over = Some(tokio::task::spawn_blocking(move || {
+                            updater.restart(&installed)
+                        }));
+                    }
+                }
+                handed = async { handing_over.as_mut().expect("guarded").await }, if handing_over.is_some() => {
+                    handing_over = None;
+                    let handed = handed.unwrap_or_else(|e| {
+                        Err(format!("The handover to the new kv tray stopped: {e}"))
+                    });
+                    if self.handed_over(handed) {
+                        self.withdraw_all();
+                        return;
+                    }
                 }
                 action = actions.recv() => {
                     let Some(action) = action else {
@@ -248,7 +345,18 @@ impl<D: Desktop> Worker<D> {
                         }
                     }
                 }
-                _ = tick.tick() => {}
+                _ = tick.tick() => {
+                    if checking.is_none() && !self.installing {
+                        checking = self.due_check();
+                    }
+                }
+            }
+            // Settings asked for a check: one already under way answers it.
+            if std::mem::take(&mut self.check_wanted) && checking.is_none() {
+                checking = Some(self.updater.check());
+            }
+            if let Some(offer) = self.install_wanted.take() {
+                installing = Some(self.updater.install(offer));
             }
             show(self.model().await);
         }
@@ -281,6 +389,15 @@ impl<D: Desktop> Worker<D> {
             }
             Action::Lock => self.lock(Asker::Menu).await,
             Action::Open(tab) => return self.open(tab),
+            // The notification that a new kv is out. One left from before
+            // the tray restarted, with nothing on offer yet, opens kv.
+            Action::Notice { key, verdict: None } if key.starts_with(notices::UPDATE_PREFIX) => {
+                if self.offer.is_some() {
+                    self.offer_update();
+                } else {
+                    self.open_window(Tab::Home);
+                }
+            }
             Action::Notice { key, verdict } => {
                 let id = self
                     .posted
@@ -317,6 +434,11 @@ impl<D: Desktop> Worker<D> {
                 }
             }
             Action::Quit => return Next::Quit,
+            Action::OfferUpdate => self.offer_update(),
+            Action::UpdateChecked(found) => {
+                let manual = std::mem::take(&mut self.check_manual);
+                self.checked(found, manual);
+            }
         }
         Next::Done
     }
@@ -336,7 +458,13 @@ impl<D: Desktop> Worker<D> {
         let opening = self.window.is_none();
         match &mut self.window {
             Some(window) => window.tab = tab,
-            None => self.window = Some(Window { tab, form: None }),
+            None => {
+                self.window = Some(Window {
+                    tab,
+                    form: None,
+                    asking_update: false,
+                })
+            }
         }
         self.desktop.show_window(tab);
         self.desktop.page(ToPage::Show { tab });
@@ -353,12 +481,14 @@ impl<D: Desktop> Worker<D> {
             self.window = Some(Window {
                 tab: Tab::Approvals,
                 form: None,
+                asking_update: false,
             });
         }
         let Some(window) = &self.window else {
             return Next::Done;
         };
         let tab = window.tab;
+        let asking_update = window.asking_update;
         match message {
             FromPage::Ready => {
                 self.desktop.page(ToPage::Show { tab });
@@ -366,6 +496,9 @@ impl<D: Desktop> Worker<D> {
                 if let Some((_, form)) = self.form() {
                     let view = forms::describe(form);
                     self.desktop.page(ToPage::Form { view });
+                }
+                if asking_update && let Some(offer) = &self.offer {
+                    self.desktop.page(update_ask(offer));
                 }
                 if shows_audit(tab) {
                     self.send_audit().await;
@@ -498,8 +631,230 @@ impl<D: Desktop> Worker<D> {
                 self.send_state();
             }
             FromPage::Quit => return Next::Quit,
+            FromPage::OfferUpdate => self.offer_update(),
+            // Started by `run` beside its loop (or by `act`), not here: a
+            // slow answer must not hold up anything else.
+            FromPage::CheckUpdates if self.installing => {
+                self.desktop.page(ToPage::UpdateResult {
+                    kind: UpdateKind::Check,
+                    ok: false,
+                    message: "An update is being installed now.".into(),
+                });
+            }
+            FromPage::CheckUpdates => {
+                self.check_wanted = true;
+                self.check_manual = true;
+            }
+            FromPage::InstallUpdate { version } => self.install_update(&version),
+            // Only an https page on GitHub: the address came from GitHub's
+            // answer, and the system opens whatever scheme it is given.
+            FromPage::OpenNotes => {
+                if let Some(offer) = &self.offer
+                    && url::Url::parse(&offer.notes_url).is_ok_and(|u| check::allowed_url(&u))
+                {
+                    self.desktop.open_url(&offer.notes_url);
+                }
+            }
         }
         Next::Done
+    }
+
+    /// A background check, if one is due: the first a few minutes after
+    /// the tray starts, then twice a day.
+    fn due_check(&mut self) -> Option<Check> {
+        let now = Instant::now();
+        if now < self.next_check {
+            return None;
+        }
+        self.next_check = now + state::TRAY_EVERY;
+        self.auto_checks.then(|| self.updater.check())
+    }
+
+    /// Takes in what a check `found`, and remembers it. A newer kv found
+    /// in the background is announced once per version; one found by hand
+    /// (`manual`) is told in Settings instead. A failed check in the
+    /// background says nothing and keeps what was found before.
+    fn checked(&mut self, found: Result<Option<Offer>, String>, manual: bool) {
+        let file = self.paths.update_state_file();
+        let mut remembered = state::load(&file);
+        remembered.last_check = Some(unix_now());
+        if let Ok(offer) = &found {
+            remembered.latest = offer.as_ref().map(|o| o.version.to_string());
+            // One being installed decides what is left to offer.
+            if !self.installing {
+                self.offer = offer.clone();
+            }
+        }
+        if let Ok(Some(offer)) = &found
+            && !self.installing
+        {
+            let version = offer.version.to_string();
+            if remembered.announced.as_deref() != Some(&version) {
+                if !manual {
+                    self.announce(&offer.version);
+                }
+                remembered.announced = Some(version);
+            }
+        }
+        let _ = file.parent().map(std::fs::create_dir_all);
+        let _ = state::save(&file, &remembered);
+        // The page hears what is on offer first, then how the check went.
+        self.send_state();
+        if manual {
+            let (ok, message) = match &found {
+                Ok(Some(offer)) => (true, format!("kv {} is out.", offer.version)),
+                Ok(None) => (
+                    true,
+                    format!("kv {} is the latest.", update::current_version()),
+                ),
+                Err(e) => (false, format!("{}.", sentence(e))),
+            };
+            self.desktop.page(ToPage::UpdateResult {
+                kind: UpdateKind::Check,
+                ok,
+                message,
+            });
+        }
+    }
+
+    /// Tells the user kv `version` is out: as a notification whose click
+    /// opens the confirmation where kv.app posts them, else a plain one.
+    fn announce(&self, version: &semver::Version) {
+        let notice = Notice::update(version);
+        if self.desktop.can_notify() {
+            self.desktop.post(&notice);
+        } else {
+            self.desktop
+                .notify(&format!("{}. {}", notice.title, notice.body));
+        }
+    }
+
+    /// Opens kv's window on Home with the confirmation for the update on
+    /// offer. It does not ask to unlock: updating needs no session.
+    fn offer_update(&mut self) {
+        let Some(offer) = &self.offer else {
+            return;
+        };
+        let ask = update_ask(offer);
+        self.open_window(Tab::Home);
+        if let Some(window) = &mut self.window {
+            window.asking_update = true;
+        }
+        self.desktop.page(ask);
+    }
+
+    /// Starts installing the update on offer, which the user agreed to:
+    /// only if it is still `confirmed`, the version the confirmation showed.
+    /// The download and swap run beside the loop (see `run`), and
+    /// [`installed`](Self::installed) takes over when they end. A second
+    /// request while one runs is dropped: the page hears how the first went.
+    fn install_update(&mut self, confirmed: &str) {
+        if self.installing {
+            return;
+        }
+        if let Some(window) = &mut self.window {
+            window.asking_update = false;
+        }
+        let Some(offer) = self.offer.clone() else {
+            self.install_result(false, "There is no update on offer now.".into());
+            return;
+        };
+        if offer.version.to_string() != confirmed {
+            // A check found another version while the confirmation was
+            // open: ask again, about this one.
+            self.offer_update();
+            self.install_result(
+                false,
+                format!(
+                    "The update on offer is kv {} now, not {confirmed}. Choose Update to \
+                     install it.",
+                    offer.version
+                ),
+            );
+            return;
+        }
+        self.installing = true;
+        self.install_wanted = Some(offer);
+    }
+
+    /// Takes in how the download and swap went. Once the new kv is in
+    /// place the daemon stops (which locks the vault), and the answer is
+    /// what to hand over to: a tray on the new binary, which then takes
+    /// over while this one quits (see [`handed_over`](Self::handed_over)).
+    /// If the install failed nothing has changed; if the daemon did not
+    /// stop, this tray keeps running and says what to do.
+    async fn installed(&mut self, result: Result<Installed, UpdateError>) -> Option<Installed> {
+        let installed = match result {
+            Ok(installed) => installed,
+            // An earlier update from this tray went in, but its handover
+            // did not: nothing is left to install.
+            Err(UpdateError::AlreadyInstalled(version)) => {
+                self.installing = false;
+                self.offer = None;
+                self.send_state();
+                self.install_result(
+                    false,
+                    format!(
+                        "kv {version} is already installed. Quit kv tray and start it again to \
+                         finish the update."
+                    ),
+                );
+                return None;
+            }
+            Err(e) => {
+                self.installing = false;
+                self.install_result(false, format!("{}.", sentence(&e.to_string())));
+                return None;
+            }
+        };
+        // The new kv is in place: nothing is left to offer.
+        self.offer = None;
+        // A daemon left running would stay on the old binary, perhaps
+        // unlocked, beside a new tray: hand over only once it has stopped.
+        if let Outcome::Failed(_) = self.driver.stop().await {
+            let message = format!(
+                "kv {} is installed, but the kv daemon didn't stop. Run `kv stop`, then quit kv \
+                 tray and start it again. {}",
+                installed.version,
+                crate::update::swap::way_back(&installed.swapped)
+            );
+            self.installing = false;
+            self.update_failed(message);
+            return None;
+        }
+        Some(installed)
+    }
+
+    /// Takes in how the handover went: true if a tray on the new kv took
+    /// over and this one should quit; otherwise it keeps running and says
+    /// what to do.
+    fn handed_over(&mut self, handed: Result<(), String>) -> bool {
+        self.installing = false;
+        match handed {
+            Ok(()) => true,
+            Err(message) => {
+                self.update_failed(message);
+                false
+            }
+        }
+    }
+
+    /// Tells the window and the user that an update went in but this tray
+    /// could not hand over, and why; this tray keeps running.
+    fn update_failed(&self, message: String) {
+        // With nothing left to offer, and locked if the daemon stopped.
+        self.send_state();
+        self.install_result(false, message.clone());
+        self.desktop.notify(&message);
+    }
+
+    /// Tells the confirmation how the update it asked for went.
+    fn install_result(&self, ok: bool, message: String) {
+        self.desktop.page(ToPage::UpdateResult {
+            kind: UpdateKind::Install,
+            ok,
+            message,
+        });
     }
 
     /// Saves the open form with what the page sent. The form stays open,
@@ -954,6 +1309,8 @@ impl<D: Desktop> Worker<D> {
             overview: self.overview.clone(),
             login: self.desktop.login_is_on(),
             theme: self.theme,
+            version: update::current_version().to_string(),
+            update: self.offer.as_ref().map(|offer| offer.version.to_string()),
         });
     }
 
@@ -963,6 +1320,20 @@ impl<D: Desktop> Worker<D> {
             other => self.report(Asker::Window, other, None),
         }
     }
+}
+
+/// The confirmation for `offer`.
+fn update_ask(offer: &Offer) -> ToPage {
+    ToPage::UpdateAsk {
+        version: offer.version.to_string(),
+        notes_url: offer.notes_url.clone(),
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Whether the window's `tab` shows audit entries: Home's latest
