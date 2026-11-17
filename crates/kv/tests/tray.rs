@@ -170,6 +170,24 @@ fn hold_lock(paths: &Paths, secs: u32) -> String {
     )
 }
 
+/// A shell command that takes the tray lock in the background, waits until
+/// it is really held (a slow machine can take a while to start perl), then
+/// exits: a successor that is gone but whose child keeps the lock.
+#[cfg(unix)]
+fn leave_lock_held(paths: &Paths, secs: u32, dir: &std::path::Path) -> String {
+    let held = dir.join("held");
+    format!(
+        "perl -e 'use Fcntl qw(:flock); open(my $f, \">>\", $ARGV[0]) or die; \
+         flock($f, LOCK_EX|LOCK_NB) or die; open(my $h, \">\", $ARGV[1]) or die; close($h); \
+         sleep {secs}' '{}' '{}' &\n\
+         i=0; while [ ! -e '{held}' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done\n\
+         exit 1",
+        paths.tray_lock_file().display(),
+        held.display(),
+        held = held.display(),
+    )
+}
+
 /// How the old tray starts each successor.
 #[cfg(unix)]
 fn started(paths: &Paths) -> String {
@@ -257,7 +275,7 @@ fn a_lock_that_cannot_be_taken_back_is_said() {
     let lock = Arc::new(Mutex::new(Some(lock_single(&paths).unwrap())));
     // Gone for good: never ready, and keeps the lock past the old tray's
     // few seconds of trying.
-    let body = format!("({}) & exit 1", hold_lock(&paths, 8));
+    let body = leave_lock_held(&paths, 8, home.path());
     let exe = successor(home.path(), &body);
     let error =
         restart_after_update(&lock, &installed(&exe), &paths, Duration::from_secs(1)).unwrap_err();
