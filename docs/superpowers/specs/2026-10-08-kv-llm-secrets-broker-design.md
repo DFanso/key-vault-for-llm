@@ -591,10 +591,12 @@ or unscrubbed paths.
 ## 7. Distribution
 
 `cargo install --path crates/kv`, or prebuilt binaries built by
-`cargo-dist` (0.33) on GitHub Releases when a version tag (`v1.8.0`) is
+`cargo-dist` (0.33) on GitHub Releases when a version tag (`v1.9.0`) is
 pushed: macOS (arm64, x86_64), Linux (x86_64, arm64, glibc) and Windows
 (x86_64, MSVC), with shell and PowerShell installers that put `kv` in
-`~/.cargo/bin` and no updater. The binaries are not code-signed or
+`~/.cargo/bin`. From 1.9.0, release builds check GitHub Releases
+for a newer kv and install it when the user agrees (see
+`2026-11-16-kv-self-update-design.md`). The binaries are not code-signed or
 notarized; installers fetch with `curl`/`irm`, which macOS does not
 quarantine.
 
