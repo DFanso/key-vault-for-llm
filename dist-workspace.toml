@@ -19,6 +19,8 @@ hosting = "github"
 install-updater = false
 # Release builds may update themselves; source builds may not.
 features = ["release-build"]
+# Steps before each build: on macOS, sign kv with the hardened runtime.
+github-build-setup = "../build-setup.yml"
 
 # Actions in the generated release workflow, pinned to the commits of the
 # tags dist uses. Update them together with cargo-dist-version.

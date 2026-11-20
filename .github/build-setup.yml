@@ -1,0 +1,18 @@
+# Steps cargo-dist runs on each build runner before `dist build`
+# (github-build-setup in dist-workspace.toml; the path is relative to
+# .github/workflows). Regenerate release.yml with `dist generate --mode ci`
+# after changing this file.
+
+# macOS: sign kv with the hardened runtime as it is linked; see
+# .github/macos-link-and-sign.sh.
+- name: Sign kv with the hardened runtime (macOS)
+  if: runner.os == 'macOS'
+  shell: bash
+  run: |
+    linker="$GITHUB_WORKSPACE/.github/macos-link-and-sign.sh"
+    chmod +x "$linker"
+    {
+      echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$linker"
+      echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$linker"
+      echo "CARGO_PROFILE_DIST_STRIP=none"
+    } >> "$GITHUB_ENV"

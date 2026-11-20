@@ -110,10 +110,13 @@ pub fn update(
     Ok(bundled)
 }
 
-/// Signs `app` ad hoc, which binds its Info.plist and resources to it.
+/// Signs `app` ad hoc, which binds its Info.plist and resources to it, with
+/// the hardened runtime, as release builds of kv are: macOS then ignores
+/// DYLD_* variables for kv.app and refuses debuggers, so nothing can be loaded
+/// into the helper whose answers the tray acts on.
 pub fn sign(app: &Path) -> io::Result<()> {
     let output = Command::new("/usr/bin/codesign")
-        .args(["--force", "--sign", "-"])
+        .args(["--force", "--options", "runtime", "--sign", "-"])
         .arg(app)
         .output()?;
     if output.status.success() {
@@ -244,5 +247,28 @@ mod tests {
         update(&app, &exe, count).unwrap();
         assert_eq!(fs::read(&bundled).unwrap(), b"second build");
         assert_eq!(signed.get(), 3);
+    }
+
+    #[test]
+    fn the_app_is_signed_with_the_hardened_runtime() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let program = dir.path().join("helper");
+        fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        sign(&program).unwrap();
+        let shown = Command::new("/usr/bin/codesign")
+            .args(["--display", "--verbose=2"])
+            .arg(&program)
+            .output()
+            .unwrap();
+        // codesign prints what it shows on stderr.
+        let shown = String::from_utf8_lossy(&shown.stderr);
+        let flags = shown
+            .lines()
+            .find(|line| line.starts_with("CodeDirectory"))
+            .unwrap_or_default();
+        assert!(
+            flags.contains("adhoc") && flags.contains("runtime"),
+            "{shown}"
+        );
     }
 }
