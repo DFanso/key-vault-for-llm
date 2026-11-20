@@ -200,9 +200,36 @@ not only device keys: the passphrase (`kv unlock`, `kv tui`, `kv tray`), a
 session token, and secret values (`add`, `update`, `edit_vars`,
 `change_passphrase`, `enroll_device`). Only a bare `lock` or `stop`, with no
 credential, goes to the socket unchecked, so `kv stop` can still end a daemon
-left running from a kv binary that has since been replaced. A process that
-holds the socket first, started before the daemon or put in place of a stale
-socket, therefore gets no passphrase when the user unlocks.
+left running from a kv binary that has since been replaced.
+
+The peer pid alone does not show who holds the connection. On Linux
+`SO_PEERCRED` names the process that called `listen()`, as recorded then; on
+macOS `LOCAL_PEERPID` (and `LOCAL_PEERTOKEN`, which is read from that pid
+when asked) names the last process to read, write or poll the socket. A
+program could listen, hand the socket to a child that accepts, and then exec
+kv, or have a kv process touch the socket. So the client also requires:
+
+- that the peer runs as `kv daemon --runtime-dir <dir>` for the client's own
+  runtime directory (`/proc/<pid>/cmdline`, `KERN_PROCARGS2`). A daemon
+  started without the option execs itself again with it;
+- on Linux, that the listener was bound at exactly the endpoint path
+  (`getpeername`) and is the only listener bound there (`/proc/net/unix`). A
+  starting daemon binds the path afresh, so a listener made earlier and
+  renamed or linked into place is either at another path or a second one;
+- on macOS, that the peer process has the server end of this very
+  connection open (`proc_pidinfo` and `proc_pidfdinfo` socket handles), and
+  `kv daemon` points stdin, stdout and stderr at `/dev/null` when they are
+  sockets, before anything touches them.
+
+What this does not stop, being the same-user process of the threat model:
+code running inside a real kv daemon (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`
+on binaries without the hardened runtime, a debugger); a process that
+starts a real daemon for the user's runtime directory as its own traced
+child and holds it at exec (Linux allows a parent to trace its child with
+the default `ptrace_scope` 1), or suspends it before it binds its socket; and
+on Windows, where the check is the program of the process that created the
+pipe instance, a reused process id. On Windows there is no exec, so the
+listen-then-exec case does not arise.
 
 ### Secret model
 

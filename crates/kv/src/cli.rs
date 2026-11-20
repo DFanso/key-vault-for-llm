@@ -153,6 +153,11 @@ enum Command {
             value_parser = clap::builder::ValueParser::new(notify_sound)
         )]
         notify_sound: crate::notify::Sound,
+        /// The runtime directory this daemon serves, so clients can check
+        /// the process at the socket is the daemon for theirs. Added by the
+        /// daemon itself when missing.
+        #[arg(long = "runtime-dir", hide = true)]
+        runtime_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -345,6 +350,14 @@ impl From<io::Error> for CliError {
 type Result<T> = std::result::Result<T, CliError>;
 
 pub fn main() -> ExitCode {
+    // Before anything can read, write or poll them: see detach_std_sockets.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "daemon")
+    {
+        crate::ipc::detach_std_sockets();
+    }
     // kv.app is kv tray's notification helper and nothing else: opened from
     // Finder, by a click on a notification after the tray quit, or by any
     // other program, it runs nothing, and starts no other binary.
@@ -451,6 +464,35 @@ fn notify_sound(
     Ok(crate::notify::or_default("KV_NOTIFY_SOUND", value))
 }
 
+/// Checks that `--runtime-dir` names the directory this daemon serves. A
+/// daemon started without it, by hand or by a service manager, starts
+/// itself again with it on Unix, where clients read it from the daemon's
+/// arguments to tell the daemon for their directory from any other process.
+fn daemon_serves(paths: &Paths, runtime_dir: Option<std::path::PathBuf>) -> Result<()> {
+    paths.ensure_runtime_dir()?;
+    match runtime_dir {
+        Some(dir) if crate::ipc::same_file(&dir, &paths.runtime) => Ok(()),
+        Some(dir) => Err(CliError(format!(
+            "{} is not the runtime directory of this kv ({}); KV_HOME may differ",
+            dir.display(),
+            paths.runtime.display()
+        ))),
+        #[cfg(unix)]
+        None => {
+            use std::os::unix::process::CommandExt;
+            let runtime = std::path::absolute(&paths.runtime)?;
+            let error = std::process::Command::new(crate::update::swap::running_exe()?)
+                .args(std::env::args_os().skip(1))
+                .arg(crate::ipc::RUNTIME_DIR_FLAG)
+                .arg(runtime)
+                .exec();
+            Err(CliError(format!("could not restart the daemon: {error}")))
+        }
+        #[cfg(not(unix))]
+        None => Ok(()),
+    }
+}
+
 async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::from_env()?;
     let mut input = Input::new();
@@ -461,7 +503,9 @@ async fn run(cli: Cli) -> Result<()> {
             autostart,
             notify,
             notify_sound,
+            runtime_dir,
         } => {
+            daemon_serves(&paths, runtime_dir)?;
             let outcome = daemon::run(
                 paths,
                 Settings {

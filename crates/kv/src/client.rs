@@ -163,7 +163,7 @@ pub async fn control(
 ) -> io::Result<ControlResponse> {
     let endpoint = paths.control_endpoint();
     let mut stream = connect(&endpoint, autostart).await?;
-    verified(&stream, &endpoint, request)?;
+    verified(&stream, &endpoint, paths, request).await?;
     exchange(&mut stream, request).await
 }
 
@@ -178,7 +178,7 @@ pub async fn control_if_running(
     let Some(mut stream) = connect_if_running(&endpoint).await? else {
         return Ok(None);
     };
-    verified(&stream, &endpoint, request)?;
+    verified(&stream, &endpoint, paths, request).await?;
     exchange(&mut stream, request).await.map(Some)
 }
 
@@ -195,35 +195,29 @@ fn carries_nothing_secret(request: &ControlRequest) -> bool {
 }
 
 /// Refuses to send `request` unless it carries nothing secret or the
-/// process at the other end of `stream` is this user's, running this same
-/// kv program.
-fn verified(
+/// process serving `stream` is the kv daemon for `paths` (see
+/// `ipc::check_server`).
+async fn verified(
     stream: &ClientStream,
     endpoint: &Endpoint,
+    paths: &Paths,
     request: &ControlRequest,
 ) -> io::Result<()> {
     if carries_nothing_secret(request) {
         return Ok(());
     }
-    let refused = |why: String| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "{why}, so kv sent it nothing; if it is an older kv, run `kv stop`, \
-                 otherwise stop that process, and try again"
-            ),
-        )
-    };
-    match ipc::server_is_this_program(stream) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(theirs)) => Err(refused(format!(
-            "the process at the kv socket ({endpoint}) runs {}, not this kv",
-            theirs.display()
-        ))),
-        Err(e) => Err(refused(format!(
-            "could not check the process at the kv socket ({endpoint}): {e}; it may not be this kv"
-        ))),
-    }
+    ipc::check_server(stream, endpoint, &paths.runtime)
+        .await
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the process at the kv socket ({endpoint}) is not this kv's daemon: {e}; \
+                     kv sent it nothing. If it is an older kv, run `kv stop`, otherwise \
+                     stop that process, and try again"
+                ),
+            )
+        })
 }
 
 /// Sends one agent request without starting the daemon: `Ok(None)` when none
