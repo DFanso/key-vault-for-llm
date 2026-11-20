@@ -53,10 +53,21 @@ pub fn cleanup(endpoint: &Endpoint) {
     let _ = fs::remove_file(&endpoint.path);
 }
 
-/// The program the process at the other end of `stream` runs.
+/// The program the process at the other end of `stream` runs. Fails when
+/// that process belongs to another user.
 pub fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
-    let pid = stream
-        .peer_cred()?
+    let cred = stream.peer_cred()?;
+    let me = rustix::process::getuid().as_raw();
+    if cred.uid() != me {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the process at the socket runs as user {}, not as this user",
+                cred.uid()
+            ),
+        ));
+    }
+    let pid = cred
         .pid()
         .ok_or_else(|| io::Error::other("the system did not say which process is at the socket"))?;
     program_of(pid)

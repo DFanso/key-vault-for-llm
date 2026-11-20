@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use kv_core::proto::{
-    AgentRequest, AgentResponse, ControlRequest, ControlResponse, MAX_RUN_CHUNK, RunCall, RunInput,
-    RunOutput, SessionInfo,
+    AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse, MAX_RUN_CHUNK,
+    RunCall, RunInput, RunOutput, SessionInfo,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -148,50 +148,82 @@ pub async fn run_stream(
     }))
 }
 
-/// Sends one control request. One that carries a Touch ID or Windows Hello
-/// key goes only to a daemon running this same kv: the key opens the vault
-/// for as long as the device stays enrolled, and anything could be
-/// listening at the socket (after `kv stop`, or under another `KV_HOME`).
+/// Sends one control request, starting the daemon if `autostart` says to.
+///
+/// Every control request but a bare `lock` or `stop` carries something
+/// secret: the passphrase, a session token, a Touch ID or Windows Hello
+/// key, or secret values. Such a request goes only to a daemon running this
+/// same kv (see [`verified`]), since anything running as the user could be
+/// listening at the socket: started before the daemon, left there after
+/// `kv stop`, or put there in place of a stale socket.
 pub async fn control(
     paths: &Paths,
     request: &ControlRequest,
     autostart: bool,
 ) -> io::Result<ControlResponse> {
-    let mut stream = connect(&paths.control_endpoint(), autostart).await?;
-    if request.device.is_some() {
-        check_daemon(&stream)?;
-    }
+    let endpoint = paths.control_endpoint();
+    let mut stream = connect(&endpoint, autostart).await?;
+    verified(&stream, &endpoint, request)?;
     exchange(&mut stream, request).await
 }
 
-fn check_daemon(stream: &ClientStream) -> io::Result<()> {
-    let refused = |why: String| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{why}, so kv did not send it the unlock key; run `kv stop` and try again"),
-        )
-    };
-    match ipc::runs_this_program(stream) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(refused(
-            "the process at the kv socket is not this kv program".into(),
-        )),
-        Err(e) => Err(refused(format!(
-            "could not check the process at the kv socket ({e})"
-        ))),
-    }
-}
-
-/// For `lock` and `stop`: `Ok(None)` when no daemon is running, which is
-/// the only connect failure that means there is nothing to do.
+/// For `lock` and `stop`, and for `kv tui`, which must not start a daemon:
+/// `Ok(None)` when no daemon is running, which is the only connect failure
+/// that means there is nothing to do. Checked as [`control`] is.
 pub async fn control_if_running(
     paths: &Paths,
     request: &ControlRequest,
 ) -> io::Result<Option<ControlResponse>> {
-    let Some(mut stream) = connect_if_running(&paths.control_endpoint()).await? else {
+    let endpoint = paths.control_endpoint();
+    let Some(mut stream) = connect_if_running(&endpoint).await? else {
         return Ok(None);
     };
+    verified(&stream, &endpoint, request)?;
     exchange(&mut stream, request).await.map(Some)
+}
+
+/// Whether `request` may go to whatever holds the control socket without
+/// first checking that it is the kv daemon: only a `lock` or `stop` with no
+/// credential at all, which tells the other end nothing. They stay
+/// unchecked so `kv stop` still ends a daemon left running from a kv binary
+/// that has since been replaced, which the check cannot recognise.
+fn carries_nothing_secret(request: &ControlRequest) -> bool {
+    request.passphrase.is_none()
+        && request.device.is_none()
+        && request.token.is_none()
+        && matches!(request.command, ControlCommand::Lock | ControlCommand::Stop)
+}
+
+/// Refuses to send `request` unless it carries nothing secret or the
+/// process at the other end of `stream` is this user's, running this same
+/// kv program.
+fn verified(
+    stream: &ClientStream,
+    endpoint: &Endpoint,
+    request: &ControlRequest,
+) -> io::Result<()> {
+    if carries_nothing_secret(request) {
+        return Ok(());
+    }
+    let refused = |why: String| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{why}, so kv sent it nothing; if it is an older kv, run `kv stop`, \
+                 otherwise stop that process, and try again"
+            ),
+        )
+    };
+    match ipc::server_is_this_program(stream) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(theirs)) => Err(refused(format!(
+            "the process at the kv socket ({endpoint}) runs {}, not this kv",
+            theirs.display()
+        ))),
+        Err(e) => Err(refused(format!(
+            "could not check the process at the kv socket ({endpoint}): {e}; it may not be this kv"
+        ))),
+    }
 }
 
 /// Sends one agent request without starting the daemon: `Ok(None)` when none

@@ -1,6 +1,8 @@
 //! `kv mcp` end to end: a real MCP client drives the `kv` binary, which
 //! talks to a real daemon in a temporary `KV_HOME`.
 
+mod raw;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -308,7 +310,7 @@ async fn an_ask_handle_waits_for_approval_and_shows_the_client() {
             command,
         };
         let paths = paths.clone();
-        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+        async move { raw::control(&paths, &request).await.unwrap() }
     };
     let token = match control(None, Some(PASS), ControlCommand::OpenSession).await {
         ControlResponse::Session { token } => token,
@@ -383,7 +385,7 @@ async fn an_agent_asks_for_a_handle_it_does_not_have() {
             command,
         };
         let paths = paths.clone();
-        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+        async move { raw::control(&paths, &request).await.unwrap() }
     };
     let token = match send(None, Some(PASS), ControlCommand::OpenSession).await {
         ControlResponse::Session { token } => token,
@@ -569,7 +571,7 @@ async fn a_client_without_initialize_is_named_from_its_request() {
             command,
         };
         let paths = paths.clone();
-        async move { kv::client::control(&paths, &request, false).await.unwrap() }
+        async move { raw::control(&paths, &request).await.unwrap() }
     };
     let token = match control(None, Some(PASS), ControlCommand::OpenSession).await {
         ControlResponse::Session { token } => token,
@@ -614,7 +616,6 @@ fn code_after(text: &str, prefix: &str) -> String {
 /// Neither agent ever sees the token.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_secret_is_shared_between_two_vaults_through_their_agents() {
-    use kv::client;
     use kv::paths::Paths;
     use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
     use kv_core::secret::SecretText;
@@ -660,7 +661,7 @@ async fn a_secret_is_shared_between_two_vaults_through_their_agents() {
                 token,
                 command,
             };
-            client::control(&paths, &request, false).await.unwrap()
+            raw::control(&paths, &request).await.unwrap()
         }
     };
     let approve = async {
@@ -744,7 +745,6 @@ async fn a_secret_is_shared_between_two_vaults_through_their_agents() {
 /// send, Bob's agent hands the path back, and Bob saves exactly the bytes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_is_shared_between_two_vaults_as_an_encrypted_attachment() {
-    use kv::client;
     use kv::paths::Paths;
     use kv_core::proto::{ControlCommand, ControlRequest, ControlResponse, Verdict};
     use kv_core::secret::{SecretText, SecretValue};
@@ -800,7 +800,7 @@ async fn a_file_is_shared_between_two_vaults_as_an_encrypted_attachment() {
                 token,
                 command,
             };
-            client::control(&paths, &request, false).await.unwrap()
+            raw::control(&paths, &request).await.unwrap()
         }
     };
     let approve = async {

@@ -5,7 +5,7 @@
 //! `bind`, `connect`, `cleanup` and `server_program`.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 mod unix;
@@ -19,10 +19,16 @@ pub use windows::*;
 
 /// Whether the process at the other end of `stream` runs this same program,
 /// so a client can tell the kv daemon from anything else listening where
-/// it should be.
-pub fn runs_this_program(stream: &ClientStream) -> io::Result<bool> {
+/// it should be. `Ok(Err(program))` names the program it runs instead.
+/// The process must also belong to the current user: `server_program`
+/// checks that on Unix, and `connect` checks the pipe's owner on Windows.
+pub fn server_is_this_program(stream: &ClientStream) -> io::Result<Result<(), PathBuf>> {
     let theirs = server_program(stream)?;
-    Ok(same_file(&theirs, &crate::update::swap::running_exe()?))
+    if same_file(&theirs, &crate::update::swap::running_exe()?) {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(theirs))
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {

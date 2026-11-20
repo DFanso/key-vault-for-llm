@@ -185,14 +185,24 @@ tui` under a pseudo-terminal. Two things keep that from handing it the
 vault: the client sends a device key only to a daemon running the same
 program (the control socket's peer process, `LOCAL_PEERPID` and
 `proc_pidpath` on macOS, `SO_PEERCRED` and `/proc/<pid>/exe` on Linux,
-`GetNamedPipeServerProcessId` on Windows, against `current_exe`), so a
-listener the agent put at the socket gets nothing; and each Touch ID prompt
+`GetNamedPipeServerProcessId` on Windows, against `current_exe`, and owned
+by the same user), so a listener the agent put at the socket gets nothing;
+and each Touch ID prompt
 names the change ("remove the handle prod-db from the kv vault", "open kv
 tui, where you approve agent requests"), so the user can cancel one they did
 not start. Windows Hello cannot show such text, and nothing ties its
 credential to kv, so another program the user lets pass a Hello prompt can
 derive the same key; the README says to cancel Hello prompts you did not
 start and to prefer the passphrase where agents run unattended.
+
+The same check covers every control request that carries anything secret,
+not only device keys: the passphrase (`kv unlock`, `kv tui`, `kv tray`), a
+session token, and secret values (`add`, `update`, `edit_vars`,
+`change_passphrase`, `enroll_device`). Only a bare `lock` or `stop`, with no
+credential, goes to the socket unchecked, so `kv stop` can still end a daemon
+left running from a kv binary that has since been replaced. A process that
+holds the socket first, started before the daemon or put in place of a stale
+socket, therefore gets no passphrase when the user unlocks.
 
 ### Secret model
 

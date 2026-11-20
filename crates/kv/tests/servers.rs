@@ -2,11 +2,12 @@
 //! whose daemon starts this test binary as an MCP server; the `helper` test
 //! is that server when `KV_SERVERS_HELPER` is set.
 
+mod raw;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kv::client;
 use kv::paths::Paths;
 use kv_core::proto::{Approval, ControlCommand, ControlRequest, ControlResponse, Verdict};
 use kv_core::secret::SecretText;
@@ -388,8 +389,7 @@ async fn waiting_approval(paths: &Paths, token: &SecretText) -> Approval {
             token: Some(token.clone()),
             command: ControlCommand::Overview,
         };
-        if let ControlResponse::Overview { overview } =
-            client::control(paths, &request, false).await.unwrap()
+        if let ControlResponse::Overview { overview } = raw::control(paths, &request).await.unwrap()
             && let Some(approval) = overview.approvals.into_iter().next()
         {
             return approval;
@@ -410,8 +410,7 @@ async fn an_ask_server_can_be_allowed_for_the_session() {
         token: None,
         command: ControlCommand::OpenSession,
     };
-    let ControlResponse::Session { token } = client::control(&paths, &open, false).await.unwrap()
-    else {
+    let ControlResponse::Session { token } = raw::control(&paths, &open).await.unwrap() else {
         panic!("no session");
     };
     let client = home.mcp().await;
@@ -445,7 +444,7 @@ async fn an_ask_server_can_be_allowed_for_the_session() {
             verdict: Verdict::AllowSession,
         },
     };
-    client::control(&paths, &decide, false).await.unwrap();
+    raw::control(&paths, &decide).await.unwrap();
     assert_ne!(pending.await.unwrap().is_error, Some(true));
     call(&client, "stop_server", json!({"server": "prod"})).await;
     // The grant covers the next start: no approval is needed.
