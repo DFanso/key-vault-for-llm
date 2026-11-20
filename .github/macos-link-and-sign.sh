@@ -38,9 +38,21 @@ case "$(basename "$out")" in
     *) exit 0 ;;
 esac
 
-/usr/bin/strip -S "$out"
-/usr/bin/codesign --force --options runtime --sign - "$out"
-/usr/bin/codesign --verify --strict "$out"
+# rustc reports anything a linker prints as a warning, and strip and codesign
+# print notes even when they succeed ("replacing existing signature", for
+# the ad hoc signature ld already gives arm64 output). Show their output only
+# when they fail.
+quiet() {
+    if ! output=$("$@" 2>&1); then
+        printf '%s\n' "$output" >&2
+        echo "error: $* failed" >&2
+        return 1
+    fi
+}
+
+quiet /usr/bin/strip -S "$out"
+quiet /usr/bin/codesign --force --options runtime --sign - "$out"
+quiet /usr/bin/codesign --verify --strict "$out"
 flags=$(/usr/bin/codesign --display --verbose=2 "$out" 2>&1 |
     sed -n 's/^CodeDirectory .*flags=0x[0-9a-f]*(\([^)]*\)).*/\1/p')
 case ",$flags," in
