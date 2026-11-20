@@ -44,7 +44,8 @@ esac
 flags=$(/usr/bin/codesign --display --verbose=2 "$out" 2>&1 |
     sed -n 's/^CodeDirectory .*flags=0x[0-9a-f]*(\([^)]*\)).*/\1/p')
 case ",$flags," in
-    *,runtime,*) echo "signed $out ad hoc with the hardened runtime ($flags)" >&2 ;;
+    # Quiet on success: rustc reports anything a linker prints as a warning.
+    *,runtime,*) ;;
     *)
         echo "error: $out is not signed with the hardened runtime (flags: $flags)" >&2
         exit 1
