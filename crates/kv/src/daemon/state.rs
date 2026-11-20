@@ -126,6 +126,11 @@ pub struct Settings {
     pub notify: crate::notify::Level,
     /// The sound they play (`KV_NOTIFY_SOUND`).
     pub sound: crate::notify::Sound,
+    /// Linux: leave listen() on the control socket to a child process, so
+    /// clients of this non-dumpable daemon can read who listens (see
+    /// `ipc::bind_with_listener_process`). Set by `kv daemon`; a daemon
+    /// inside another program, as in tests, listens itself.
+    pub listener_process: bool,
 }
 
 impl Default for Settings {
@@ -136,6 +141,7 @@ impl Default for Settings {
             approval_wait: Duration::from_secs(60),
             notify: crate::notify::Level::Off,
             sound: crate::notify::Sound::default(),
+            listener_process: false,
         }
     }
 }

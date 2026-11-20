@@ -355,3 +355,101 @@ fn a_daemon_started_by_hand_is_still_accepted() {
     let _ = daemon.wait();
     assert!(output.status.success(), "kv init: {stderr}");
 }
+
+/// Linux: the daemon makes itself non-dumpable, which hides its program
+/// from other processes of the same user. So a child of the daemon calls
+/// listen() on the control socket, and the kernel names that child, whose
+/// program clients can read. It dies with the daemon, releasing nothing the
+/// next daemon needs.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_control_socket_is_listened_on_by_a_readable_child_that_dies_with_the_daemon() {
+    use std::os::unix::net::UnixStream;
+
+    let home = TempDir::new().unwrap();
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_kv"))
+            .arg("daemon")
+            .env("KV_HOME", home.path())
+            .env("KV_NOTIFY", "off")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let wait_ready = || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon_ready(home.path()) {
+            assert!(Instant::now() < deadline, "the daemon did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let listener_pid = || -> Option<i32> {
+        let stream = UnixStream::connect(endpoint(home.path())).ok()?;
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `cred` and `len` are valid for writes of the sizes given.
+        let ok = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(ok, 0);
+        Some(cred.pid)
+    };
+    let parent_of = |pid: i32| -> i32 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let after = &stat[stat.rfind(')').unwrap() + 2..];
+        after.split(' ').nth(1).unwrap().parse().unwrap()
+    };
+
+    let mut daemon = start();
+    wait_ready();
+    let listener = listener_pid().unwrap();
+    assert_ne!(listener as u32, daemon.id(), "the daemon listens itself");
+    assert_eq!(parent_of(listener) as u32, daemon.id());
+    let program = std::fs::read_link(format!("/proc/{listener}/exe")).unwrap();
+    assert_eq!(
+        program.canonicalize().unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_kv")).canonicalize().unwrap()
+    );
+
+    // Killed outright, the daemon leaves no listener behind, and a new one
+    // starts with a listener of its own.
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{listener}")).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the listener outlived the daemon"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut daemon = start();
+    wait_ready();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let fresh = loop {
+        // The dead daemon's socket file stays until the new one binds.
+        if let Some(pid) = listener_pid()
+            && pid != listener
+            && parent_of(pid) as u32 == daemon.id()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the new daemon has no listener");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_ne!(fresh, listener);
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}

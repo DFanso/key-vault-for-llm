@@ -32,6 +32,156 @@ pub fn bind(endpoint: &Endpoint) -> io::Result<Listener> {
     })
 }
 
+/// Linux: binds the socket file as `bind` does, but leaves the listen()
+/// call to a child process forked for it, which then only waits for this
+/// one to exit. It holds no secret: it is forked before the vault is
+/// opened and closes every other descriptor.
+///
+/// Why: a client learns the process at the socket from SO_PEERCRED, which
+/// names the process that called listen(), and checks its program through
+/// /proc/<pid>/exe. The daemon makes itself non-dumpable, which hides that
+/// link from other processes of the same user; the child makes itself
+/// dumpable again, so clients can read it. Both run the same program with
+/// the same arguments, and the daemon accepts on the shared socket.
+#[cfg(target_os = "linux")]
+pub fn bind_with_listener_process(endpoint: &Endpoint) -> io::Result<(Listener, ListenerProcess)> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    match fs::remove_file(&endpoint.path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    // SAFETY: plain socket syscalls on descriptors this function owns; the
+    // address is a zeroed sockaddr_un filled within its bounds.
+    let socket = unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let socket = OwnedFd::from_raw_fd(fd);
+        let mut address: libc::sockaddr_un = std::mem::zeroed();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let path = endpoint.path.as_os_str().as_bytes();
+        if path.len() >= address.sun_path.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the socket path is too long",
+            ));
+        }
+        for (slot, byte) in address.sun_path.iter_mut().zip(path) {
+            *slot = *byte as libc::c_char;
+        }
+        let len =
+            (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1) as libc::socklen_t;
+        if libc::bind(fd, (&address as *const libc::sockaddr_un).cast(), len) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        socket
+    };
+    fs::set_permissions(&endpoint.path, fs::Permissions::from_mode(0o600))?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&socket);
+    let mut pipe = [0; 2];
+    // SAFETY: pipe2 writes two descriptors into the array.
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: after fork the child calls only async-signal-safe syscalls
+    // (prctl, listen, write, close_range, getppid, nanosleep, _exit) and
+    // never returns into Rust code that could allocate or take a lock.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let error = io::Error::last_os_error();
+        // SAFETY: closing the pipe this function made.
+        unsafe {
+            libc::close(pipe[0]);
+            libc::close(pipe[1]);
+        }
+        return Err(error);
+    }
+    if pid == 0 {
+        // SAFETY: see above; this branch ends in _exit.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            if libc::getppid() != parent {
+                libc::_exit(0);
+            }
+            libc::prctl(libc::PR_SET_DUMPABLE, 1);
+            let status: u8 = if libc::listen(fd, 128) == 0 { 1 } else { 0 };
+            libc::write(pipe[1], (&status as *const u8).cast(), 1);
+            // Keep only the socket: not the daemon lock, not the pipe.
+            if fd > 3 {
+                libc::syscall(libc::SYS_close_range, 3u32, (fd - 1) as u32, 0u32);
+            }
+            libc::syscall(libc::SYS_close_range, (fd + 1) as u32, u32::MAX, 0u32);
+            let pause = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 200_000_000,
+            };
+            loop {
+                if libc::getppid() != parent {
+                    libc::_exit(0);
+                }
+                libc::nanosleep(&pause, std::ptr::null_mut());
+            }
+        }
+    }
+    let process = ListenerProcess { pid };
+    let mut status = 0u8;
+    // SAFETY: reads one byte into `status`, then closes the pipe's ends.
+    let read = unsafe {
+        libc::close(pipe[1]);
+        let read = libc::read(pipe[0], (&mut status as *mut u8).cast(), 1);
+        libc::close(pipe[0]);
+        read
+    };
+    if read != 1 || status != 1 {
+        return Err(io::Error::other(
+            "the daemon's listener process could not listen on the socket",
+        ));
+    }
+    let listener = std::os::unix::net::UnixListener::from(socket);
+    listener.set_nonblocking(true)?;
+    Ok((
+        Listener {
+            inner: UnixListener::from_std(listener)?,
+            uid: rustix::process::getuid().as_raw(),
+        },
+        process,
+    ))
+}
+
+/// The child that called listen() for the daemon's control socket. Killed
+/// when dropped.
+#[cfg(target_os = "linux")]
+pub struct ListenerProcess {
+    pid: libc::pid_t,
+}
+
+#[cfg(target_os = "linux")]
+impl ListenerProcess {
+    /// Whether it has exited, after which clients no longer accept the
+    /// daemon.
+    pub fn exited(&self) -> bool {
+        let mut status = 0;
+        // SAFETY: waits without blocking for this function's own child.
+        unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) != 0 }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ListenerProcess {
+    fn drop(&mut self) {
+        // SAFETY: signals and reaps this process's own child.
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(self.pid, &mut status, 0);
+        }
+    }
+}
+
 impl Listener {
     /// Waits for a connection from a process running as the same user and
     /// drops connections from anyone else.

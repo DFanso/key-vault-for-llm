@@ -81,6 +81,10 @@ tray-icon = "0.26"
 # off.
 wry = { version = "0.57", default-features = false }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# fork for the daemon's listener process (see ipc::bind_with_listener_process).
+libc = "0.2"
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
 # Release archives on unix are `.tar.xz`; both readers are pure Rust and

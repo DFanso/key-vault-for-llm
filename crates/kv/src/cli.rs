@@ -513,6 +513,7 @@ async fn run(cli: Cli) -> Result<()> {
                     locked_exit,
                     notify,
                     sound: notify_sound,
+                    listener_process: true,
                     ..Settings::default()
                 },
             )

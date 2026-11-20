@@ -216,6 +216,15 @@ kv, or have a kv process touch the socket. So the client also requires:
   (`getpeername`) and is the only listener bound there (`/proc/net/unix`). A
   starting daemon binds the path afresh, so a listener made earlier and
   renamed or linked into place is either at another path or a second one;
+- on Linux, the daemon is non-dumpable, which hides `/proc/<pid>/exe` from
+  other processes of the same user. So `kv daemon` binds the control
+  socket and a child forked for it calls `listen()`: the child makes itself
+  dumpable again, holds no secret (forked before the vault is opened, every
+  other descriptor closed) and only waits for the daemon to exit, dying with
+  it. `SO_PEERCRED` names the child, whose program and arguments (the
+  daemon's) clients can read; the daemon accepts on the shared socket.
+  With `ptrace_scope` 0 a same-user process could attach to that child, as
+  it could to `kv tui` itself;
 - on macOS, that the peer process has the server end of this very
   connection open (`proc_pidinfo` and `proc_pidfdinfo` socket handles), and
   `kv daemon` points stdin, stdout and stderr at `/dev/null` when they are
