@@ -231,8 +231,9 @@ kv, or have a kv process touch the socket. So the client also requires:
   sockets, before anything touches them.
 
 What this does not stop, being the same-user process of the threat model:
-code running inside a real kv daemon (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`
-on binaries without the hardened runtime, a debugger); a process that
+code running inside a real kv daemon (`LD_PRELOAD`; on macOS
+`DYLD_INSERT_LIBRARIES` or a debugger only for binaries without the hardened
+runtime, which release builds have from 1.9.2); a process that
 starts a real daemon for the user's runtime directory as its own traced
 child and holds it at exec (Linux allows a parent to trace its child with
 the default `ptrace_scope` 1), or suspends it before it binds its socket; and
@@ -642,9 +643,19 @@ pushed: macOS (arm64, x86_64), Linux (x86_64, arm64, glibc) and Windows
 (x86_64, MSVC), with shell and PowerShell installers that put `kv` in
 `~/.cargo/bin`. From 1.9.0, release builds check GitHub Releases
 for a newer kv and install it when the user agrees (see
-`2026-11-16-kv-self-update-design.md`). The binaries are not code-signed or
-notarized; installers fetch with `curl`/`irm`, which macOS does not
-quarantine.
+`2026-11-16-kv-self-update-design.md`). The binaries are not code-signed
+with a developer identity or notarized; installers fetch with `curl`/`irm`,
+which macOS does not quarantine. From 1.9.2 the macOS binaries are signed ad
+hoc with the hardened runtime, with no entitlements, so macOS ignores
+`DYLD_*` variables for them and refuses debuggers. The release build links
+them through `.github/macos-link-and-sign.sh` (set up by
+`.github/build-setup.yml`, cargo-dist's `github-build-setup`), which signs
+`kv` right after the link and fails the build unless the signature carries
+the runtime flag; rustc's stripping is off for that build, since on macOS it
+rewrites the binary after the link, and the script strips debug symbols
+itself before it signs. `kv tray` signs `kv.app` the same way.
+An ad hoc signature changes with every build, so the keychain still asks
+once after each update before the new binary may read the Touch ID key.
 
 ## 8. Out of scope for v1
 

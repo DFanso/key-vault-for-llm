@@ -770,10 +770,16 @@ some need more than that:
 
 - A program you let a handle run receives the secret. That is the point of
   `exec` and `run`, so allow only programs you trust.
-- Code running inside a real kv daemon can do what the daemon does: on Linux
-  through `LD_PRELOAD`; on macOS through `DYLD_INSERT_LIBRARIES` or a
-  debugger, since release binaries are not yet signed with the hardened
-  runtime.
+- Code running inside a real kv daemon can do what the daemon does. On
+  Linux that takes only `LD_PRELOAD`. On macOS, release binaries from 1.9.2
+  on are signed (ad hoc) with the hardened runtime, so macOS ignores
+  `DYLD_INSERT_LIBRARIES` for them and refuses to let a debugger attach. A kv
+  you build yourself is not signed that way unless you do it:
+  `codesign --force --options runtime --sign - "$(command -v kv)"`.
+- kv's binary sits in a folder you can write to (`~/.cargo/bin` by
+  default), so a process running as you could replace it. An ad hoc
+  signature names no developer, so nothing checks who built the kv that
+  runs.
 - On Linux, a process can start a real kv daemon as its own traced child and
   control it, which the default `kernel.yama.ptrace_scope=1` allows. With
   `ptrace_scope` 0, any process of yours can attach to `kv tui` and read the
