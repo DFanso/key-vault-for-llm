@@ -51,6 +51,14 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
     let agent_endpoint = paths.agent_endpoint();
     let control_endpoint = paths.control_endpoint();
     let mut agent = ipc::bind(&agent_endpoint)?;
+    #[cfg(target_os = "linux")]
+    let (mut control, listener_process) = if settings.listener_process {
+        let (listener, process) = ipc::bind_with_listener_process(&control_endpoint)?;
+        (listener, Some(process))
+    } else {
+        (ipc::bind(&control_endpoint)?, None)
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut control = ipc::bind(&control_endpoint)?;
 
     let audit = Audit::new(paths.audit.clone());
@@ -94,6 +102,12 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
                 if lock(&daemon).tick(Instant::now(), SystemTime::now()) == After::Stop {
                     break;
                 }
+                // Without it clients refuse this daemon; stop, and the next
+                // command starts a new one.
+                #[cfg(target_os = "linux")]
+                if listener_process.as_ref().is_some_and(|p| p.exited()) {
+                    break;
+                }
             }
             _ = stop_rx.changed() => break,
         }
@@ -101,6 +115,8 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
 
     ipc::cleanup(&agent_endpoint);
     ipc::cleanup(&control_endpoint);
+    #[cfg(target_os = "linux")]
+    drop(listener_process);
     drop(lock_file);
     Ok(Outcome::Stopped)
 }

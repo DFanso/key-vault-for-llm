@@ -1,6 +1,6 @@
 [package]
 name = "kv"
-version = "1.9.0"
+version = "1.9.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -80,6 +80,10 @@ tray-icon = "0.26"
 # kv's window. No default features: they are Linux's, and `devtools` stays
 # off.
 wry = { version = "0.57", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# fork for the daemon's listener process (see ipc::bind_with_listener_process).
+libc = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }

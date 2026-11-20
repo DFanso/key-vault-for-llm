@@ -206,8 +206,36 @@ unsafe fn sid_to_string(sid: PSID) -> io::Result<String> {
     }
 }
 
+/// Checks that the process serving `stream` runs this same kv program.
+/// `connect` already checked that the pipe belongs to this user. Windows
+/// has no exec, so the process that created the pipe instance keeps its
+/// program; see the design notes for what this does not cover.
+pub async fn check_server(
+    stream: &ClientStream,
+    _endpoint: &Endpoint,
+    _runtime: &std::path::Path,
+) -> io::Result<()> {
+    let theirs = server_program(stream).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("could not tell which program serves the pipe ({e})"),
+        )
+    })?;
+    if super::same_file(&theirs, &crate::update::swap::running_exe()?) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the process at the pipe runs {}, not this kv",
+                theirs.display()
+            ),
+        ))
+    }
+}
+
 /// The program the process at the server end of `stream` runs.
-pub fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
+fn server_program(stream: &ClientStream) -> io::Result<PathBuf> {
     let pipe = stream.as_raw_handle() as HANDLE;
     let mut pid = 0u32;
     // SAFETY: `pipe` is the client end of an open named pipe.

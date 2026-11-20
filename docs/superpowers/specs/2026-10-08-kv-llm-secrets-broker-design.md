@@ -185,14 +185,60 @@ tui` under a pseudo-terminal. Two things keep that from handing it the
 vault: the client sends a device key only to a daemon running the same
 program (the control socket's peer process, `LOCAL_PEERPID` and
 `proc_pidpath` on macOS, `SO_PEERCRED` and `/proc/<pid>/exe` on Linux,
-`GetNamedPipeServerProcessId` on Windows, against `current_exe`), so a
-listener the agent put at the socket gets nothing; and each Touch ID prompt
+`GetNamedPipeServerProcessId` on Windows, against `current_exe`, and owned
+by the same user), so a listener the agent put at the socket gets nothing;
+and each Touch ID prompt
 names the change ("remove the handle prod-db from the kv vault", "open kv
 tui, where you approve agent requests"), so the user can cancel one they did
 not start. Windows Hello cannot show such text, and nothing ties its
 credential to kv, so another program the user lets pass a Hello prompt can
 derive the same key; the README says to cancel Hello prompts you did not
 start and to prefer the passphrase where agents run unattended.
+
+The same check covers every control request that carries anything secret,
+not only device keys: the passphrase (`kv unlock`, `kv tui`, `kv tray`), a
+session token, and secret values (`add`, `update`, `edit_vars`,
+`change_passphrase`, `enroll_device`). Only a bare `lock` or `stop`, with no
+credential, goes to the socket unchecked, so `kv stop` can still end a daemon
+left running from a kv binary that has since been replaced.
+
+The peer pid alone does not show who holds the connection. On Linux
+`SO_PEERCRED` names the process that called `listen()`, as recorded then; on
+macOS `LOCAL_PEERPID` (and `LOCAL_PEERTOKEN`, which is read from that pid
+when asked) names the last process to read, write or poll the socket. A
+program could listen, hand the socket to a child that accepts, and then exec
+kv, or have a kv process touch the socket. So the client also requires:
+
+- that the peer runs as `kv daemon --runtime-dir <dir>` for the client's own
+  runtime directory (`/proc/<pid>/cmdline`, `KERN_PROCARGS2`). A daemon
+  started without the option execs itself again with it;
+- on Linux, that the listener was bound at exactly the endpoint path
+  (`getpeername`) and is the only listener bound there (`/proc/net/unix`). A
+  starting daemon binds the path afresh, so a listener made earlier and
+  renamed or linked into place is either at another path or a second one;
+- on Linux, the daemon is non-dumpable, which hides `/proc/<pid>/exe` from
+  other processes of the same user. So `kv daemon` binds the control
+  socket and a child forked for it calls `listen()`: the child makes itself
+  dumpable again, holds no secret (forked before the vault is opened, every
+  other descriptor closed) and only waits for the daemon to exit, dying with
+  it. `SO_PEERCRED` names the child, whose program and arguments (the
+  daemon's) clients can read; the daemon accepts on the shared socket.
+  With `ptrace_scope` 0 a same-user process could attach to that child, as
+  it could to `kv tui` itself;
+- on macOS, that the peer process has the server end of this very
+  connection open (`proc_pidinfo` and `proc_pidfdinfo` socket handles), and
+  `kv daemon` points stdin, stdout and stderr at `/dev/null` when they are
+  sockets, before anything touches them.
+
+What this does not stop, being the same-user process of the threat model:
+code running inside a real kv daemon (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`
+on binaries without the hardened runtime, a debugger); a process that
+starts a real daemon for the user's runtime directory as its own traced
+child and holds it at exec (Linux allows a parent to trace its child with
+the default `ptrace_scope` 1), or suspends it before it binds its socket; and
+on Windows, where the check is the program of the process that created the
+pipe instance, a reused process id. On Windows there is no exec, so the
+listen-then-exec case does not arise.
 
 ### Secret model
 
@@ -591,7 +637,7 @@ or unscrubbed paths.
 ## 7. Distribution
 
 `cargo install --path crates/kv`, or prebuilt binaries built by
-`cargo-dist` (0.33) on GitHub Releases when a version tag (`v1.9.0`) is
+`cargo-dist` (0.33) on GitHub Releases when a version tag (`v1.9.1`) is
 pushed: macOS (arm64, x86_64), Linux (x86_64, arm64, glibc) and Windows
 (x86_64, MSVC), with shell and PowerShell installers that put `kv` in
 `~/.cargo/bin`. From 1.9.0, release builds check GitHub Releases
