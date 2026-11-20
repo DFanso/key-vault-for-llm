@@ -3,7 +3,7 @@
 [![CI](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/DFanso/key-vault-for-llm/actions/workflows/ci.yml)
 [![Rust 1.90+](https://img.shields.io/badge/rust-1.90%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20server-6e40c9)](https://modelcontextprotocol.io)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#what-kv-protects-against)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#install)
 [![Postgres and Redis](https://img.shields.io/badge/databases-Postgres%20%7C%20Redis-336791?logo=postgresql&logoColor=white)](#databases)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
@@ -14,17 +14,23 @@ show up in a chat transcript or in the model's context.
 
 kv runs as an MCP server (`kv mcp`), so it works with Claude Code, Cursor,
 Codex, Windsurf, VS Code and any other client that speaks the Model Context
-Protocol over stdio.
+Protocol over stdio. It is a single-user tool for macOS, Linux and Windows,
+written in Rust.
 
-Status: agents can make HTTP requests, run programs, and query or connect to
-Postgres and Redis with your secrets over MCP, `kv tui` or a menu bar icon
-(`kv tray`, with a window of its own) approves `--mode ask` requests as they
-arrive, on macOS also from a notification's buttons, and Touch ID or Windows
-Hello can stand in for the passphrase.
+What it does:
+
+- Agents make HTTP requests, run programs, and query or connect to Postgres
+  and Redis with your secrets, without seeing them.
+- Handles in ask mode wait for your approval in `kv tui`, or in `kv tray`, a
+  menu bar icon with a window of its own (macOS and Windows). On macOS you can
+  also answer from a notification's buttons.
+- Touch ID or Windows Hello can stand in for the passphrase.
+- Two people's agents can pass a secret from one vault to the other without
+  it showing up in the chat they use.
 
 ![kv tui: two agent requests waiting for approval](docs/images/tui-approvals.svg)
 
-## Setup
+## Install
 
 Install a prebuilt binary (macOS, Linux, Windows) into `~/.cargo/bin`:
 
@@ -36,7 +42,13 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/DFanso/key-vault-for-ll
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/DFanso/key-vault-for-llm/releases/latest/download/kv-installer.ps1 | iex"
 ```
 
-or build it with `cargo install --path crates/kv` (Rust 1.90 or later). Then:
+or, from a clone of this repository, build it with
+`cargo install --path crates/kv` (Rust 1.90 or later).
+
+If you are upgrading from 1.9.0 or earlier, see
+[Upgrading from 1.9.0 or earlier](#upgrading-from-190-or-earlier).
+
+## Quick start
 
 ```sh
 kv init                       # create the vault and choose a passphrase
@@ -49,7 +61,14 @@ kv add jira --kind login --host jira.example.com  # prompts for the username and
 claude mcp add kv -- kv mcp   # or add `kv mcp` as a stdio server in any MCP client
 ```
 
-The agent then sees these tools:
+There is nothing to start by hand: the first command that needs the daemon
+starts it in the background. Agents can use handles while the vault is
+unlocked (`kv unlock`, or unlock in `kv tui` or the tray); it locks itself
+after 8 hours without use.
+
+### What the agent sees
+
+The agent gets these tools:
 
 - `list_handles`: names, kinds and policies, never values.
 - `http_request`: sends a request with the handle's credential attached.
@@ -70,6 +89,21 @@ The agent then sees these tools:
 Wherever a secret would appear in a response or in program output, the agent
 sees `[kv:<handle>]` instead, including base64, hex, URL-encoded and
 JSON-escaped forms.
+
+## Kinds of handles
+
+| Kind | Holds | The agent uses it through |
+|---|---|---|
+| `http` | a token, and optionally the service's base URL | `http_request` |
+| `login` | a username and password | `http_request` (Basic auth), `exec` |
+| `env` | environment variables, and optionally a command that starts an MCP server | `exec`, the server tools |
+| `postgres`, `redis` | a connection URL | `db_query`, `db_connect` |
+| `file` | any file up to 1 MiB | `exec` |
+
+Every handle has a policy: its mode (`auto`, `ask` or `deny`; `ask` by
+default), the hosts and methods an `http` or `login` handle may be used
+with, the programs an `env`, `file` or `login` handle may be given to, and
+whether a database handle is read-only. Change it with `kv policy`.
 
 ### Keeping a service's address hidden
 
@@ -104,7 +138,7 @@ since Basic auth ends the username at the first one. To change one half,
 edit the handle in the window or `kv tui` and leave the other blank: it
 keeps its value. A login can be shared like any handle (see sharing, below):
 it arrives in ask mode with the sender's allowed hosts, and without any
-programs. kv before this version cannot open a shared login.
+programs. kv before 1.7.0 cannot open a shared login.
 
 ### MCP servers with secrets
 
@@ -273,7 +307,9 @@ TUI: Allow once, Allow for this session, Deny, and Deny and block. "Lock
 vault" locks the vault for every client. Anything the menu cannot do, such as
 answering a request that has already timed out, shows up as a notification.
 
-On macOS each waiting request also shows up as a notification of its own,
+#### Notifications on macOS
+
+Each waiting request also shows up as a notification of its own,
 with the agent, tool and handles, and the answers Allow once, Allow for this
 session (when the agent named its session) and Deny under its Options
 button. Clicking the notification itself opens the request in kv's window.
@@ -295,6 +331,8 @@ know. The first time, macOS asks whether kv may send notifications; turn them
 on later in System Settings, Notifications, kv, where choosing the Alerts style
 keeps each one on screen until you answer it. `KV_TRAY_APP=off kv tray` leaves
 `kv.app` out, with plain notifications.
+
+#### kv's window
 
 Clicking the icon opens a small menu beside it, like a flyout: what is
 waiting, then Open kv, Lock kv (or Unlock), Start at login and Quit kv tray.
@@ -334,11 +372,14 @@ with the close button, Esc or the icon. It also stays up while a form or any
 other dialog is open, and while the system's file panel is open (New handle's
 file cards), so neither is lost when the focus moves. A value on show is the
 exception: it is put away whenever the window loses the focus, even where the
-window stays up. The small menu is always a flyout: if the window is hidden in the middle of a form, the form is
-cancelled when the menu opens, not left inside it.
+window stays up. The small menu is always a flyout: if the window is hidden
+in the middle of a form, the form is cancelled when the menu opens, not left
+inside it.
 
 The login item takes effect at your next login. On Windows a console window
 may flash as it starts.
+
+#### Showing a value
 
 The eye on each row of the Handles screen shows that handle's value: the
 token and base URL, the database URL, each variable of an env handle, or what
@@ -491,9 +532,9 @@ put `{file:passwords}` in an argument where the file's path goes (or read the
 path from `KV_FILE_PASSWORDS`). kv writes the file to a folder only you can
 read, under its own name, and removes it when the program ends (if the
 daemon stops first, the next one to start removes the folder once it is an
-hour old). If the file is text, each line of eight characters or more is scrubbed from the program's
-output like any other secret; a binary file is not scrubbed, and `kv add`
-says so. A text file whose lines add up to more than the scrubber takes
+hour old). If the file is text, each line of eight characters or more is
+scrubbed from the program's output like any other secret; a binary file is
+not scrubbed, and `kv add` says so. A text file whose lines add up to more than the scrubber takes
 (about 250 KiB of text) is refused for the same reason.
 
 Sharing works as above, with two differences. The sealed share of a file is
@@ -521,7 +562,8 @@ there.
 ## Day to day
 
 ```sh
-kv list                       # names and policies, never values
+kv status                     # locked or unlocked, and whether Touch ID or Hello is on
+kv list                       # names and policies, never values (--json for scripts)
 kv policy openrouter --method GET --method POST
 kv lock                       # agents get "vault locked" until you unlock
 kv unlock
@@ -582,8 +624,9 @@ new kv, macOS asks for that password once; choose Always Allow. Set
 An agent running commands as you can start a prompt too, by running one of
 these commands itself. The Touch ID prompt says what kv is trying to do,
 such as "remove the handle prod-db from the kv vault" or "open kv tui, where
-you approve agent requests": cancel any you did not start. kv sends the key
-only to a daemon running the same `kv` program. Windows Hello's dialog
+you approve agent requests": cancel any you did not start. kv sends the key,
+like the passphrase, only to the kv daemon for your own vault (see
+[Security model](#security-model)). Windows Hello's dialog
 cannot say what it is for, and Windows does not keep other programs from
 using kv's Hello credential, so a Hello prompt you approve for another
 program can give it a lasting key to the vault. On Windows, cancel every
@@ -640,6 +683,27 @@ kv binary can no longer read the Touch ID key until you allow it once; see
 [Touch ID and Windows Hello](#touch-id-and-windows-hello) and choose Always
 Allow.
 
+### Upgrading from 1.9.0 or earlier
+
+1.9.1 fixes a security issue
+([GHSA-xcr2-9r88-r8f2](https://github.com/DFanso/key-vault-for-llm/security/advisories/GHSA-xcr2-9r88-r8f2)):
+kv's clients now check that the process at the daemon's socket is the kv
+daemon for your vault before they send it anything secret. `kv update` stops
+the old daemon for you. If you installed 1.9.1 another way (the installer
+script, `cargo install`) while an older daemon was still running, commands
+that unlock or use the vault refuse to talk to it:
+
+```text
+kv: the process at the kv socket (...) is not this kv's daemon: ...; kv sent it nothing. If it is an older kv, run `kv stop`, otherwise stop that process, and try again
+```
+
+Run `kv stop` (it still works with an old daemon) and try again; the next
+command starts the new daemon. You see the same refusal, for the same
+reason, when the daemon was started from a different kv binary than the one
+you run, such as a second install elsewhere on your PATH. If `kv stop` does
+not clear it, something else is holding the socket: find and stop that
+process rather than working around the message.
+
 The old kv is kept so you can go back by hand. On macOS and Linux it is
 `kv.previous`, next to `kv`. To go back, stop kv and move the old file over
 `kv` (if `kv` is a link, use the folder of the file it points to):
@@ -673,24 +737,74 @@ A kv built from source (`cargo install`, `cargo build`) does not update
 itself: `kv update` tells you to install from a release instead. Update it by
 building again.
 
-## What kv protects against
+## Security model
 
 kv keeps secrets out of the model's context and transcripts, and limits what
-an agent can do with a handle through per-secret policy and approvals. It is
-not a sandbox: a malicious process running as your own user can still attack
-it (for example by reading process memory on platforms that allow it). A
-program you let a handle run does receive the secret.
+an agent can do with a handle through per-handle policy and approvals. It
+assumes the agent runs as you, on your machine, and can run commands. It is
+not a sandbox.
 
-An unlocked `kv tui` or `kv tray` answers requests for whoever drives it. A
-program running as you that can control other programs' windows can type
-into the TUI or click Allow in the tray's menu, window or notifications: on macOS only
-programs you have given the Accessibility permission, on Windows any program
-at the same integrity level. Lock the vault, or quit both, when agents run
-unattended. Likewise, while kv's window shows a value, a program you have
-given the Screen Recording or Accessibility permission can read it off the
-screen.
+What kv does:
 
-Single-user, for macOS, Linux and Windows, written in Rust.
+- No tool returns a secret or takes one. Values appear in results only as
+  `[kv:<handle>]`, and every command that changes the vault asks for the
+  passphrase (or Touch ID or Windows Hello), or runs inside an unlocked
+  `kv tui`.
+- The vault file is encrypted with XChaCha20-Poly1305 under a key derived
+  from your passphrase with Argon2id. While unlocked, the daemon holds the
+  key in memory it locks against swapping (best effort) and keeps out of core
+  dumps. On Linux it also makes itself non-dumpable, so other processes of
+  your user cannot read its memory through `/proc` or attach a debugger to
+  it.
+- kv's clients (the CLI, `kv tui` and `kv tray`) send the passphrase,
+  session tokens, Touch ID or Windows Hello keys and secret values only to the
+  kv daemon for your own vault. Before sending, they check that the process
+  at the socket runs as you and runs the same `kv` program. On Linux and
+  macOS they also check that it runs as the daemon for your runtime
+  directory and is the process actually serving the connection. A process
+  that takes the daemon's socket first, or puts its own in place of it, gets
+  nothing.
+
+What it cannot stop. These all need a process already running as you, and
+some need more than that:
+
+- A program you let a handle run receives the secret. That is the point of
+  `exec` and `run`, so allow only programs you trust.
+- Code running inside a real kv daemon can do what the daemon does: on Linux
+  through `LD_PRELOAD`; on macOS through `DYLD_INSERT_LIBRARIES` or a
+  debugger, since release binaries are not yet signed with the hardened
+  runtime.
+- On Linux, a process can start a real kv daemon as its own traced child and
+  control it, which the default `kernel.yama.ptrace_scope=1` allows. With
+  `ptrace_scope` 0, any process of yours can attach to `kv tui` and read the
+  passphrase as you type it. Where agents run unattended, set it to 2, which
+  leaves debugging other processes to root (so `gdb -p` and `strace -p` then
+  need `sudo`):
+
+  ```sh
+  echo 'kernel.yama.ptrace_scope = 2' | sudo tee /etc/sysctl.d/60-kv-ptrace.conf
+  sudo sysctl --system
+  ```
+
+- On Windows, kv checks the program of the process that created the
+  daemon's pipe. A determined process of yours could arrange for that
+  process id to be reused by a kv process, so the check is weaker there than
+  on Linux and macOS.
+- An unlocked `kv tui` or `kv tray` answers requests for whoever drives it. A
+  program running as you that can control other programs' windows can type
+  into the TUI or click Allow in the tray's menu, window or notifications: on
+  macOS only programs you have given the Accessibility permission, on Windows
+  any program at the same integrity level. Lock the vault, or quit both, when
+  agents run unattended.
+- While kv's window shows a value, a program you have given the Screen
+  Recording or Accessibility permission can read it off the screen, and while
+  a copied value is on the clipboard any program can read it.
+
+If kv refuses to talk to the process at its socket and `kv stop` does not
+clear it, find out what that process is before you do anything else.
+
+To report a security problem, use GitHub's private reporting (the Security
+tab, then Report a vulnerability) rather than a public issue.
 
 The screenshots are real `kv tui` captures from a demo vault, with made-up
 handles.
