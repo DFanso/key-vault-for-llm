@@ -1047,8 +1047,5 @@ button.md .i { width: 16px; height: 16px; }
 #received-rows .chip, #sent-rows .chip { flex: none; }
 .row-item .note-line { color: var(--muted); font-style: normal; }
 
-/* Share history gets the full width, one list above the other, so a row
-   reads on one line: name and kind, who and when, safety code, actions. */
-#shares .columns { grid-template-columns: 1fr; }
-#received-rows .row-item, #sent-rows .row-item { gap: 14px; }
-#received-rows .grow, #sent-rows .grow { gap: 2px; }
+/* The safety code sits under the details so a half-width column never crowds the name. */
+.row-item .code-chip { align-self: flex-start; margin-top: 4px; }
