@@ -1025,3 +1025,10 @@ button.md .i { width: 16px; height: 16px; }
 #settings .stat-icon { width: 20px; height: 20px; background: none; border-radius: 0; color: var(--text-2); }
 #settings .stat-icon .i { width: 18px; height: 18px; }
 #settings .setting { gap: 16px; }
+
+/* Settings groups: a quiet sentence-case heading over each set of rows (the
+   pattern Linear, Rise and Cartesia use), controls right-aligned in the rows. */
+.settings-group { margin: 22px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+#settings > .settings-group:first-of-type, #settings > .note + .settings-group { margin-top: 18px; }
+#settings > .panel + .settings-group { margin-top: 24px; }
+#settings .panel.setting { padding: 14px 0; }

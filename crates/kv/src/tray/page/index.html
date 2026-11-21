@@ -236,6 +236,13 @@
           <span class="i i-shield-check" aria-hidden="true"></span>
           <p><strong>kv only opens from its icon in the tray.</strong> A kv window that appears on its own and asks for your passphrase is fake.</p>
         </div>
+        <h2 class="settings-group">Security</h2>
+        <div class="panel setting">
+          <span class="stat-icon tone-amber"><span class="i i-lock" aria-hidden="true"></span></span>
+          <div class="setting-text"><strong>Session</strong><span class="muted small" id="settings-locks-in"></span></div>
+          <button type="button" id="settings-lock" class="outline strong"><span class="i i-lock" aria-hidden="true"></span>Lock vault</button>
+        </div>
+        <h2 class="settings-group">General</h2>
         <div class="panel setting">
           <span class="stat-icon tone-accent"><span class="i i-sun" aria-hidden="true"></span></span>
           <div class="setting-text"><strong>Appearance</strong><span class="muted small">System follows your light or dark mode as it changes.</span></div>
@@ -246,11 +253,7 @@
           <div class="setting-text"><strong id="login-label">Start kv tray at login</strong><span class="muted small">The key waits in the tray, so requests reach you.</span></div>
           <button type="button" id="login" class="switch" role="switch" aria-checked="false" aria-labelledby="login-label"><span class="knob"></span></button>
         </div>
-        <div class="panel setting">
-          <span class="stat-icon tone-amber"><span class="i i-lock" aria-hidden="true"></span></span>
-          <div class="setting-text"><strong>Session</strong><span class="muted small" id="settings-locks-in"></span></div>
-          <button type="button" id="settings-lock" class="outline strong"><span class="i i-lock" aria-hidden="true"></span>Lock vault</button>
-        </div>
+        <h2 class="settings-group">kv tray</h2>
         <div class="panel setting">
           <span class="stat-icon tone-green"><span class="i i-download" aria-hidden="true"></span></span>
           <div class="setting-text"><strong id="settings-version">kv</strong><span class="muted small" id="update-status" role="status"></span></div>
@@ -263,7 +266,7 @@
           <button type="button" class="outline danger" data-quit>Quit</button>
         </div>
         <div class="panel">
-          <div class="panel-head"><h2 class="panel-title"><span class="i i-keyboard" aria-hidden="true"></span>Keyboard</h2></div>
+          <h2 class="settings-group">Keyboard</h2>
           <dl class="keys">
             <dt><kbd id="mod-key">Ctrl</kbd> <kbd>1</kbd>–<kbd>6</kbd></dt><dd>Go to Home, Approvals, Handles, Shares, Audit, Settings</dd>
             <dt><kbd>/</kbd></dt><dd>Find a handle or search the log</dd>
