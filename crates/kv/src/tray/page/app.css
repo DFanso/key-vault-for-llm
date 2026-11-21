@@ -539,7 +539,7 @@ section { display: flex; flex-direction: column; gap: 16px; }
 
 /* Approvals. */
 .card { display: flex; flex-direction: column; gap: 10px; }
-.card.waiting-card { border-color: var(--amber-edge); }
+.card.waiting-card { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .card-head { display: flex; align-items: center; gap: 12px; }
 .card-head .grow { flex: 1; min-width: 0; }
 .card-head .title { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
