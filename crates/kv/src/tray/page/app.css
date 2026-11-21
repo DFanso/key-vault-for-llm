@@ -36,7 +36,7 @@
   --badge-bg: #8a5200;
   --badge-fg: #ffffff;
   --shadow: 0 1px 2px rgba(30, 26, 23, 0.06);
-  --shadow-lg: 0 20px 60px rgba(30, 26, 23, 0.22);
+  --shadow-lg: 0 12px 28px rgba(30, 26, 23, 0.20);
   --radius: 14px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace;
   font: 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -76,7 +76,7 @@
     --badge-bg: #ffbe4d;
     --badge-fg: #1e1a17;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-    --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.45);
     color-scheme: dark;
   }
 }
@@ -113,7 +113,7 @@
   --badge-bg: #ffbe4d;
   --badge-fg: #1e1a17;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.45);
   color-scheme: dark;
 }
 
@@ -131,7 +131,7 @@ body {
 h1, h2, h3 { margin: 0; line-height: 1.25; }
 h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
 h2 { font-size: 17px; font-weight: 650; }
-h3 { font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+h3, .panel-title { font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
 p { margin: 0; }
 code, .code, kbd { font-family: var(--mono); font-size: 0.92em; }
 code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; }
@@ -221,7 +221,7 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .segmented button { min-height: 28px; padding: 3px 12px; color: var(--text-2); font-weight: 600; }
 .segmented button:hover { background: var(--glass-hover); color: var(--text); }
-.segmented button[aria-checked="true"] { background: var(--accent-fill); color: var(--on-accent); }
+.segmented button[aria-checked="true"] { background: var(--surface-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .segmented button .i { width: 14px; height: 14px; }
 .segmented.small button { min-height: 26px; padding: 2px 10px; font-size: 12px; }
 
@@ -238,8 +238,10 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .kind-tabs button .i { width: 14px; height: 14px; }
 .kind-tabs button:hover { background: var(--glass-hover); color: var(--text); }
-.kind-tabs button[aria-selected="true"] { background: var(--accent-fill); border-color: transparent; color: var(--on-accent); }
-.kind-tabs button[aria-selected="true"] .count { background: rgba(255, 255, 255, 0.25); color: inherit; }
+.kind-tabs button[aria-selected="true"] { background: var(--surface-2); border-color: var(--line-strong); color: var(--text); }
+/* Counts of things that need no answer stay neutral; only Approvals is amber. */
+.kind-tabs .count { background: var(--surface-2); color: var(--text-2); }
+.kind-tabs button[aria-selected="true"] .count { background: var(--glass); color: var(--text); }
 .kind-tabs button.none:not([aria-selected="true"]) { opacity: 0.6; }
 .kind-tabs.small button { min-height: 26px; padding: 2px 10px; font-size: 12px; }
 
@@ -343,7 +345,7 @@ input:focus, select:focus { border-color: var(--accent); }
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 1px 10px 1px 8px;
+  padding: 3px 10px 3px 8px;
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--text);
@@ -368,7 +370,7 @@ button.round {
   color: var(--text);
 }
 button.round:hover { background: var(--glass-hover); }
-button.round[aria-current="page"] { background: var(--accent-fill); border-color: transparent; color: var(--on-accent); }
+button.round[aria-current="page"] { background: var(--surface-2); border-color: var(--line-strong); color: var(--text); }
 .tabs {
   display: flex;
   gap: 4px;
@@ -967,3 +969,6 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .update-notes { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 4px 0; }
 #update-notes-url { overflow-wrap: anywhere; }
 #update-status.error { color: var(--red); }
+
+/* Icon tiles are neutral; colour is kept for status (green, red). */
+.stat-icon.tone-accent, .stat-icon.tone-teal, .stat-icon.tone-amber, .stat-icon.tone-violet { background: var(--surface-2); color: var(--text-2); }
