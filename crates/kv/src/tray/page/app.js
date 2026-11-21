@@ -931,11 +931,20 @@
         chip(toolName, "tone-grey", toolIcon),
       ),
       el("div", "code-box", approval.detail),
-      approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
-      approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
-      approval.headers ? el("div", "meta", icon("layers"), `headers ${approval.headers}`) : null,
-      approval.body ? el("div", "meta", icon("file"), `body ${approval.body}`) : null,
-      el("div", "timer", el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      // What the request carries on the left, the countdown at the right corner.
+      el(
+        "div",
+        "card-facts",
+        el(
+          "div",
+          "meta-list",
+          approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
+          approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
+          approval.headers ? el("div", "meta", icon("layers"), `headers ${approval.headers}`) : null,
+          approval.body ? el("div", "meta", icon("file"), `body ${approval.body}`) : null,
+        ),
+        el("div", "timer", el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      ),
       el(
         "div",
         "buttons",

@@ -1053,3 +1053,7 @@ button.md .i { width: 16px; height: 16px; }
 /* The quiet button at the left of a card's row lines up with the card's text edge. */
 .card .buttons button.quiet { padding-left: 0; }
 .card .buttons button.quiet:hover:not(:disabled) { background: none; }
+
+.card-facts { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.card-facts .meta-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card-facts .timer { flex: none; margin-left: auto; }
