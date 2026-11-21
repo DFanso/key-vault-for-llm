@@ -1055,3 +1055,7 @@ button.md .i { width: 16px; height: 16px; }
 .card-facts { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .card-facts .meta-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .card-facts .timer { flex: none; margin-left: auto; }
+
+/* Quit is in the footer again, in the error colour, and asks before it quits. */
+.app-footer button.danger { color: var(--red); border-color: var(--red-soft); }
+.app-footer button.danger:hover:not(:disabled) { border-color: var(--red); background: var(--red-soft); }
