@@ -1002,3 +1002,7 @@ select option { background: var(--surface); color: var(--text); }
 .tile:hover { background: var(--glass-hover); border-color: var(--line-strong); }
 .tile:hover .tile-go, .tile:focus-visible .tile-go { color: var(--text); transform: translate(2px, -2px); }
 .tile:hover strong { color: var(--accent); }
+
+/* A short warning beside a field's label, such as who can read what is typed. */
+.field label .flag { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; font-size: 12px; font-weight: 500; color: var(--amber); }
+.field label .flag .i { width: 13px; height: 13px; }

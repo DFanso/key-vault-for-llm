@@ -177,10 +177,7 @@
         "kv makes a code for you to send to the person who has the secret. It holds only a public " +
         "key, so any chat can carry it.",
       submit: "Make code",
-      note: [
-        "What you need",
-        "Optional, e.g. the staging DB URL. Anyone in the chat can read it.",
-      ],
+      note: ["What you need", "Optional, e.g. the staging DB URL", "Visible to the chat"],
     },
     send: {
       title: "Send a secret",
@@ -189,8 +186,8 @@
         "the vault that made the code can open it.",
       submit: "Seal",
       code: ["Their request code", "kv-request:v1:…"],
-      note: ["Note", "Optional; they see it with the share."],
-      name: ["Name to suggest", "Optional; blank suggests the handle's own name."],
+      note: ["Note", "Optional; they see it with the share"],
+      name: ["Name to suggest", "Optional; blank uses the handle's own name"],
     },
     receive: {
       title: "Receive a share",
@@ -199,7 +196,7 @@
         "as a new handle in ask mode.",
       submit: "Save",
       code: ["Their share", "kv-share:v1:…"],
-      name: ["Save as", "Optional; blank uses the name they suggested."],
+      name: ["Save as", "Optional; blank uses the name they suggested"],
     },
   };
 
@@ -1418,11 +1415,13 @@
     }
     if (spec.note) {
       $("share-note-label").textContent = spec.note[0];
-      $("share-note-hint").textContent = spec.note[1];
+      $("share-note").placeholder = spec.note[1];
+      // A warning that must stay in view, so it sits on the label, not in the field.
+      if (spec.note[2]) $("share-note-label").append(el("span", "flag", icon("eye"), spec.note[2]));
     }
     if (spec.name) {
       $("share-name-label").textContent = spec.name[0];
-      $("share-name-hint").textContent = spec.name[1];
+      $("share-name").placeholder = spec.name[1];
     }
     if (step === "send") {
       fillShareHandles();
