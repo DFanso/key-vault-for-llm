@@ -1171,9 +1171,13 @@
         .slice()
         .reverse()
         .map((r) => {
+          // What became of the value, as a chip beside the name.
           let state = null;
-          if (!names.has(r.handle)) state = el("span", "desc", "Removed since");
-          else if (!r.viewable) state = el("span", "desc", "Changed since, so kv no longer shows it");
+          if (!names.has(r.handle)) state = chip("Handle removed", "tone-grey");
+          else if (!r.viewable) {
+            state = chip("Value changed", "tone-amber");
+            state.title = "Changed since, so kv no longer shows it";
+          }
           return el(
             "li",
             "row-item",
@@ -1181,11 +1185,11 @@
             el(
               "div",
               "grow",
-              el("div", "chips", el("span", "name", r.handle), chip(r.kind, "tone-grey")),
-              el("span", "desc", `from ${r.from || "not given"} · ${ago(r.received_at)}${r.note ? ` · ${r.note}` : ""}`),
-              el("span", "allows", `Safety code ${r.safety_code}`),
-              state,
+              el("div", "chips", el("span", "name", r.handle), chip(r.kind, "tone-grey"), state),
+              el("span", "desc", `from ${r.from || "not given"} · ${ago(r.received_at)}`),
+              r.note ? el("span", "desc note-line", `“${r.note}”`) : null,
             ),
+            chip(r.safety_code, "tone-grey", "shield-check"),
             el(
               "div",
               "row-actions",
@@ -1215,9 +1219,10 @@
               "div",
               "grow",
               el("div", "chips", el("span", "name", s.handle), chip(s.kind, "tone-grey")),
-              el("span", "desc", `to ${s.to || "not given"} · ${ago(s.sent_at)}${s.note ? ` · ${s.note}` : ""}`),
-              el("span", "allows", `Safety code ${s.safety_code}`),
+              el("span", "desc", `to ${s.to || "not given"} · ${ago(s.sent_at)}`),
+              s.note ? el("span", "desc note-line", `“${s.note}”`) : null,
             ),
+            chip(s.safety_code, "tone-grey", "shield-check"),
             el("div", "row-actions", forget(s.id, `the record of sending ${s.handle}`)),
           ),
         ),

@@ -1040,3 +1040,9 @@ button.md .i { width: 16px; height: 16px; }
 
 /* Buttons sit on the right and the primary one is last, as in dialogs. */
 .card .buttons { justify-content: flex-end; }
+
+/* Share history rows: name and kind, who and when, the note; the safety code
+   and actions on the right. */
+#received-rows .row-item, #sent-rows .row-item { padding: 12px 0; }
+#received-rows .chip, #sent-rows .chip { flex: none; }
+.row-item .note-line { color: var(--muted); font-style: normal; }
