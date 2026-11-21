@@ -1016,19 +1016,18 @@ button.md, dialog .actions button, .card .buttons button { min-height: 38px; pad
 #add.md { min-height: 36px; padding: 6px 18px; }
 button.md .i { width: 16px; height: 16px; }
 
-/* Settings is a plain list: rows divided by a line, no cards, no icon tiles.
-   The security note stays a callout because it is a warning, not a setting. */
+/* Settings: each group is a heading over one card; rows inside divide by a line. */
 #settings { gap: 0; }
-#settings > .panel { background: none; border: none; border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: none; padding: 16px 0; }
-#settings > .panel:last-child { border-bottom: none; }
-#settings > .panel.note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; }
+#settings > .panel.note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); padding: 12px 14px; margin-bottom: 4px; }
+.settings-card { padding: 0 16px; }
+.settings-card > .setting { padding: 14px 0; border-bottom: 1px solid var(--line); gap: 16px; }
+.settings-card > .setting:last-child { border-bottom: none; }
+.settings-card > .keys { padding: 14px 0; }
 #settings .stat-icon { width: 20px; height: 20px; background: none; border-radius: 0; color: var(--text-2); }
 #settings .stat-icon .i { width: 18px; height: 18px; }
-#settings .setting { gap: 16px; }
 
 /* Settings groups: a quiet sentence-case heading over each set of rows (the
    pattern Linear, Rise and Cartesia use), controls right-aligned in the rows. */
 .settings-group { margin: 22px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); }
-#settings > .settings-group:first-of-type, #settings > .note + .settings-group { margin-top: 18px; }
-#settings > .panel + .settings-group { margin-top: 24px; }
-#settings .panel.setting { padding: 14px 0; }
+#settings > .settings-group { margin: 22px 0 8px; }
+#settings > .note + .settings-group { margin-top: 18px; }
