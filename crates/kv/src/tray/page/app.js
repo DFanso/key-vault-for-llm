@@ -776,11 +776,6 @@
     if (!overview || page.locked) return;
     const approvals = overview.approvals;
     const requests = overview.handle_requests;
-    const waiting = approvals.length + requests.length;
-    $("stat-waiting").textContent = String(waiting);
-    $("stat-waiting").closest(".stat").classList.toggle("hot", waiting > 0);
-    $("stat-waiting-note").textContent =
-      waiting === 0 ? "Nothing waiting" : `${approvals.length} to approve · ${requests.length} asked for`;
     const handles = overview.handles;
     const modes = { auto: 0, ask: 0, deny: 0 };
     for (const h of handles) modes[h.mode] = (modes[h.mode] || 0) + 1;
@@ -923,9 +918,6 @@
       if (!timer) continue;
       const left = approval.expires_in_secs;
       timer.querySelector(".expires").textContent = `Expires in ${left}s`;
-      const bar = timer.querySelector("progress");
-      bar.max = page.lifetimes.get(approval.id) || left || 1;
-      bar.value = left;
       timer.classList.toggle("soon", left <= 15);
     }
   }
@@ -938,30 +930,28 @@
       for (const b of node.querySelectorAll(".buttons button")) b.disabled = true;
       send({ type: "decide", id: approval.id, verdict });
     };
-    const bar = el("progress");
-    bar.setAttribute("aria-label", "Time left to answer");
     const parts = [
       el(
         "div",
         "card-head",
         avatar(approval.client),
         el("div", "grow", el("div", "title", approval.client || "An agent"), el("div", "sub", `wants to use ${handles}`)),
-        chip(toolName, "tone-accent", toolIcon),
+        chip(toolName, "tone-grey", toolIcon),
       ),
-      el("div", "chips", ...approval.handles.map((h) => chip(h, "tone-grey", "key-round"))),
       el("div", "code-box", approval.detail),
       approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
       approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
       approval.headers ? el("div", "meta", icon("layers"), `headers ${approval.headers}`) : null,
       approval.body ? el("div", "meta", icon("file"), `body ${approval.body}`) : null,
-      el("div", "timer", bar, el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      el("div", "timer", el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
       el(
         "div",
         "buttons",
         button("Allow once", decide("allow_once"), "primary", "check"),
         approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
-        button("Deny", decide("deny"), "outline danger"),
-        button(`Deny and block ${handles}`, decide("deny_always"), "danger", "shield-x"),
+        button("Deny", decide("deny"), "outline strong"),
+        el("span", "push"),
+        button(`Deny and block ${handles}`, decide("deny_always"), "quiet", "shield-x"),
       ),
       el("p", "message"),
     ];

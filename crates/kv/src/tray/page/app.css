@@ -10,8 +10,8 @@
   --bg-glow: rgba(238, 79, 34, 0.08);
   --surface: #fbf9f7;
   --surface-2: #f1ece7;
-  --glass: rgba(255, 255, 255, 0.55);
-  --glass-hover: rgba(255, 255, 255, 0.8);
+  --glass: #f6f2ed;
+  --glass-hover: #fbf9f7;
   --line: #e2dbd4;
   --line-strong: #d3cac2;
   --text: #1e1a17;
@@ -50,8 +50,8 @@
     --bg-glow: rgba(255, 106, 61, 0.10);
     --surface: #2e2a28;
     --surface-2: #383431;
-    --glass: rgba(255, 255, 255, 0.06);
-    --glass-hover: rgba(255, 255, 255, 0.10);
+    --glass: #2e2a28;
+    --glass-hover: #38342f;
     --line: #423d3a;
     --line-strong: #544e4a;
     --text: #f7f5f3;
@@ -87,8 +87,8 @@
   --bg-glow: rgba(255, 106, 61, 0.10);
   --surface: #2e2a28;
   --surface-2: #383431;
-  --glass: rgba(255, 255, 255, 0.06);
-  --glass-hover: rgba(255, 255, 255, 0.10);
+  --glass: #2e2a28;
+  --glass-hover: #38342f;
   --line: #423d3a;
   --line-strong: #544e4a;
   --text: #f7f5f3;
@@ -124,7 +124,7 @@ html, body { height: 100%; }
 body {
   margin: 0;
   color: var(--text);
-  background: radial-gradient(900px 420px at 85% -10%, var(--bg-glow), transparent 60%), linear-gradient(170deg, var(--bg-top), var(--bg) 70%);
+  background: var(--bg);
   overflow: hidden;
 }
 
@@ -159,7 +159,7 @@ kbd { background: var(--surface-2); border: 1px solid var(--line-strong); border
   background-size: contain;
   background-repeat: no-repeat;
 }
-.logo-lg { width: 64px; height: 64px; filter: drop-shadow(0 10px 24px rgba(224, 80, 31, 0.35)); }
+.logo-lg { width: 64px; height: 64px; }
 
 /* Buttons. */
 button, input, select { font: inherit; color: inherit; }
@@ -378,7 +378,7 @@ button.round[aria-current="page"] { background: var(--accent-fill); border-color
 }
 .tabs button { flex: 1; min-width: 0; min-height: 34px; padding: 4px 10px; color: var(--text-2); }
 .tabs button:hover { background: var(--glass-hover); color: var(--text); }
-.tabs button[aria-current="page"] { background: var(--accent-fill); color: var(--on-accent); }
+.tabs button[aria-current="page"] { background: var(--surface-2); color: var(--text); border-color: var(--line-strong); }
 .tabs .label { overflow: hidden; text-overflow: ellipsis; }
 .count {
   min-width: 20px;
@@ -433,6 +433,12 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .stack:empty { display: none; }
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 #home .columns { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+/* Home leads with who is waiting, across the full width; activity and the
+   two counts sit under it. */
+#home .columns > .panel:first-child { grid-column: 1 / -1; }
+#home .stats { grid-template-columns: 1fr; }
+#home .stat { gap: 0; }
+#home .stat-value { font-size: 24px; margin-top: 2px; }
 .columns > * { min-width: 0; }
 .lede { color: var(--text-2); }
 .section-title { font-size: 14px; margin-top: 4px; }
@@ -546,15 +552,20 @@ section { display: flex; flex-direction: column; gap: 16px; }
 }
 .meta { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
 .meta .i { width: 14px; height: 14px; color: var(--muted); }
-.timer { display: flex; align-items: center; gap: 10px; }
-.timer progress { flex: 1; height: 6px; appearance: none; -webkit-appearance: none; border: none; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
-.timer progress::-webkit-progress-bar { background: var(--surface-2); border-radius: 999px; }
-.timer progress::-webkit-progress-value { background: var(--teal); border-radius: 999px; }
-.timer.soon progress::-webkit-progress-value { background: var(--red); }
-.timer .expires { font-size: 12px; font-weight: 650; color: var(--text-2); min-width: 92px; text-align: right; }
+/* A request is judged by where it goes: the destination is the largest thing
+   on the card, in full ink. The countdown is plain text, red only when short. */
+.card .code-box { font-size: 14px; line-height: 1.45; color: var(--text); padding: 12px 14px; border-color: var(--line-strong); }
+.card .meta { font-size: 13px; color: var(--text-2); }
+.timer { display: flex; align-items: center; }
+.timer .expires { font-size: 13px; font-weight: 600; color: var(--text-2); }
 .timer.soon .expires { color: var(--red); }
+button.outline.strong { border-color: var(--text-2); color: var(--text); }
+button.outline.strong:hover:not(:disabled) { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+button.quiet { color: var(--text-2); font-weight: 500; }
+button.quiet:hover:not(:disabled) { color: var(--red); background: var(--red-soft); }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .buttons .push { margin-left: auto; }
+span.push { flex: 1; }
 .card .message:empty { display: none; }
 
 /* Handles. */
@@ -811,7 +822,7 @@ button, input, select, .stat, .tile, .menu-banner, .switch.small {
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
 }
 button:active:not(:disabled) { transform: scale(0.98); }
-.stat:hover, .tile:hover { transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+.stat:hover, .tile:hover { border-color: var(--line-strong); }
 /* The moment kv unlocks: the mark pops in, the key turns, the shackle
    swings open, a green ring pulses; then it all fades into the view.
    Locking runs it backwards: the shackle swings shut, the key turns back,
@@ -826,7 +837,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
   justify-content: center;
   gap: 8px;
   text-align: center;
-  background: radial-gradient(600px 300px at 50% 35%, var(--bg-glow), transparent 70%), linear-gradient(170deg, var(--bg-top), var(--bg) 70%);
+  background: var(--bg);
 }
 .padlock.done { opacity: 0; transition: opacity 220ms ease; }
 .unlock-mark {
@@ -837,8 +848,8 @@ button:active:not(:disabled) { transform: scale(0.98); }
   height: 84px;
   margin-bottom: 10px;
   border-radius: 24px;
-  background: linear-gradient(135deg, #ff8a63, #e0501f);
-  box-shadow: 0 14px 34px rgba(224, 80, 31, 0.4);
+  background: var(--accent-fill);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
 }
 .unlock-mark svg { position: relative; z-index: 1; width: 54px; height: 54px; overflow: visible; }
 .unlock-mark::after {

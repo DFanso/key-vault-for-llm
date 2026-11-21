@@ -107,23 +107,6 @@
             <button type="button" class="chip-button" data-go="send"><span class="i i-send" aria-hidden="true"></span>Send a secret</button>
             <button type="button" class="chip-button" data-go="receive"><span class="i i-download" aria-hidden="true"></span>Receive a share</button>
         </div>
-        <div class="stats">
-          <button type="button" class="stat" data-goto="approvals">
-            <span class="stat-head"><span class="stat-icon tone-amber"><span class="i i-hourglass" aria-hidden="true"></span></span><span class="stat-label">Waiting for you</span></span>
-            <span class="stat-value" id="stat-waiting">0</span>
-            <span class="stat-note" id="stat-waiting-note"></span>
-          </button>
-          <button type="button" class="stat" data-goto="handles">
-            <span class="stat-head"><span class="stat-icon tone-accent"><span class="i i-key-round" aria-hidden="true"></span></span><span class="stat-label">Handles</span></span>
-            <span class="stat-value" id="stat-handles">0</span>
-            <span class="stat-note" id="stat-handles-note"></span>
-          </button>
-          <button type="button" class="stat" data-goto="shares">
-            <span class="stat-head"><span class="stat-icon tone-teal"><span class="i i-share-2" aria-hidden="true"></span></span><span class="stat-label">Shares</span></span>
-            <span class="stat-value" id="stat-shares">0</span>
-            <span class="stat-note" id="stat-shares-note"></span>
-          </button>
-        </div>
         <div class="columns">
           <div class="panel">
             <div class="panel-head"><h3><span class="i i-shield-check" aria-hidden="true"></span>Needs you</h3><button type="button" class="link" data-goto="approvals">See all<span class="i i-chevron-right" aria-hidden="true"></span></button></div>
@@ -137,7 +120,19 @@
           <div class="panel">
             <div class="panel-head"><h3><span class="i i-scroll-text" aria-hidden="true"></span>Recent activity</h3><button type="button" class="link" data-goto="audit">Audit log<span class="i i-chevron-right" aria-hidden="true"></span></button></div>
             <ol id="home-activity" class="activity"></ol>
-            <p id="home-no-activity" class="muted small center" hidden>Nothing has happened yet.</p>
+            <p id="home-no-activity" class="muted small center" hidden>No agent activity yet.</p>
+          </div>
+          <div class="stats">
+            <button type="button" class="stat" data-goto="handles">
+              <span class="stat-label">Handles</span>
+              <span class="stat-value" id="stat-handles">0</span>
+              <span class="stat-note" id="stat-handles-note"></span>
+            </button>
+            <button type="button" class="stat" data-goto="shares">
+              <span class="stat-label">Shares</span>
+              <span class="stat-value" id="stat-shares">0</span>
+              <span class="stat-note" id="stat-shares-note"></span>
+            </button>
           </div>
         </div>
       </section>
