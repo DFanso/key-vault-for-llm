@@ -994,3 +994,10 @@ select {
 select:hover { border-color: var(--line-strong); }
 select option { background: var(--surface); color: var(--text); }
 .mode-filter select { padding-right: 34px; }
+
+/* Share tiles are buttons: an arrow, a lifted fill and a clear edge on hover say so. */
+.tile { position: relative; cursor: pointer; }
+.tile .tile-go { position: absolute; top: 16px; right: 16px; color: var(--muted); transition: transform 150ms ease, color 150ms ease; }
+.tile:hover { background: var(--glass-hover); border-color: var(--line-strong); }
+.tile:hover .tile-go, .tile:focus-visible .tile-go { color: var(--text); transform: translateX(3px); }
+.tile:hover strong { color: var(--accent); }
