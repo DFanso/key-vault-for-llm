@@ -1006,3 +1006,8 @@ select option { background: var(--surface); color: var(--text); }
 /* A short warning beside a field's label, such as who can read what is typed. */
 .field label .flag { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; font-size: 12px; font-weight: 500; color: var(--amber); }
 .field label .flag .i { width: 13px; height: 13px; }
+
+/* Medium buttons: dialog actions and each screen's one main action. Small
+   (the default) stays for rows, toolbars, menus and secondary choices. */
+button.md, dialog .actions button { min-height: 38px; padding: 8px 20px; font-size: 14px; }
+button.md .i { width: 16px; height: 16px; }

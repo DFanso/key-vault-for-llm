@@ -939,7 +939,7 @@
       el(
         "div",
         "buttons",
-        button("Allow once", decide("allow_once"), "primary", "check"),
+        button("Allow once", decide("allow_once"), "primary md", "check"),
         approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
         button("Deny", decide("deny"), "outline strong"),
         el("span", "push"),
