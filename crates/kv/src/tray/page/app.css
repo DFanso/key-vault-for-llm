@@ -972,3 +972,8 @@ button:active:not(:disabled) { transform: scale(0.98); }
 
 /* Icon tiles are neutral; colour is kept for status (green, red). */
 .stat-icon.tone-accent, .stat-icon.tone-teal, .stat-icon.tone-amber, .stat-icon.tone-violet { background: var(--surface-2); color: var(--text-2); }
+
+/* The anti-phishing note is the page's most important line: amber edge, full ink. */
+.note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); align-items: center; }
+.note.security p { color: var(--text); }
+.note.security > .i { color: var(--amber); width: 18px; height: 18px; }

@@ -123,6 +123,8 @@
   const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
   const hints = document.querySelector(".app-footer .hints");
   if (hints) hints.textContent = `Esc hides · ${MOD}1–6 switch tabs · / search`;
+  const modKey = document.getElementById("mod-key");
+  if (modKey) modKey.textContent = MOD.replace("+", "");
 
   // Whether the tray copies a value for the page. It does on Windows, where
   // the page is served over https: it keeps the value out of clipboard
