@@ -1031,3 +1031,9 @@ button.md .i { width: 16px; height: 16px; }
 .settings-group { margin: 22px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); }
 #settings > .settings-group { margin: 22px 0 8px; }
 #settings > .note + .settings-group { margin-top: 18px; }
+
+/* The share result: lead text, then the code, then one compact safety line. */
+#share-result-about { margin-bottom: 14px; }
+.share-output { font-size: 12px; line-height: 1.55; }
+#share-result .callout { margin: 14px 0 4px; align-items: center; }
+#share-result .callout p { line-height: 1.5; }

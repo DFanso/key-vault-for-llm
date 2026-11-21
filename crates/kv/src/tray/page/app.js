@@ -1515,6 +1515,11 @@
     $("share-submit").disabled = busy;
   }
 
+  // The safety code stands out; the sentence after it says what to do with it.
+  function setSafety(code, [lead, advice]) {
+    $("share-safety").replaceChildren(el("strong", "safety-code", code), ` · ${lead}${advice}`.replace(/^ · $/, ""));
+  }
+
   function shareDone(result) {
     shareBusy(false);
     if (!page.share) return;
@@ -1524,36 +1529,28 @@
     switch (result.step) {
       case "requested":
         about =
-          "Send this code to the person who has the secret. It also waits under Waiting for a share " +
-          "until their share comes back; then use Receive a share.";
+          "Send this code to whoever has the secret. Your request waits under Waiting for a share " +
+          "until their share comes back.";
         output = result.code;
-        safety =
-          `Safety code ${result.safety_code}. They see it when they send. For anything sensitive, ` +
-          "check over a call that theirs matches before you use what arrives.";
+        safety = ["They see it when they send.", " For anything sensitive, confirm it matches over a call."];
         break;
       case "sealed":
         about =
-          `Send this back to ${result.to || "them"}. Only the vault that made the request can open ` +
-          "it. kv does not keep this text, so copy it before you close.";
+          `Send this back to ${result.to || "them"}. Only the vault that made the request can open it. ` +
+          "kv does not keep this text, so copy it before you close.";
         if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
         output = result.share;
         if ([...output].length > CHAT_MESSAGE_CHARS) {
-          about += " It is longer than one Telegram message, so send it as a text file rather than splitting it.";
+          about += " Too long for one Telegram message: send it as a text file.";
         }
-        safety =
-          `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
-          "for anything sensitive, check over a call that their request shows the same code before " +
-          "you send this.";
+        safety = ["Anyone in the chat could have posted that request.", " For anything sensitive, confirm over a call that it shows this code."];
         break;
       case "received":
         about =
-          `Saved as ${result.handle} (${result.kind}). ` +
+          `Saved as ${result.handle} (${result.kind}), in ask mode. ` +
           (result.from ? `It says it is from ${result.from}; nothing checks that. ` : "It gives no sender. ") +
-          "It starts in ask mode, so each use waits for you; add what it needs with Policy on the " +
-          "Handles screen.";
-        safety =
-          `Safety code ${result.safety_code}. For anything sensitive, check over a call that the ` +
-          "sender saw the same code.";
+          "Add what it needs under Policy on Handles.";
+        safety = ["", "For anything sensitive, confirm over a call that the sender saw this code."];
         break;
       default:
         return;
@@ -1561,7 +1558,7 @@
     $("share-result-about").textContent = about;
     $("share-output").textContent = output;
     show($("share-output"), Boolean(output));
-    $("share-safety").textContent = safety;
+    setSafety(result.safety_code, safety);
     shareResult(true);
     show($("share-copy"), Boolean(output));
     if (output) $("share-copy").focus();
@@ -1574,16 +1571,13 @@
     shareBusy(false);
     if (!page.share) return;
     let about =
-      `Saved as a file, because it is too long for a chat message. Send that file to ${result.to || "them"} ` +
-      "as an attachment, exactly as it is and not as text. Only the vault that made the request can open it.";
+      `Too long for a chat message, so saved as a file. Send that file to ${result.to || "them"} as an ` +
+      "attachment, not as text. Only the vault that made the request can open it.";
     if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
     $("share-result-about").textContent = about;
     $("share-output").textContent = result.path;
     show($("share-output"), true);
-    $("share-safety").textContent =
-      `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
-      "for anything sensitive, check over a call that their request shows the same code before " +
-      "you send this.";
+    setSafety(result.safety_code, ["Anyone in the chat could have posted that request.", " For anything sensitive, confirm over a call that it shows this code."]);
     shareResult(true);
     show($("share-copy"), true);
     show($("share-show"), true);
