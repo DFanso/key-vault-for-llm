@@ -175,19 +175,17 @@
   const SHARE_STEPS = {
     request: {
       title: "Request a secret",
-      icon: ["inbox", "tone-accent"],
       about:
         "kv makes a code for you to send to the person who has the secret. It holds only a public " +
         "key, so any chat can carry it.",
       submit: "Make code",
       note: [
         "What you need",
-        "Optional, e.g. the staging database URL. It goes in the code, which anyone in the chat can read.",
+        "Optional, e.g. the staging DB URL. Anyone in the chat can read it.",
       ],
     },
     send: {
       title: "Send a secret",
-      icon: ["send", "tone-teal"],
       about:
         "Paste the request code they sent you and pick a handle. kv seals its value so that only " +
         "the vault that made the code can open it.",
@@ -198,7 +196,6 @@
     },
     receive: {
       title: "Receive a share",
-      icon: ["download", "tone-amber"],
       about:
         "Paste the share they sent back. kv opens it with the key of your open request and saves it " +
         "as a new handle in ask mode.",
@@ -1412,8 +1409,6 @@
     page.share = step;
     $("share-form").reset();
     $("share-title").textContent = spec.title;
-    $("share-icon").className = `stat-icon ${spec.icon[1]}`;
-    $("share-icon").replaceChildren(icon(spec.icon[0]));
     $("share-about").textContent = spec.about;
     $("share-submit").textContent = spec.submit;
     for (const node of $("share-ask").querySelectorAll(".field")) {
