@@ -950,7 +950,7 @@
         "buttons",
         button(`Deny and block ${handles}`, decide("deny_always"), "quiet", "shield-x"),
         el("span", "push"),
-        button("Deny", decide("deny"), "outline strong"),
+        button("Deny", decide("deny"), "outline"),
         approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
         button("Allow once", decide("allow_once"), "primary md", "check"),
       ),

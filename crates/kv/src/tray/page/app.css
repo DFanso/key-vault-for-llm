@@ -563,8 +563,6 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .timer { display: flex; align-items: center; }
 .timer .expires { font-size: 13px; font-weight: 600; color: var(--text-2); }
 .timer.soon .expires { color: var(--red); }
-button.outline.strong { border-color: var(--text-2); color: var(--text); }
-button.outline.strong:hover:not(:disabled) { border-color: var(--red); color: var(--red); background: var(--red-soft); }
 button.quiet { color: var(--text-2); font-weight: 500; }
 button.quiet:hover:not(:disabled) { color: var(--red); background: var(--red-soft); }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
