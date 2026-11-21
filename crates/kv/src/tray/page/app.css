@@ -977,3 +977,19 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); align-items: center; }
 .note.security p { color: var(--text); }
 .note.security > .i { color: var(--amber); width: 18px; height: 18px; }
+
+/* Selects match the search field and tab pills: one drawn chevron, a hover
+   edge, and option lists that follow the theme. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b837d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+}
+select:hover { border-color: var(--line-strong); }
+select option { background: var(--surface); color: var(--text); }
+.mode-filter select { padding-right: 34px; }
