@@ -120,6 +120,9 @@
 
   // The keys that copy a selection here.
   const COPY_KEYS = /Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+C";
+  const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+  const hints = document.querySelector(".app-footer .hints");
+  if (hints) hints.textContent = `Esc hides · ${MOD}1–6 switch tabs · / search`;
 
   // Whether the tray copies a value for the page. It does on Windows, where
   // the page is served over https: it keeps the value out of clipboard
@@ -731,10 +734,11 @@
     const overview = page.overview;
     const secs = overview && overview.status.locks_in_secs;
     const locksIn = secs === null || secs === undefined ? "Stays unlocked until you lock it" : `Locks in ${duration(secs)}`;
-    $("locks-in").textContent = locksIn;
     $("settings-locks-in").textContent = `Unlocked. ${locksIn}.`;
     const soon = typeof secs === "number" && secs < 600;
-    $("brand-text").textContent = soon ? `Locks in ${duration(secs)}` : "Unlocked";
+    // The lock countdown is a security fact: it lives in the status pill.
+    $("brand-text").textContent =
+      typeof secs === "number" ? (soon ? `Locks in ${duration(secs)}` : `Unlocked · locks in ${duration(secs)}`) : "Unlocked";
     $("brand-status").classList.toggle("soon", soon);
 
     const approvals = overview ? overview.approvals : [];
@@ -747,8 +751,7 @@
       else tab.removeAttribute("aria-current");
     }
     for (const name of SCREENS) show($(name), name === page.screen);
-    $("page-title").textContent = page.screen === "home" ? greeting() : TITLES[page.screen] || "kv";
-    $("today").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    $("page-title").textContent = TITLES[page.screen] || "kv";
     $("login").setAttribute("aria-checked", String(page.login));
     if (!overview) return;
     drawHome();
@@ -756,11 +759,6 @@
     drawRequests(requests);
     drawHandles(overview.handles, overview.role_warnings || {});
     drawShares(overview.shares || { requests: [], received: [], sent: [] }, overview.handles);
-  }
-
-  function greeting() {
-    const hour = new Date().getHours();
-    return hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   }
 
   function counter(id, n, what) {

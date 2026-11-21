@@ -355,6 +355,8 @@ input:focus, select:focus { border-color: var(--accent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 .status-line.soon .dot, .status-pill.soon .dot { background: var(--amber); }
 .round-actions { display: flex; gap: 8px; }
+/* Close sits apart from Lock so a quick tap on one cannot be the other. */
+.round-actions #hide { margin-left: 14px; }
 button.round {
   width: 36px;
   height: 36px;
