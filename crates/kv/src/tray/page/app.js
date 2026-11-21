@@ -939,11 +939,11 @@
       el(
         "div",
         "buttons",
-        button("Allow once", decide("allow_once"), "primary md", "check"),
-        approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
-        button("Deny", decide("deny"), "outline strong"),
-        el("span", "push"),
         button(`Deny and block ${handles}`, decide("deny_always"), "quiet", "shield-x"),
+        el("span", "push"),
+        button("Deny", decide("deny"), "outline strong"),
+        approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
+        button("Allow once", decide("allow_once"), "primary md", "check"),
       ),
       el("p", "message"),
     ];
@@ -979,8 +979,8 @@
         el(
           "div",
           "buttons",
-          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary", "pencil"),
           button("Dismiss", () => send({ type: "dismiss", id: requested.id }), "outline"),
+          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary", "pencil"),
         ),
       );
     });
@@ -1135,7 +1135,6 @@
         el(
           "div",
           "buttons",
-          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget.querySelector(".text")), "primary", "copy"),
           button(
             request.expired ? "Remove" : "Cancel request",
             () =>
@@ -1146,6 +1145,7 @@
               ),
             "outline danger",
           ),
+          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget.querySelector(".text")), "primary", "copy"),
         ),
       );
     });

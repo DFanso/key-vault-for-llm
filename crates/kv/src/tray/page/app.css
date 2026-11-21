@@ -1037,3 +1037,6 @@ button.md .i { width: 16px; height: 16px; }
 .share-output { font-size: 12px; line-height: 1.55; }
 #share-result .callout { margin: 14px 0 4px; align-items: center; }
 #share-result .callout p { line-height: 1.5; }
+
+/* Buttons sit on the right and the primary one is last, as in dialogs. */
+.card .buttons { justify-content: flex-end; }
