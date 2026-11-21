@@ -589,7 +589,7 @@ span.push { flex: 1; }
 /* The Handles toolbar: search, the mode to show, and New handle. */
 .mode-filter { flex: none; }
 /* Search stays short with the mode filter beside it; New handle sits alone in the right corner. */
-#handle-find { flex: 0 1 300px; }
+#handle-find, #audit .search { flex: 0 1 300px; }
 #add { margin-left: auto; }
 .mode-filter select { width: auto; min-width: 128px; padding-right: 30px; }
 #handles .kind-tabs { margin-top: -2px; }
