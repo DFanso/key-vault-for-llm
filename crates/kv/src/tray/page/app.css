@@ -1049,3 +1049,7 @@ button.md .i { width: 16px; height: 16px; }
 
 /* The safety code sits under the details so a half-width column never crowds the name. */
 .row-item .code-chip { align-self: flex-start; margin-top: 4px; }
+
+/* The quiet button at the left of a card's row lines up with the card's text edge. */
+.card .buttons button.quiet { padding-left: 0; }
+.card .buttons button.quiet:hover:not(:disabled) { background: none; }
