@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "kv"
-version = "1.9.2"
+version = "1.9.3"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "kv-core"
-version = "1.9.2"
+version = "1.9.3"
 dependencies = [
  "aho-corasick",
  "argon2",
