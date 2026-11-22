@@ -11,10 +11,11 @@ use std::io::BufRead;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kv_core::crypto::fill_random;
-use kv_core::proto::{Approval, Verdict};
+use kv_core::proto::{self, Approval, NoticeKind, Verdict};
 use serde::{Deserialize, Serialize};
 
 use super::model::flat;
+use super::window::Tab;
 
 /// How long a notification's title may be.
 const TITLE_LEN: usize = 80;
@@ -53,6 +54,83 @@ pub struct Notice {
     /// back.
     #[serde(default = "with_answers")]
     pub answers: bool,
+    /// The one button a notice without answers offers, if any. It does
+    /// what a click on the notice does.
+    #[serde(default)]
+    pub button: Option<Button>,
+}
+
+/// The button of a notice that is not a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Button {
+    /// "Unlock": Touch ID where it is set up, else kv's window asks for
+    /// the passphrase.
+    Unlock,
+    /// "Open kv", on the tab the notice is about.
+    Open,
+}
+
+impl Button {
+    /// The id the platform hands back when it is picked, and its label.
+    pub const ALL: [(Button, &'static str, &'static str); 2] = [
+        (Button::Unlock, "unlock", "Unlock"),
+        (Button::Open, "open", "Open kv"),
+    ];
+
+    pub fn id(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(button, ..)| *button == self)
+            .map(|(_, id, _)| *id)
+            .expect("every button is listed")
+    }
+}
+
+/// Whether `answer`, an id the platform handed back, is one of the
+/// buttons of a notice that is not a request.
+pub fn is_button(answer: &str) -> bool {
+    Button::ALL.iter().any(|(_, id, _)| *id == answer)
+}
+
+/// What a click on a notice that is not a request does, by its key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Click {
+    Unlock,
+    Open(Tab),
+}
+
+/// How the key of an "unlock needed" notice starts.
+pub const UNLOCK_PREFIX: &str = "kv-unlock-";
+/// How the key of a notice that opens kv's window on a tab starts; the
+/// tab's name follows.
+const OPEN_PREFIX: &str = "kv-open-";
+
+/// What a click on the notice `key` does, if it is one of the daemon's
+/// notices rather than a request or an update.
+pub fn click(key: &str) -> Option<Click> {
+    if key.starts_with(UNLOCK_PREFIX) {
+        return Some(Click::Unlock);
+    }
+    let rest = key.strip_prefix(OPEN_PREFIX)?;
+    let tab = rest.split('-').next()?;
+    TABS.iter()
+        .find(|(_, name)| *name == tab)
+        .map(|(tab, _)| Click::Open(*tab))
+}
+
+const TABS: [(Tab, &str); 5] = [
+    (Tab::Home, "home"),
+    (Tab::Approvals, "approvals"),
+    (Tab::Handles, "handles"),
+    (Tab::Shares, "shares"),
+    (Tab::Audit, "audit"),
+];
+
+fn nonce() -> String {
+    let mut nonce = [0u8; 8];
+    fill_random(&mut nonce);
+    hex::encode(nonce)
 }
 
 fn with_answers() -> bool {
@@ -62,12 +140,46 @@ fn with_answers() -> bool {
 impl Notice {
     /// The notification for `approval`, under a fresh key.
     pub fn new(approval: &Approval) -> Notice {
-        let mut nonce = [0u8; 8];
-        fill_random(&mut nonce);
-        Notice::with_key(
-            approval,
-            format!("kv-request-{}-{}", approval.id, hex::encode(nonce)),
-        )
+        Notice::with_key(approval, format!("kv-request-{}-{}", approval.id, nonce()))
+    }
+
+    /// The notification for `approval` again, under a fresh key, saying
+    /// it is a reminder and how long is left.
+    pub fn reminder(approval: &Approval) -> Notice {
+        let mut notice = Notice::new(approval);
+        notice.subtitle = format!(
+            "Reminder: about {} s left · {}",
+            approval.expires_in_secs, notice.subtitle
+        );
+        notice
+    }
+
+    /// One of the daemon's notices, under a fresh key that says what a
+    /// click does: unlock kv, or open its window where the notice points.
+    /// A reminder whose request this tray shows no notification for (it
+    /// has no session) opens the Approvals tab.
+    pub fn from_daemon(notice: &proto::Notice) -> Notice {
+        let (key, button) = match notice.kind {
+            NoticeKind::UnlockNeeded => (format!("{UNLOCK_PREFIX}{}", nonce()), Button::Unlock),
+            other => {
+                let tab = match other {
+                    NoticeKind::Missed => "audit",
+                    NoticeKind::HandleRequested => "handles",
+                    NoticeKind::ShareReceived => "shares",
+                    NoticeKind::Reminder { .. } | NoticeKind::UnlockNeeded => "approvals",
+                };
+                (format!("{OPEN_PREFIX}{tab}-{}", nonce()), Button::Open)
+            }
+        };
+        Notice {
+            key,
+            title: flat(notice.title.trim_start_matches("kv: "), TITLE_LEN),
+            subtitle: String::new(),
+            body: flat(&notice.body, BODY_LEN),
+            can_grant: false,
+            answers: false,
+            button: Some(button),
+        }
     }
 
     pub fn with_key(approval: &Approval, key: String) -> Notice {
@@ -93,6 +205,7 @@ impl Notice {
             body,
             can_grant: approval.can_grant,
             answers: true,
+            button: None,
         }
     }
 
@@ -107,6 +220,7 @@ impl Notice {
             body: UPDATE_BODY.to_owned(),
             can_grant: false,
             answers: false,
+            button: None,
         }
     }
 }
@@ -271,6 +385,63 @@ mod tests {
             assert!(!line.contains('\n'), "{line}");
             assert_eq!(serde_json::from_str::<ToHelper>(&line).unwrap(), message);
         }
+    }
+
+    fn daemon_notice(kind: NoticeKind) -> proto::Notice {
+        proto::Notice {
+            kind,
+            title: "kv: unlock needed".into(),
+            body: "claude-code is waiting (exec): unlock kv.".into(),
+        }
+    }
+
+    #[test]
+    fn an_unlock_notice_offers_unlock_and_a_click_unlocks() {
+        let notice = Notice::from_daemon(&daemon_notice(NoticeKind::UnlockNeeded));
+        assert_eq!(notice.title, "unlock needed");
+        assert_eq!(notice.body, "claude-code is waiting (exec): unlock kv.");
+        assert_eq!(notice.button, Some(Button::Unlock));
+        assert!(!notice.answers);
+        assert_eq!(click(&notice.key), Some(Click::Unlock));
+    }
+
+    #[test]
+    fn other_daemon_notices_open_kv_where_they_point() {
+        for (kind, tab) in [
+            (NoticeKind::Missed, Tab::Audit),
+            (NoticeKind::HandleRequested, Tab::Handles),
+            (NoticeKind::ShareReceived, Tab::Shares),
+            (NoticeKind::Reminder { id: 3 }, Tab::Approvals),
+        ] {
+            let notice = Notice::from_daemon(&daemon_notice(kind));
+            assert_eq!(notice.button, Some(Button::Open), "{kind:?}");
+            assert_eq!(click(&notice.key), Some(Click::Open(tab)), "{kind:?}");
+        }
+        assert_eq!(click("kv-request-7-00"), None);
+        assert_eq!(click("update-1.2.3"), None);
+        assert_eq!(click("kv-open-nowhere-00"), None);
+    }
+
+    #[test]
+    fn a_reminder_is_the_request_again_under_a_new_key() {
+        let first = Notice::new(&approval());
+        let again = Notice::reminder(&Approval {
+            expires_in_secs: 29,
+            ..approval()
+        });
+        assert_ne!(first.key, again.key);
+        assert!(again.key.starts_with("kv-request-7-"), "{}", again.key);
+        assert_eq!(again.subtitle, "Reminder: about 29 s left · Run a command");
+        assert!(again.answers);
+        assert_eq!(again.title, first.title);
+    }
+
+    #[test]
+    fn buttons_are_told_from_answers() {
+        assert!(is_button("unlock"));
+        assert!(is_button("open"));
+        assert!(!is_button("allow_once"));
+        assert_eq!(Button::Unlock.id(), "unlock");
     }
 
     #[test]

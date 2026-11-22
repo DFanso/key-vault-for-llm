@@ -38,11 +38,13 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::tray::model::Action;
-use crate::tray::notices::{self, ANSWERS, FromHelper, Notice, ToHelper, read_helper};
+use crate::tray::notices::{self, ANSWERS, Button, FromHelper, Notice, ToHelper, read_helper};
 
 /// The categories: with Allow for this session, and without it.
 const CATEGORY: &str = "kv-request";
 const CATEGORY_ONCE: &str = "kv-request-once";
+/// The category of a notice with one button, by its id.
+const BUTTON_CATEGORY: &str = "kv-button-";
 /// Groups kv's notifications together in Notification Center.
 const THREAD: &str = "kv-requests";
 /// How often the user's notification settings are read again: they may turn
@@ -302,6 +304,11 @@ impl Center {
                 CATEGORY_ONCE
             };
             content.setCategoryIdentifier(&NSString::from_str(category));
+        } else if let Some(button) = notice.button {
+            content.setCategoryIdentifier(&NSString::from_str(&format!(
+                "{BUTTON_CATEGORY}{}",
+                button.id()
+            )));
         }
         content.setThreadIdentifier(&NSString::from_str(THREAD));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
@@ -370,7 +377,28 @@ fn categories() -> Retained<NSSet<UNNotificationCategory>> {
             UNNotificationCategoryOptions::empty(),
         )
     };
-    NSSet::from_retained_slice(&[category(CATEGORY, true), category(CATEGORY_ONCE, false)])
+    // Unlock and Open kv only bring up kv: Touch ID or the passphrase
+    // still guard the vault, so they need no unlocked Mac.
+    let button = |button: Button, label: &str| {
+        let action = UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(button.id()),
+            &NSString::from_str(label),
+            UNNotificationActionOptions::empty(),
+        );
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(&format!("{BUTTON_CATEGORY}{}", button.id())),
+            &NSArray::from_retained_slice(&[action]),
+            &NSArray::new(),
+            UNNotificationCategoryOptions::empty(),
+        )
+    };
+    let mut all = vec![category(CATEGORY, true), category(CATEGORY_ONCE, false)];
+    all.extend(
+        Button::ALL
+            .iter()
+            .map(|(which, _, label)| button(*which, label)),
+    );
+    NSSet::from_retained_slice(&all)
 }
 
 /// Hands an answer to the tray.
@@ -403,7 +431,9 @@ define_class!(
             let answer = response.actionIdentifier();
             let verdict = notices::verdict(&answer.to_string());
             // SAFETY: a constant string the framework exports.
-            let clicked = answer.isEqualToString(unsafe { UNNotificationDefaultActionIdentifier });
+            let clicked = answer.isEqualToString(unsafe { UNNotificationDefaultActionIdentifier })
+                // Unlock and Open kv do what a click does.
+                || notices::is_button(&answer.to_string());
             if verdict.is_some() || clicked {
                 (self.ivars().answer)(key, verdict);
             }
