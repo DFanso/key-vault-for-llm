@@ -733,7 +733,7 @@ kv binary can no longer read the Touch ID key until you allow it once; see
 [Touch ID and Windows Hello](#touch-id-and-windows-hello) and choose Always
 Allow.
 
-### Upgrading from 1.9.2 or earlier
+### Upgrading from 1.9.3 or earlier
 
 An agent's call that finds the vault locked now waits up to 30 seconds for
 you to unlock it, after a notification saying so, instead of failing at
