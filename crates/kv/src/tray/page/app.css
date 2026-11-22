@@ -5,21 +5,21 @@
    WCAG AA (4.5:1) on the surfaces it sits on, and every solid fill behind
    white text (--accent-fill, --red-fill) does too. */
 :root {
-  --bg: #ece7e2;
-  --bg-top: #f6f2ee;
-  --bg-glow: rgba(238, 79, 34, 0.08);
-  --surface: #fbf9f7;
-  --surface-2: #f1ece7;
-  --glass: rgba(255, 255, 255, 0.55);
-  --glass-hover: rgba(255, 255, 255, 0.8);
-  --line: #e2dbd4;
-  --line-strong: #d3cac2;
-  --text: #1e1a17;
-  --text-2: #5b544f;
-  --muted: #6b635d;
-  --accent: #b03413;
-  --accent-soft: rgba(238, 79, 34, 0.13);
-  --accent-fill: #c93c14;
+  --bg: #e9edf3;
+  --bg-top: #f3f6fa;
+  --bg-glow: transparent;
+  --surface: #fbfcfe;
+  --surface-2: #eef1f6;
+  --glass: #f4f6fa;
+  --glass-hover: #fbfcfe;
+  --line: #dde2ea;
+  --line-strong: #c9d0db;
+  --text: #14181f;
+  --text-2: #4a5361;
+  --muted: #5f6a7a;
+  --accent: #1f4fb8;
+  --accent-soft: rgba(36, 85, 194, 0.12);
+  --accent-fill: #1a3f9a;
   --on-accent: #ffffff;
   --teal: #0d5c99;
   --teal-soft: rgba(13, 92, 153, 0.12);
@@ -36,7 +36,7 @@
   --badge-bg: #8a5200;
   --badge-fg: #ffffff;
   --shadow: 0 1px 2px rgba(30, 26, 23, 0.06);
-  --shadow-lg: 0 20px 60px rgba(30, 26, 23, 0.22);
+  --shadow-lg: 0 12px 28px rgba(30, 26, 23, 0.20);
   --radius: 14px;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace;
   font: 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -45,21 +45,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #24211f;
-    --bg-top: #393431;
-    --bg-glow: rgba(255, 106, 61, 0.10);
-    --surface: #2e2a28;
-    --surface-2: #383431;
-    --glass: rgba(255, 255, 255, 0.06);
-    --glass-hover: rgba(255, 255, 255, 0.10);
-    --line: #423d3a;
-    --line-strong: #544e4a;
-    --text: #f7f5f3;
-    --text-2: #c9c3be;
-    --muted: #b8b1ac;
-    --accent: #ff9a78;
-    --accent-soft: rgba(255, 106, 61, 0.18);
-    --accent-fill: #c93c14;
+    --bg: #131519;
+    --bg-top: #131519;
+    --bg-glow: transparent;
+    --surface: #1a1d23;
+    --surface-2: #232730;
+    --glass: #1a1d23;
+    --glass-hover: #232730;
+    --line: #2a2e37;
+    --line-strong: #3a3f4a;
+    --text: #f2f4f7;
+    --text-2: #c3c8d1;
+    --muted: #9aa1ad;
+    --accent: #8db4ff;
+    --accent-soft: rgba(76, 141, 255, 0.16);
+    --accent-fill: #1a3f9a;
     --on-accent: #ffffff;
     --teal: #7ccbf7;
     --teal-soft: rgba(79, 184, 242, 0.15);
@@ -76,27 +76,27 @@
     --badge-bg: #ffbe4d;
     --badge-fg: #1e1a17;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-    --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.45);
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #24211f;
-  --bg-top: #393431;
-  --bg-glow: rgba(255, 106, 61, 0.10);
-  --surface: #2e2a28;
-  --surface-2: #383431;
-  --glass: rgba(255, 255, 255, 0.06);
-  --glass-hover: rgba(255, 255, 255, 0.10);
-  --line: #423d3a;
-  --line-strong: #544e4a;
-  --text: #f7f5f3;
-  --text-2: #c9c3be;
-  --muted: #b8b1ac;
-  --accent: #ff9a78;
-  --accent-soft: rgba(255, 106, 61, 0.18);
-  --accent-fill: #c93c14;
+  --bg: #131519;
+  --bg-top: #131519;
+  --bg-glow: transparent;
+  --surface: #1a1d23;
+  --surface-2: #232730;
+  --glass: #1a1d23;
+  --glass-hover: #232730;
+  --line: #2a2e37;
+  --line-strong: #3a3f4a;
+  --text: #f2f4f7;
+  --text-2: #c3c8d1;
+  --muted: #9aa1ad;
+  --accent: #8db4ff;
+  --accent-soft: rgba(76, 141, 255, 0.16);
+  --accent-fill: #1a3f9a;
   --on-accent: #ffffff;
   --teal: #7ccbf7;
   --teal-soft: rgba(79, 184, 242, 0.15);
@@ -113,7 +113,7 @@
   --badge-bg: #ffbe4d;
   --badge-fg: #1e1a17;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.45);
   color-scheme: dark;
 }
 
@@ -124,14 +124,14 @@ html, body { height: 100%; }
 body {
   margin: 0;
   color: var(--text);
-  background: radial-gradient(900px 420px at 85% -10%, var(--bg-glow), transparent 60%), linear-gradient(170deg, var(--bg-top), var(--bg) 70%);
+  background: var(--bg);
   overflow: hidden;
 }
 
 h1, h2, h3 { margin: 0; line-height: 1.25; }
 h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
 h2 { font-size: 17px; font-weight: 650; }
-h3 { font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+h3, .panel-title { font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
 p { margin: 0; }
 code, .code, kbd { font-family: var(--mono); font-size: 0.92em; }
 code { background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px; }
@@ -159,7 +159,7 @@ kbd { background: var(--surface-2); border: 1px solid var(--line-strong); border
   background-size: contain;
   background-repeat: no-repeat;
 }
-.logo-lg { width: 64px; height: 64px; filter: drop-shadow(0 10px 24px rgba(224, 80, 31, 0.35)); }
+.logo-lg { width: 64px; height: 64px; }
 
 /* Buttons. */
 button, input, select { font: inherit; color: inherit; }
@@ -221,7 +221,7 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .segmented button { min-height: 28px; padding: 3px 12px; color: var(--text-2); font-weight: 600; }
 .segmented button:hover { background: var(--glass-hover); color: var(--text); }
-.segmented button[aria-checked="true"] { background: var(--accent-fill); color: var(--on-accent); }
+.segmented button[aria-checked="true"] { background: var(--surface-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .segmented button .i { width: 14px; height: 14px; }
 .segmented.small button { min-height: 26px; padding: 2px 10px; font-size: 12px; }
 
@@ -238,8 +238,10 @@ input:focus, select:focus { border-color: var(--accent); }
 }
 .kind-tabs button .i { width: 14px; height: 14px; }
 .kind-tabs button:hover { background: var(--glass-hover); color: var(--text); }
-.kind-tabs button[aria-selected="true"] { background: var(--accent-fill); border-color: transparent; color: var(--on-accent); }
-.kind-tabs button[aria-selected="true"] .count { background: rgba(255, 255, 255, 0.25); color: inherit; }
+.kind-tabs button[aria-selected="true"] { background: var(--surface-2); border-color: var(--line-strong); color: var(--text); }
+/* Counts of things that need no answer stay neutral; only Approvals is amber. */
+.kind-tabs .count { background: var(--surface-2); color: var(--text-2); }
+.kind-tabs button[aria-selected="true"] .count { background: var(--glass); color: var(--text); }
 .kind-tabs button.none:not([aria-selected="true"]) { opacity: 0.6; }
 .kind-tabs.small button { min-height: 26px; padding: 2px 10px; font-size: 12px; }
 
@@ -343,7 +345,7 @@ input:focus, select:focus { border-color: var(--accent); }
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 1px 10px 1px 8px;
+  padding: 3px 10px 3px 8px;
   border-radius: 999px;
   background: var(--green-soft);
   color: var(--text);
@@ -355,6 +357,8 @@ input:focus, select:focus { border-color: var(--accent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
 .status-line.soon .dot, .status-pill.soon .dot { background: var(--amber); }
 .round-actions { display: flex; gap: 8px; }
+/* Close sits apart from Lock so a quick tap on one cannot be the other. */
+.round-actions #hide { margin-left: 14px; }
 button.round {
   width: 36px;
   height: 36px;
@@ -366,7 +370,7 @@ button.round {
   color: var(--text);
 }
 button.round:hover { background: var(--glass-hover); }
-button.round[aria-current="page"] { background: var(--accent-fill); border-color: transparent; color: var(--on-accent); }
+button.round[aria-current="page"] { background: var(--surface-2); border-color: var(--line-strong); color: var(--text); }
 .tabs {
   display: flex;
   gap: 4px;
@@ -378,7 +382,7 @@ button.round[aria-current="page"] { background: var(--accent-fill); border-color
 }
 .tabs button { flex: 1; min-width: 0; min-height: 34px; padding: 4px 10px; color: var(--text-2); }
 .tabs button:hover { background: var(--glass-hover); color: var(--text); }
-.tabs button[aria-current="page"] { background: var(--accent-fill); color: var(--on-accent); }
+.tabs button[aria-current="page"] { background: var(--surface-2); color: var(--text); border-color: var(--line-strong); }
 .tabs .label { overflow: hidden; text-overflow: ellipsis; }
 .count {
   min-width: 20px;
@@ -433,6 +437,12 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .stack:empty { display: none; }
 .columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 #home .columns { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+/* Home leads with who is waiting, across the full width; activity and the
+   two counts sit under it. */
+#home .columns > .panel:first-child { grid-column: 1 / -1; }
+#home .stats { grid-template-columns: 1fr; }
+#home .stat { gap: 0; }
+#home .stat-value { font-size: 24px; margin-top: 2px; }
 .columns > * { min-width: 0; }
 .lede { color: var(--text-2); }
 .section-title { font-size: 14px; margin-top: 4px; }
@@ -529,7 +539,7 @@ section { display: flex; flex-direction: column; gap: 16px; }
 
 /* Approvals. */
 .card { display: flex; flex-direction: column; gap: 10px; }
-.card.waiting-card { border-color: var(--amber-edge); }
+.card.waiting-card { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .card-head { display: flex; align-items: center; gap: 12px; }
 .card-head .grow { flex: 1; min-width: 0; }
 .card-head .title { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
@@ -546,15 +556,18 @@ section { display: flex; flex-direction: column; gap: 16px; }
 }
 .meta { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; overflow-wrap: anywhere; }
 .meta .i { width: 14px; height: 14px; color: var(--muted); }
-.timer { display: flex; align-items: center; gap: 10px; }
-.timer progress { flex: 1; height: 6px; appearance: none; -webkit-appearance: none; border: none; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
-.timer progress::-webkit-progress-bar { background: var(--surface-2); border-radius: 999px; }
-.timer progress::-webkit-progress-value { background: var(--teal); border-radius: 999px; }
-.timer.soon progress::-webkit-progress-value { background: var(--red); }
-.timer .expires { font-size: 12px; font-weight: 650; color: var(--text-2); min-width: 92px; text-align: right; }
+/* A request is judged by where it goes: the destination is the largest thing
+   on the card, in full ink. The countdown is plain text, red only when short. */
+.card .code-box { font-size: 14px; line-height: 1.45; color: var(--text); padding: 12px 14px; border-color: var(--line-strong); }
+.card .meta { font-size: 13px; color: var(--text-2); }
+.timer { display: flex; align-items: center; }
+.timer .expires { font-size: 13px; font-weight: 600; color: var(--text-2); }
 .timer.soon .expires { color: var(--red); }
+button.quiet { color: var(--text-2); font-weight: 500; }
+button.quiet:hover:not(:disabled) { color: var(--red); background: var(--red-soft); }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .buttons .push { margin-left: auto; }
+span.push { flex: 1; }
 .card .message:empty { display: none; }
 
 /* Handles. */
@@ -573,7 +586,8 @@ section { display: flex; flex-direction: column; gap: 16px; }
 .row-actions { display: flex; gap: 2px; }
 /* The Handles toolbar: search, the mode to show, and New handle. */
 .mode-filter { flex: none; }
-/* Alone in the toolbar (no handles yet), New handle still sits on the right. */
+/* Search stays short with the mode filter beside it; New handle sits alone in the right corner. */
+#handle-find, #audit .search { flex: 0 1 300px; }
 #add { margin-left: auto; }
 .mode-filter select { width: auto; min-width: 128px; padding-right: 30px; }
 #handles .kind-tabs { margin-top: -2px; }
@@ -811,7 +825,7 @@ button, input, select, .stat, .tile, .menu-banner, .switch.small {
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
 }
 button:active:not(:disabled) { transform: scale(0.98); }
-.stat:hover, .tile:hover { transform: translateY(-1px); box-shadow: var(--shadow-lg); }
+.stat:hover, .tile:hover { border-color: var(--line-strong); }
 /* The moment kv unlocks: the mark pops in, the key turns, the shackle
    swings open, a green ring pulses; then it all fades into the view.
    Locking runs it backwards: the shackle swings shut, the key turns back,
@@ -826,7 +840,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
   justify-content: center;
   gap: 8px;
   text-align: center;
-  background: radial-gradient(600px 300px at 50% 35%, var(--bg-glow), transparent 70%), linear-gradient(170deg, var(--bg-top), var(--bg) 70%);
+  background: var(--bg);
 }
 .padlock.done { opacity: 0; transition: opacity 220ms ease; }
 .unlock-mark {
@@ -837,8 +851,8 @@ button:active:not(:disabled) { transform: scale(0.98); }
   height: 84px;
   margin-bottom: 10px;
   border-radius: 24px;
-  background: linear-gradient(135deg, #ff8a63, #e0501f);
-  box-shadow: 0 14px 34px rgba(224, 80, 31, 0.4);
+  background: var(--accent-fill);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
 }
 .unlock-mark svg { position: relative; z-index: 1; width: 54px; height: 54px; overflow: visible; }
 .unlock-mark::after {
@@ -860,7 +874,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .play .unlock-ring { animation: ring-pulse 620ms 640ms ease-out forwards; }
 .play .unlock-title { animation: text-in 300ms 620ms ease-out both; }
 .play .muted { animation: text-in 300ms 720ms ease-out both; }
-.locking .unlock-ring { border-color: #ff8a63; }
+.locking .unlock-ring { border-color: #6aa5ff; }
 .locking.play .shackle { animation: shackle-close 440ms 200ms cubic-bezier(0.5, 0, 0.6, 1.3) both; }
 .locking.play .keyhole { animation: key-turn-back 260ms 600ms ease-in-out both; }
 .locking.play .keyhole * { animation: keyhole-grey 360ms 640ms ease both; }
@@ -871,7 +885,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
   100% { transform: none; }
 }
 @keyframes key-turn-back { from { transform: rotate(90deg); } to { transform: rotate(0deg); } }
-@keyframes keyhole-grey { from { fill: #e0501f; } to { fill: #6b6560; } }
+@keyframes keyhole-grey { from { fill: #2b63d9; } to { fill: #6b6560; } }
 @keyframes mark-pop { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
 @keyframes key-turn { from { transform: rotate(0deg); } to { transform: rotate(90deg); } }
 @keyframes shackle-open {
@@ -933,6 +947,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .i-terminal { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpolyline points='4 17 10 11 4 5'/%3E%3Cline x1='12' x2='20' y1='19' y2='19'/%3E%3C/svg%3E"); }
 .i-database { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cellipse cx='12' cy='5' rx='9' ry='3'/%3E%3Cpath d='M3 5V19A9 3 0 0 0 21 19V5'/%3E%3Cpath d='M3 12A9 3 0 0 0 21 12'/%3E%3C/svg%3E"); }
 .i-layers { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z'/%3E%3Cpath d='m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65'/%3E%3Cpath d='m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65'/%3E%3C/svg%3E"); }
+.i-arrow-up-right { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M7 7h10v10'/%3E%3Cpath d='M7 17 17 7'/%3E%3C/svg%3E"); }
 .i-arrow-right { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M5 12h14'/%3E%3Cpath d='m12 5 7 7-7 7'/%3E%3C/svg%3E"); }
 .i-chevron-right { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E"); }
 .i-circle-x { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m15 9-6 6'/%3E%3Cpath d='m9 9 6 6'/%3E%3C/svg%3E"); }
@@ -943,7 +958,7 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .i-app-window { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Crect x='2' y='4' width='20' height='16' rx='2'/%3E%3Cpath d='M10 4v4'/%3E%3Cpath d='M2 8h20'/%3E%3Cpath d='M6 4v4'/%3E%3C/svg%3E"); }
 .i-log-out { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4'/%3E%3Cpolyline points='16 17 21 12 16 7'/%3E%3Cline x1='21' x2='9' y1='12' y2='12'/%3E%3C/svg%3E"); }
 .i-bell { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' %3E%3Cpath d='M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9'/%3E%3Cpath d='M10.3 21a1.94 1.94 0 0 0 3.4 0'/%3E%3C/svg%3E"); }
-.logo { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64'%3E%3Cdefs%3E%3ClinearGradient id='tile' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ff8a63'/%3E%3Cstop offset='1' stop-color='%23e0501f'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='url%28%23tile%29'/%3E%3Cg fill='%23fff'%3E%3Cpath fill-rule='evenodd' d='M23 21a11 11 0 1 1 0 22a11 11 0 1 1 0-22zm0 6a5 5 0 1 0 0 10a5 5 0 1 0 0-10z'/%3E%3Crect x='32' y='29' width='21' height='6' rx='3'/%3E%3Crect x='42' y='31' width='5' height='11' rx='1.5'/%3E%3Crect x='49' y='31' width='4' height='8' rx='1.5'/%3E%3C/g%3E%3C/svg%3E"); }
+.logo { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64' width='64' height='64'%3E%3Cdefs%3E%3ClinearGradient id='tile' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236aa5ff'/%3E%3Cstop offset='1' stop-color='%232b63d9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='url%28%23tile%29'/%3E%3Cg fill='%23fff'%3E%3Cpath fill-rule='evenodd' d='M23 21a11 11 0 1 1 0 22a11 11 0 1 1 0-22zm0 6a5 5 0 1 0 0 10a5 5 0 1 0 0-10z'/%3E%3Crect x='32' y='29' width='21' height='6' rx='3'/%3E%3Crect x='42' y='31' width='5' height='11' rx='1.5'/%3E%3Crect x='49' y='31' width='4' height='8' rx='1.5'/%3E%3C/g%3E%3C/svg%3E"); }
 
 /* Asking to show a handle's value. */
 #reveal-ask-text { margin: 4px 0 12px; }
@@ -954,3 +969,93 @@ button:active:not(:disabled) { transform: scale(0.98); }
 .update-notes { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 4px 0; }
 #update-notes-url { overflow-wrap: anywhere; }
 #update-status.error { color: var(--red); }
+
+/* Icon tiles are neutral; colour is kept for status (green, red). */
+.stat-icon.tone-accent, .stat-icon.tone-teal, .stat-icon.tone-amber, .stat-icon.tone-violet { background: var(--surface-2); color: var(--text-2); }
+
+/* The anti-phishing note is the page's most important line: amber edge, full ink. */
+.note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); align-items: center; }
+.note.security p { color: var(--text); }
+.note.security > .i { color: var(--amber); width: 18px; height: 18px; }
+
+/* Selects match the search field and tab pills: one drawn chevron, a hover
+   edge, and option lists that follow the theme. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b837d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px;
+}
+select:hover { border-color: var(--line-strong); }
+select option { background: var(--surface); color: var(--text); }
+.mode-filter select { padding-right: 34px; }
+
+/* Share tiles are buttons: an arrow, a lifted fill and a clear edge on hover say so. */
+.tile { position: relative; cursor: pointer; }
+.tile .tile-go { position: absolute; top: 16px; right: 16px; color: var(--muted); transition: transform 150ms ease, color 150ms ease; }
+.tile:hover { background: var(--glass-hover); border-color: var(--line-strong); }
+.tile:hover .tile-go, .tile:focus-visible .tile-go { color: var(--text); transform: translate(2px, -2px); }
+.tile:hover strong { color: var(--accent); }
+
+/* A short warning beside a field's label, such as who can read what is typed. */
+.field label .flag { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; font-size: 12px; font-weight: 500; color: var(--amber); }
+.field label .flag .i { width: 13px; height: 13px; }
+
+/* Medium buttons: dialog actions and each screen's one main action. Small
+   (the default) stays for rows, toolbars, menus and secondary choices. */
+/* Buttons side by side share one size: a group is medium or small, never both. */
+button.md, dialog .actions button, .card .buttons button { min-height: 38px; padding: 8px 20px; font-size: 14px; }
+.card .buttons button .i { width: 16px; height: 16px; }
+/* In a toolbar the button matches the 36px fields beside it. */
+#add.md { min-height: 36px; padding: 6px 18px; }
+button.md .i { width: 16px; height: 16px; }
+
+/* Settings: each group is a heading over one card; rows inside divide by a line. */
+#settings { gap: 0; }
+#settings > .panel.note.security { background: var(--amber-soft); border: 1px solid var(--amber-edge); padding: 12px 14px; margin-bottom: 4px; }
+.settings-card { padding: 0 16px; }
+.settings-card > .setting { padding: 14px 0; border-bottom: 1px solid var(--line); gap: 16px; }
+.settings-card > .setting:last-child { border-bottom: none; }
+.settings-card > .keys { padding: 14px 0; }
+#settings .stat-icon { width: 20px; height: 20px; background: none; border-radius: 0; color: var(--text-2); }
+#settings .stat-icon .i { width: 18px; height: 18px; }
+
+/* Settings groups: a quiet sentence-case heading over each set of rows (the
+   pattern Linear, Rise and Cartesia use), controls right-aligned in the rows. */
+.settings-group { margin: 22px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+#settings > .settings-group { margin: 22px 0 8px; }
+#settings > .note + .settings-group { margin-top: 18px; }
+
+/* The share result: lead text, then the code, then one compact safety line. */
+#share-result-about { margin-bottom: 14px; }
+.share-output { font-size: 12px; line-height: 1.55; }
+#share-result .callout { margin: 14px 0 4px; align-items: center; }
+#share-result .callout p { line-height: 1.5; }
+
+/* Buttons sit on the right and the primary one is last, as in dialogs. */
+.card .buttons { justify-content: flex-end; }
+
+/* Share history rows: name and kind, who and when, the note; the safety code
+   and actions on the right. */
+#received-rows .row-item, #sent-rows .row-item { padding: 12px 0; }
+#received-rows .chip, #sent-rows .chip { flex: none; }
+.row-item .note-line { color: var(--muted); font-style: normal; }
+
+/* The safety code sits under the details so a half-width column never crowds the name. */
+.row-item .code-chip { align-self: flex-start; margin-top: 4px; }
+
+/* The quiet button at the left of a card's row lines up with the card's text edge. */
+.card .buttons button.quiet { padding-left: 0; }
+.card .buttons button.quiet:hover:not(:disabled) { background: none; }
+
+.card-facts { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.card-facts .meta-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card-facts .timer { flex: none; margin-left: auto; }
+
+/* Quit is in the footer again, in the error colour, and asks before it quits. */
+.app-footer button.danger { color: var(--red); border-color: var(--red-soft); }
+.app-footer button.danger:hover:not(:disabled) { border-color: var(--red); background: var(--red-soft); }

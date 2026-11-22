@@ -41,8 +41,6 @@
     handleKind: "all",
     // The kind tab chosen on the Shares screen, over Received and Sent.
     shareKind: "all",
-    // The kind tab over the Send dialog's list of handles; All each time it opens.
-    sendKind: "all",
     auditFilter: "all",
     form: null,
     // What the confirm dialog's button sends.
@@ -120,6 +118,11 @@
 
   // The keys that copy a selection here.
   const COPY_KEYS = /Mac/.test(navigator.platform) ? "⌘C" : "Ctrl+C";
+  const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+  const hints = document.querySelector(".app-footer .hints");
+  if (hints) hints.textContent = `Esc hides · ${MOD}1–6 switch tabs · / search`;
+  const modKey = document.getElementById("mod-key");
+  if (modKey) modKey.textContent = MOD.replace("+", "");
 
   // Whether the tray copies a value for the page. It does on Windows, where
   // the page is served over https: it keeps the value out of clipboard
@@ -170,36 +173,30 @@
   const SHARE_STEPS = {
     request: {
       title: "Request a secret",
-      icon: ["inbox", "tone-accent"],
       about:
         "kv makes a code for you to send to the person who has the secret. It holds only a public " +
         "key, so any chat can carry it.",
       submit: "Make code",
-      note: [
-        "What you need",
-        "Optional, e.g. the staging database URL. It goes in the code, which anyone in the chat can read.",
-      ],
+      note: ["What you need", "Optional, e.g. the staging DB URL", "Visible to the chat"],
     },
     send: {
       title: "Send a secret",
-      icon: ["send", "tone-teal"],
       about:
         "Paste the request code they sent you and pick a handle. kv seals its value so that only " +
         "the vault that made the code can open it.",
       submit: "Seal",
       code: ["Their request code", "kv-request:v1:…"],
-      note: ["Note", "Optional; they see it with the share."],
-      name: ["Name to suggest", "Optional; blank suggests the handle's own name."],
+      note: ["Note", "Optional; they see it with the share"],
+      name: ["Name to suggest", "Optional; blank uses the handle's own name"],
     },
     receive: {
       title: "Receive a share",
-      icon: ["download", "tone-amber"],
       about:
         "Paste the share they sent back. kv opens it with the key of your open request and saves it " +
         "as a new handle in ask mode.",
       submit: "Save",
       code: ["Their share", "kv-share:v1:…"],
-      name: ["Save as", "Optional; blank uses the name they suggested."],
+      name: ["Save as", "Optional; blank uses the name they suggested"],
     },
   };
 
@@ -731,10 +728,11 @@
     const overview = page.overview;
     const secs = overview && overview.status.locks_in_secs;
     const locksIn = secs === null || secs === undefined ? "Stays unlocked until you lock it" : `Locks in ${duration(secs)}`;
-    $("locks-in").textContent = locksIn;
     $("settings-locks-in").textContent = `Unlocked. ${locksIn}.`;
     const soon = typeof secs === "number" && secs < 600;
-    $("brand-text").textContent = soon ? `Locks in ${duration(secs)}` : "Unlocked";
+    // The lock countdown is a security fact: it lives in the status pill.
+    $("brand-text").textContent =
+      typeof secs === "number" ? (soon ? `Locks in ${duration(secs)}` : `Unlocked · locks in ${duration(secs)}`) : "Unlocked";
     $("brand-status").classList.toggle("soon", soon);
 
     const approvals = overview ? overview.approvals : [];
@@ -747,8 +745,7 @@
       else tab.removeAttribute("aria-current");
     }
     for (const name of SCREENS) show($(name), name === page.screen);
-    $("page-title").textContent = page.screen === "home" ? greeting() : TITLES[page.screen] || "kv";
-    $("today").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+    $("page-title").textContent = TITLES[page.screen] || "kv";
     $("login").setAttribute("aria-checked", String(page.login));
     if (!overview) return;
     drawHome();
@@ -756,11 +753,6 @@
     drawRequests(requests);
     drawHandles(overview.handles, overview.role_warnings || {});
     drawShares(overview.shares || { requests: [], received: [], sent: [] }, overview.handles);
-  }
-
-  function greeting() {
-    const hour = new Date().getHours();
-    return hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   }
 
   function counter(id, n, what) {
@@ -776,11 +768,6 @@
     if (!overview || page.locked) return;
     const approvals = overview.approvals;
     const requests = overview.handle_requests;
-    const waiting = approvals.length + requests.length;
-    $("stat-waiting").textContent = String(waiting);
-    $("stat-waiting").closest(".stat").classList.toggle("hot", waiting > 0);
-    $("stat-waiting-note").textContent =
-      waiting === 0 ? "Nothing waiting" : `${approvals.length} to approve · ${requests.length} asked for`;
     const handles = overview.handles;
     const modes = { auto: 0, ask: 0, deny: 0 };
     for (const h of handles) modes[h.mode] = (modes[h.mode] || 0) + 1;
@@ -923,9 +910,6 @@
       if (!timer) continue;
       const left = approval.expires_in_secs;
       timer.querySelector(".expires").textContent = `Expires in ${left}s`;
-      const bar = timer.querySelector("progress");
-      bar.max = page.lifetimes.get(approval.id) || left || 1;
-      bar.value = left;
       timer.classList.toggle("soon", left <= 15);
     }
   }
@@ -938,30 +922,37 @@
       for (const b of node.querySelectorAll(".buttons button")) b.disabled = true;
       send({ type: "decide", id: approval.id, verdict });
     };
-    const bar = el("progress");
-    bar.setAttribute("aria-label", "Time left to answer");
     const parts = [
       el(
         "div",
         "card-head",
         avatar(approval.client),
         el("div", "grow", el("div", "title", approval.client || "An agent"), el("div", "sub", `wants to use ${handles}`)),
-        chip(toolName, "tone-accent", toolIcon),
+        chip(toolName, "tone-grey", toolIcon),
       ),
-      el("div", "chips", ...approval.handles.map((h) => chip(h, "tone-grey", "key-round"))),
       el("div", "code-box", approval.detail),
-      approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
-      approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
-      approval.headers ? el("div", "meta", icon("layers"), `headers ${approval.headers}`) : null,
-      approval.body ? el("div", "meta", icon("file"), `body ${approval.body}`) : null,
-      el("div", "timer", bar, el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      // What the request carries on the left, the countdown at the right corner.
+      el(
+        "div",
+        "card-facts",
+        el(
+          "div",
+          "meta-list",
+          approval.cwd ? el("div", "meta", icon("folder"), `in ${approval.cwd}`) : null,
+          approval.env_vars && approval.env_vars.length ? el("div", "meta", icon("key-round"), `with ${approval.env_vars.join(", ")}`) : null,
+          approval.headers ? el("div", "meta", icon("layers"), `headers ${approval.headers}`) : null,
+          approval.body ? el("div", "meta", icon("file"), `body ${approval.body}`) : null,
+        ),
+        el("div", "timer", el("span", "expires", `Expires in ${approval.expires_in_secs}s`)),
+      ),
       el(
         "div",
         "buttons",
-        button("Allow once", decide("allow_once"), "primary", "check"),
+        button(`Deny and block ${handles}`, decide("deny_always"), "quiet", "shield-x"),
+        el("span", "push"),
+        button("Deny", decide("deny"), "outline"),
         approval.can_grant ? button("Allow for this session", decide("allow_session"), "outline") : null,
-        button("Deny", decide("deny"), "outline danger"),
-        button(`Deny and block ${handles}`, decide("deny_always"), "danger", "shield-x"),
+        button("Allow once", decide("allow_once"), "primary md", "check"),
       ),
       el("p", "message"),
     ];
@@ -997,8 +988,8 @@
         el(
           "div",
           "buttons",
-          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary", "pencil"),
           button("Dismiss", () => send({ type: "dismiss", id: requested.id }), "outline"),
+          button("Fill in", () => openRequest({ kind: "request", id: requested.id }), "primary", "pencil"),
         ),
       );
     });
@@ -1153,7 +1144,6 @@
         el(
           "div",
           "buttons",
-          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget.querySelector(".text")), "primary", "copy"),
           button(
             request.expired ? "Remove" : "Cancel request",
             () =>
@@ -1164,6 +1154,7 @@
               ),
             "outline danger",
           ),
+          request.expired ? null : button("Copy code", (event) => copyText(code, event.currentTarget.querySelector(".text")), "primary", "copy"),
         ),
       );
     });
@@ -1189,9 +1180,13 @@
         .slice()
         .reverse()
         .map((r) => {
+          // What became of the value, as a chip beside the name.
           let state = null;
-          if (!names.has(r.handle)) state = el("span", "desc", "Removed since");
-          else if (!r.viewable) state = el("span", "desc", "Changed since, so kv no longer shows it");
+          if (!names.has(r.handle)) state = chip("Handle removed", "tone-grey");
+          else if (!r.viewable) {
+            state = chip("Value changed", "tone-amber");
+            state.title = "Changed since, so kv no longer shows it";
+          }
           return el(
             "li",
             "row-item",
@@ -1199,10 +1194,10 @@
             el(
               "div",
               "grow",
-              el("div", "chips", el("span", "name", r.handle), chip(r.kind, "tone-grey")),
-              el("span", "desc", `from ${r.from || "not given"} · ${ago(r.received_at)}${r.note ? ` · ${r.note}` : ""}`),
-              el("span", "allows", `Safety code ${r.safety_code}`),
-              state,
+              el("div", "chips", el("span", "name", r.handle), chip(r.kind, "tone-grey"), state),
+              el("span", "desc", `from ${r.from || "not given"} · ${ago(r.received_at)}`),
+              r.note ? el("span", "desc note-line", `“${r.note}”`) : null,
+              chip(r.safety_code, "tone-grey code-chip", "shield-check"),
             ),
             el(
               "div",
@@ -1233,8 +1228,9 @@
               "div",
               "grow",
               el("div", "chips", el("span", "name", s.handle), chip(s.kind, "tone-grey")),
-              el("span", "desc", `to ${s.to || "not given"} · ${ago(s.sent_at)}${s.note ? ` · ${s.note}` : ""}`),
-              el("span", "allows", `Safety code ${s.safety_code}`),
+              el("span", "desc", `to ${s.to || "not given"} · ${ago(s.sent_at)}`),
+              s.note ? el("span", "desc note-line", `“${s.note}”`) : null,
+              chip(s.safety_code, "tone-grey code-chip", "shield-check"),
             ),
             el("div", "row-actions", forget(s.id, `the record of sending ${s.handle}`)),
           ),
@@ -1422,8 +1418,6 @@
     page.share = step;
     $("share-form").reset();
     $("share-title").textContent = spec.title;
-    $("share-icon").className = `stat-icon ${spec.icon[1]}`;
-    $("share-icon").replaceChildren(icon(spec.icon[0]));
     $("share-about").textContent = spec.about;
     $("share-submit").textContent = spec.submit;
     for (const node of $("share-ask").querySelectorAll(".field")) {
@@ -1435,14 +1429,15 @@
     }
     if (spec.note) {
       $("share-note-label").textContent = spec.note[0];
-      $("share-note-hint").textContent = spec.note[1];
+      $("share-note").placeholder = spec.note[1];
+      // A warning that must stay in view, so it sits on the label, not in the field.
+      if (spec.note[2]) $("share-note-label").append(el("span", "flag", icon("eye"), spec.note[2]));
     }
     if (spec.name) {
       $("share-name-label").textContent = spec.name[0];
-      $("share-name-hint").textContent = spec.name[1];
+      $("share-name").placeholder = spec.name[1];
     }
     if (step === "send") {
-      page.sendKind = "all";
       fillShareHandles();
     }
     clearShareFile();
@@ -1455,30 +1450,39 @@
     if (first) first.querySelector("input, select").focus();
   }
 
-  // Every handle of the chosen kind, the ones set to deny greyed out: kv
-  // will not share those.
+  // Every handle in one list, grouped by kind, the ones set to deny greyed
+  // out: kv will not share those.
   function fillShareHandles() {
     const all = (page.overview && page.overview.handles) || [];
-    updateKindTabs("share-handle-kinds", all, page.sendKind);
-    show($("share-handle-kinds"), all.length > 0);
-    const handles = all.filter((handle) => page.sendKind === "all" || handle.kind === page.sendKind);
-    const options = handles.map((handle) => {
+    const kinds = KIND_TABS.map(([kind]) => kind).filter((kind) => kind !== "all" && all.some((h) => h.kind === kind));
+    const option = (handle) => {
       const deny = handle.mode === "deny";
-      const option = el("option", null, deny ? `${handle.name} (${handle.kind}) · set to deny` : `${handle.name} (${handle.kind})`);
-      option.value = handle.name;
-      option.disabled = deny;
-      return option;
-    });
-    if (options.length === 0) {
-      const none = el("option", null, `No ${kindLabel(page.sendKind)} handles`);
+      const node = el("option", null, deny ? `${handle.name} · set to deny` : handle.name);
+      node.value = handle.name;
+      node.disabled = deny;
+      return node;
+    };
+    let options;
+    if (all.length === 0) {
+      const none = el("option", null, "No handles");
       none.value = "";
       none.disabled = true;
-      options.push(none);
+      options = [none];
+    } else if (kinds.length === 1) {
+      options = all.map(option);
+    } else {
+      options = kinds.map((kind) => {
+        const group = el("optgroup");
+        group.label = kindLabel(kind);
+        group.append(...all.filter((h) => h.kind === kind).map(option));
+        return group;
+      });
     }
-    // Switching tabs keeps the handle picked when it is still in the list.
+    // Reopening keeps the handle picked when it is still in the list.
     const kept = $("share-handle").value;
     $("share-handle").replaceChildren(...options);
-    const first = handles.find((handle) => handle.name === kept && handle.mode !== "deny") || handles.find((handle) => handle.mode !== "deny");
+    const usable = all.filter((handle) => handle.mode !== "deny");
+    const first = usable.find((handle) => handle.name === kept) || usable[0];
     $("share-handle").value = first ? first.name : "";
   }
 
@@ -1525,6 +1529,11 @@
     $("share-submit").disabled = busy;
   }
 
+  // The safety code stands out; the sentence after it says what to do with it.
+  function setSafety(code, [lead, advice]) {
+    $("share-safety").replaceChildren(el("strong", "safety-code", code), ` · ${lead}${advice}`.replace(/^ · $/, ""));
+  }
+
   function shareDone(result) {
     shareBusy(false);
     if (!page.share) return;
@@ -1534,36 +1543,28 @@
     switch (result.step) {
       case "requested":
         about =
-          "Send this code to the person who has the secret. It also waits under Waiting for a share " +
-          "until their share comes back; then use Receive a share.";
+          "Send this code to whoever has the secret. Your request waits under Waiting for a share " +
+          "until their share comes back.";
         output = result.code;
-        safety =
-          `Safety code ${result.safety_code}. They see it when they send. For anything sensitive, ` +
-          "check over a call that theirs matches before you use what arrives.";
+        safety = ["They see it when they send.", " For anything sensitive, confirm it matches over a call."];
         break;
       case "sealed":
         about =
-          `Send this back to ${result.to || "them"}. Only the vault that made the request can open ` +
-          "it. kv does not keep this text, so copy it before you close.";
+          `Send this back to ${result.to || "them"}. Only the vault that made the request can open it. ` +
+          "kv does not keep this text, so copy it before you close.";
         if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
         output = result.share;
         if ([...output].length > CHAT_MESSAGE_CHARS) {
-          about += " It is longer than one Telegram message, so send it as a text file rather than splitting it.";
+          about += " Too long for one Telegram message: send it as a text file.";
         }
-        safety =
-          `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
-          "for anything sensitive, check over a call that their request shows the same code before " +
-          "you send this.";
+        safety = ["Anyone in the chat could have posted that request.", " For anything sensitive, confirm over a call that it shows this code."];
         break;
       case "received":
         about =
-          `Saved as ${result.handle} (${result.kind}). ` +
+          `Saved as ${result.handle} (${result.kind}), in ask mode. ` +
           (result.from ? `It says it is from ${result.from}; nothing checks that. ` : "It gives no sender. ") +
-          "It starts in ask mode, so each use waits for you; add what it needs with Policy on the " +
-          "Handles screen.";
-        safety =
-          `Safety code ${result.safety_code}. For anything sensitive, check over a call that the ` +
-          "sender saw the same code.";
+          "Add what it needs under Policy on Handles.";
+        safety = ["", "For anything sensitive, confirm over a call that the sender saw this code."];
         break;
       default:
         return;
@@ -1571,7 +1572,7 @@
     $("share-result-about").textContent = about;
     $("share-output").textContent = output;
     show($("share-output"), Boolean(output));
-    $("share-safety").textContent = safety;
+    setSafety(result.safety_code, safety);
     shareResult(true);
     show($("share-copy"), Boolean(output));
     if (output) $("share-copy").focus();
@@ -1584,16 +1585,13 @@
     shareBusy(false);
     if (!page.share) return;
     let about =
-      `Saved as a file, because it is too long for a chat message. Send that file to ${result.to || "them"} ` +
-      "as an attachment, exactly as it is and not as text. Only the vault that made the request can open it.";
+      `Too long for a chat message, so saved as a file. Send that file to ${result.to || "them"} as an ` +
+      "attachment, not as text. Only the vault that made the request can open it.";
     if (result.asked_for) about += ` They asked for: ${result.asked_for}`;
     $("share-result-about").textContent = about;
     $("share-output").textContent = result.path;
     show($("share-output"), true);
-    $("share-safety").textContent =
-      `Safety code ${result.safety_code}. Anyone in the chat could have posted that request: ` +
-      "for anything sensitive, check over a call that their request shows the same code before " +
-      "you send this.";
+    setSafety(result.safety_code, ["Anyone in the chat could have posted that request.", " For anything sensitive, confirm over a call that it shows this code."]);
     shareResult(true);
     show($("share-copy"), true);
     show($("share-show"), true);
@@ -2514,10 +2512,6 @@
     buildKindTabs("share-kinds", (kind) => {
       page.shareKind = kind;
       if (page.overview) drawShares(page.overview.shares || { requests: [], received: [], sent: [] }, page.overview.handles);
-    });
-    buildKindTabs("share-handle-kinds", (kind) => {
-      page.sendKind = kind;
-      fillShareHandles();
     });
     wireFilter("audit-filter", (filter) => {
       page.auditFilter = filter;
