@@ -92,7 +92,7 @@ fn reveal(f: &mut Fixture, token: &SecretText, handle: &str) -> ControlResponse 
 fn a_handle_goes_from_one_vault_to_another_without_showing_its_value() {
     let mut alice = Fixture::new();
     alice.add(openrouter(Mode::Auto));
-    let mut bob = Fixture::new();
+    let mut bob = Fixture::notifying();
     let bob_token = bob.token();
 
     let (code, safety_code) = request(&mut bob, "the OpenRouter key");
@@ -161,8 +161,8 @@ fn a_handle_goes_from_one_vault_to_another_without_showing_its_value() {
     };
     // Bob hears about it, since his agent did it.
     assert_eq!(
-        bob.daemon.take_share_notice().as_deref(),
-        Some("A secret shared by alice was saved as openrouter.")
+        share_notices(&mut bob),
+        ["A secret shared by alice was saved as openrouter."]
     );
     assert_eq!(handle.name, "openrouter");
     assert_eq!(handle.kind, SecretKind::Http);
@@ -490,7 +490,7 @@ fn two_people_share_a_handle_from_their_windows_without_an_agent() {
     let mut alice = Fixture::new();
     alice.add(openrouter(Mode::Ask));
     let alice_token = alice.token();
-    let mut bob = Fixture::new();
+    let mut bob = Fixture::notifying();
     let bob_token = bob.token();
 
     // Bob makes a request in his window and sends the code himself.
@@ -576,7 +576,7 @@ fn two_people_share_a_handle_from_their_windows_without_an_agent() {
         other => panic!("expected a saved handle, got {other:?}"),
     }
     // Bob did it himself: there is nothing to tell him.
-    assert_eq!(bob.daemon.take_share_notice(), None);
+    assert!(share_notices(&mut bob).is_empty());
     let overview = bob.overview(&bob_token);
     assert!(overview.shares.requests.is_empty());
     assert_eq!(overview.shares.received.len(), 1);
@@ -707,4 +707,14 @@ fn a_taken_name_in_the_window_keeps_the_request_for_another_try() {
         by_hand(&mut bob, &bob_token, receive(Some("openrouter-2"))),
         ControlResponse::ShareReceived { .. }
     ));
+}
+
+/// What the daemon would tell the user of shares saved as handles.
+fn share_notices(f: &mut Fixture) -> Vec<String> {
+    f.daemon
+        .take_plain_notices()
+        .into_iter()
+        .filter(|notice| notice.kind == kv_core::proto::NoticeKind::ShareReceived)
+        .map(|notice| notice.body)
+        .collect()
 }

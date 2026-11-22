@@ -14,8 +14,9 @@ use kv_core::proto::SessionInfo;
 pub enum Level {
     /// Nothing.
     Off,
-    /// Requests waiting for approval, requested handles and received
-    /// shares.
+    /// Requests waiting for approval, and reminders of them; requests that
+    /// timed out; agents refused because the vault is locked; requested
+    /// handles and received shares.
     #[default]
     Ask,
     /// Also each handle an agent uses without waiting for approval (mode
@@ -112,6 +113,34 @@ where
         let fallback = T::default();
         eprintln!("kv: {name}={value:?} is not understood ({e}); using {fallback:?}");
         fallback
+    })
+}
+
+/// How long a call refused because the vault is locked waits for an
+/// unlock, unless `KV_UNLOCK_WAIT` says otherwise.
+pub const DEFAULT_UNLOCK_WAIT: Duration = Duration::from_secs(30);
+/// The longest `KV_UNLOCK_WAIT` kept; longer is cut to it.
+pub const MAX_UNLOCK_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// `KV_UNLOCK_WAIT`: a duration such as `30s` or `2m`, or `0` / `off` for
+/// none. Not understood is the default, as for `KV_NOTIFY`.
+pub fn parse_unlock_wait(value: &str) -> Result<Duration, ParseError> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "off" | "none" | "false" | "no" | "0" => Ok(Duration::ZERO),
+        other => humantime::parse_duration(other)
+            .map(|wait| wait.min(MAX_UNLOCK_WAIT))
+            .map_err(|_| ParseError("a duration such as 30s, or 0 or off")),
+    }
+}
+
+pub fn unlock_wait_or_default(value: &str) -> Duration {
+    parse_unlock_wait(value).unwrap_or_else(|e| {
+        eprintln!(
+            "kv: KV_UNLOCK_WAIT={value:?} is not understood ({e}); using {}s",
+            DEFAULT_UNLOCK_WAIT.as_secs()
+        );
+        DEFAULT_UNLOCK_WAIT
     })
 }
 
@@ -311,17 +340,16 @@ pub fn approval_notice(rate: &mut RateCap, notice: &str, now: Instant) -> Option
     })
 }
 
-pub fn handle_requested(text: String, sound: Sound) {
-    show("kv: handle requested", text, sound.tone(false), false);
-}
-
-pub fn share_received(text: String, sound: Sound) {
-    show("kv: shared secret received", text, sound.tone(false), false);
-}
-
 /// An agent used a handle without waiting for the user (`KV_NOTIFY=all`).
 pub fn handle_used(text: String, sound: Sound) {
     show("kv: handle used", text, sound.tone(false), false);
+}
+
+/// Posts one of the daemon's other notices (see `daemon::notices`):
+/// something waiting on the user, requests they missed, a requested handle
+/// or a received share.
+pub fn post(title: String, text: String, tone: Option<Tone>, waiting: bool) {
+    show(title, text, tone, waiting);
 }
 
 /// Shows `text` from a thread of its own, so a slow or missing notification
@@ -330,10 +358,11 @@ pub fn handle_used(text: String, sound: Sound) {
 /// dismissed (a reminder toast). Elsewhere it is left alone: some Linux
 /// notification daemons would keep a critical one after the request timed
 /// out.
-fn show(summary: &'static str, text: String, tone: Option<Tone>, waiting: bool) {
+fn show(summary: impl Into<String>, text: String, tone: Option<Tone>, waiting: bool) {
+    let summary = summary.into();
     std::thread::spawn(move || {
         let mut notification = notify_rust::Notification::new();
-        notification.summary(summary).body(&text);
+        notification.summary(&summary).body(&text);
         if let Some(tone) = tone {
             notification.sound_name(sound_name(tone));
         }

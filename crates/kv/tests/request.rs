@@ -203,16 +203,22 @@ fn requested_hosts_must_be_plain_ascii_host_names() {
 
 #[test]
 fn only_a_new_name_is_announced() {
-    let mut f = Fixture::new();
-    ask(&mut f, None, dokploy_request("dokploy"));
-    assert_eq!(f.daemon.take_request_notice().as_deref(), Some("dokploy"));
-    assert_eq!(f.daemon.take_request_notice(), None);
+    let mut f = Fixture::notifying();
+    let bodies = |f: &mut Fixture| -> Vec<String> {
+        f.daemon
+            .take_plain_notices()
+            .into_iter()
+            .map(|notice| notice.body)
+            .collect()
+    };
     ask(&mut f, None, dokploy_request("dokploy"));
     assert_eq!(
-        f.daemon.take_request_notice(),
-        None,
-        "asking again is not news"
+        bodies(&mut f),
+        ["An agent asked you to add dokploy; open kv tui."]
     );
+    assert!(bodies(&mut f).is_empty());
+    ask(&mut f, None, dokploy_request("dokploy"));
+    assert!(bodies(&mut f).is_empty(), "asking again is not news");
 }
 
 #[test]

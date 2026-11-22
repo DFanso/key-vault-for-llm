@@ -17,7 +17,7 @@ use kv_core::policy::{
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, Approval, ConnectCall, ControlCommand,
     ControlErrorCode, ControlRequest, ControlResponse, DbCall, DeviceCredential, ExecCall,
-    HandleRequest, HttpCall, Overview, PolicyPatch, ReceiveShareCall, RequestedHandle,
+    HandleRequest, HttpCall, NoticeKind, Overview, PolicyPatch, ReceiveShareCall, RequestedHandle,
     RevealedField, RunCall, SendShareCall, SessionInfo, ShareRequestCall, Status, Verdict,
 };
 use kv_core::scrub::{self, MAX_TOTAL_COST, MIN_SECRET_LEN, Scrubber};
@@ -29,6 +29,7 @@ use kv_core::vault::{DeviceKind, DeviceSlot, Vault, device_slots};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
+use super::notices::{Notices, Plain};
 use crate::audit::{Audit, Use};
 use crate::broker::files::{self, JobFile};
 use crate::broker::lease::{DEFAULT_TTL, MAX_LEASES, MAX_TTL};
@@ -131,6 +132,11 @@ pub struct Settings {
     /// `ipc::bind_with_listener_process`). Set by `kv daemon`; a daemon
     /// inside another program, as in tests, listens itself.
     pub listener_process: bool,
+    /// How long an agent's call refused because the vault is locked waits
+    /// for the user to unlock it, then runs (`KV_UNLOCK_WAIT`). Zero
+    /// answers `vault_locked` at once. Only with notifications on, so the
+    /// user learns why the call waits.
+    pub unlock_wait: Duration,
 }
 
 impl Default for Settings {
@@ -142,6 +148,7 @@ impl Default for Settings {
             notify: crate::notify::Level::Off,
             sound: crate::notify::Sound::default(),
             listener_process: false,
+            unlock_wait: Duration::ZERO,
         }
     }
 }
@@ -182,10 +189,9 @@ pub struct Daemon {
     /// secrets, so they outlast a lock.
     handle_requests: Vec<RequestedHandle>,
     next_request: u64,
-    /// The name of a handle request not yet announced; only new names are.
-    request_notice: Option<String>,
-    /// A share saved as a handle and not yet announced.
-    share_notice: Option<String>,
+    /// What the user is told about things waiting on them, and where it
+    /// goes (see `notices`).
+    notices: Notices,
     /// Read-only Postgres handles whose role has been checked since the
     /// vault was unlocked. Forgotten when the handle changes.
     role_checks: RoleChecks,
@@ -233,6 +239,8 @@ struct Pending {
     grantable: bool,
     /// For a share, what to record once the user allows it.
     sent: Option<Sent>,
+    /// The line its notification said, for the reminder.
+    notice: String,
     queued: Instant,
     expires: Instant,
     /// Dropping it without sending tells the waiting request the vault
@@ -322,8 +330,7 @@ impl Daemon {
             next_approval: 0,
             handle_requests: Vec::new(),
             next_request: 0,
-            request_notice: None,
-            share_notice: None,
+            notices: Notices::new(settings.notify),
             role_checks: RoleChecks::default(),
             leases: Leases::default(),
             runs: Leases::with_limit(MAX_RUNS),
@@ -362,6 +369,23 @@ impl Daemon {
         if !matches!(request, AgentRequest::Status) {
             self.last_request = now;
         }
+        let tool = locked_tool(&request);
+        let prepared = self.prepare_request(session, request, now);
+        if let (Some(tool), Prepared::Reply(AgentResponse::Error { code, .. })) = (tool, &prepared)
+            && *code == AgentErrorCode::VaultLocked
+        {
+            let client = session.map(|s| printable(&s.client, 64));
+            self.notices.locked_call(client.as_deref(), tool, now);
+        }
+        prepared
+    }
+
+    fn prepare_request(
+        &mut self,
+        session: Option<&SessionInfo>,
+        request: AgentRequest,
+        now: Instant,
+    ) -> Prepared {
         match request {
             AgentRequest::Hello(_) => Prepared::Reply(agent_error(
                 AgentErrorCode::BadRequest,
@@ -415,11 +439,18 @@ impl Daemon {
                         // The user did not see it happen; a share saved
                         // from kv's window needs no notice.
                         let name = &handle.name;
-                        self.share_notice = Some(if from.is_empty() {
+                        let text = if from.is_empty() {
                             format!("A shared secret was saved as {name}.")
                         } else {
                             format!("A secret shared by {from} was saved as {name}.")
-                        });
+                        };
+                        self.notices.announce(
+                            NoticeKind::ShareReceived,
+                            "kv: shared secret received",
+                            text.clone(),
+                            text,
+                            now,
+                        );
                         Some(handle.name.as_str())
                     }
                     _ => None,
@@ -431,14 +462,42 @@ impl Daemon {
         }
     }
 
-    /// The name of a newly requested handle to announce, once.
-    pub fn take_request_notice(&mut self) -> Option<String> {
-        self.request_notice.take()
+    /// The notices for the server to post itself, now.
+    pub fn take_plain_notices(&mut self) -> Vec<Plain> {
+        self.notices.take_plain()
     }
 
-    /// What to announce about a share just saved as a handle, once.
-    pub fn take_share_notice(&mut self) -> Option<String> {
-        self.share_notice.take()
+    /// Hands notices no client took in time to the server, and tells of
+    /// requests that timed out once that is due. The server calls it every
+    /// second.
+    pub fn notice_tick(&mut self, now: Instant) {
+        self.notices.tick(now);
+    }
+
+    /// Whether a client is taking the daemon's notices to post them itself
+    /// (see `ControlCommand::NotifyingStatus`).
+    pub fn has_notice_taker(&self, now: Instant) -> bool {
+        self.notices.has_taker(now)
+    }
+
+    /// Reminds the user of request `id`, about halfway through its wait, if
+    /// it still waits: kv tray posts its notification again, otherwise the
+    /// server gets a plain one. Returns whether it still waits.
+    pub fn remind(&mut self, id: u64, now: Instant) -> bool {
+        let Some(pending) = self.approvals.iter().find(|p| p.id == id) else {
+            return false;
+        };
+        let left = pending.expires.saturating_duration_since(now);
+        let left = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        let text = format!("{} About {left} s left.", pending.notice);
+        self.notices.announce(
+            NoticeKind::Reminder { id },
+            "kv: still waiting",
+            text.clone(),
+            text,
+            now,
+        );
+        true
     }
 
     /// Makes a key pair for a share request and keeps it in the vault.
@@ -920,7 +979,14 @@ impl Daemon {
             Some(index) => self.handle_requests[index] = requested,
             None => {
                 self.handle_requests.push(requested);
-                self.request_notice = Some(name.clone());
+                let asked = format!("An agent asked you to add {name}.");
+                self.notices.announce(
+                    NoticeKind::HandleRequested,
+                    "kv: handle requested",
+                    asked.clone(),
+                    format!("An agent asked you to add {name}; open kv tui."),
+                    Instant::now(),
+                );
             }
         }
         AgentResponse::Requested { name }
@@ -1566,6 +1632,7 @@ impl Daemon {
             session: session.map(|s| s.id.clone()),
             grantable: ask.grantable && !cut,
             sent: ask.sent,
+            notice: notice.clone(),
             queued: now,
             expires: now + self.settings.approval_wait,
             reply,
@@ -1619,6 +1686,8 @@ impl Daemon {
         let index = self.approvals.iter().position(|p| p.id == id)?;
         let pending = self.approvals.remove(index);
         self.record_unanswered(&pending, "denied", "approval_timeout", now);
+        self.notices
+            .missed(pending.client.as_deref(), &pending.ask, now);
         Some(agent_error(
             AgentErrorCode::ApprovalTimeout,
             format!(
@@ -1783,6 +1852,30 @@ impl Daemon {
     }
 
     pub fn handle_control(
+        &mut self,
+        request: ControlRequest,
+        now: Instant,
+    ) -> (ControlResponse, After) {
+        // Asked for every second by kv tray, also while locked: not a
+        // request that keeps a locked daemon running, and not audited.
+        if let ControlCommand::NotifyingStatus = request.command {
+            return (
+                ControlResponse::Notices {
+                    status: self.status(now),
+                    notices: self.notices.take_outbox(now),
+                },
+                After::Continue,
+            );
+        }
+        let was_locked = self.vault.is_none();
+        let handled = self.handle_control_command(request, now);
+        if was_locked && self.vault.is_some() {
+            self.notices.unlocked();
+        }
+        handled
+    }
+
+    fn handle_control_command(
         &mut self,
         request: ControlRequest,
         now: Instant,
@@ -2293,6 +2386,7 @@ fn run_authenticated(vault: &mut Vault, command: ControlCommand) -> Result<Vec<S
         | ControlCommand::OpenSession
         | ControlCommand::Overview
         | ControlCommand::NotifyingOverview
+        | ControlCommand::NotifyingStatus
         | ControlCommand::Decide { .. }
         | ControlCommand::DismissRequest { .. }
         | ControlCommand::RevealShare { .. }
@@ -2810,7 +2904,9 @@ fn describe(command: &ControlCommand) -> (&'static str, Option<String>) {
         }
         ControlCommand::ChangePassphrase { .. } => ("change_passphrase", None),
         ControlCommand::OpenSession => ("open_session", None),
-        ControlCommand::Overview | ControlCommand::NotifyingOverview => ("overview", None),
+        ControlCommand::Overview
+        | ControlCommand::NotifyingOverview
+        | ControlCommand::NotifyingStatus => ("overview", None),
         ControlCommand::Decide { .. } => ("decide", None),
         ControlCommand::DismissRequest { .. } => ("dismiss_request", None),
         ControlCommand::EnrollDevice { .. } => ("enroll_device", None),
@@ -3079,6 +3175,27 @@ fn too_many_waiting() -> AgentResponse {
 /// `text` made safe to show on one line: whitespace runs become one space,
 /// control characters become U+FFFD, format characters (bidi overrides,
 /// zero-width) go, and it is cut to `max_chars`.
+/// The tool an agent request uses, for one whose refusal while the vault
+/// is locked means the agent waits on the user: not a status read, which
+/// kv tray makes every second, nor the list of handles, which agents read
+/// on their own to see what there is.
+pub fn locked_tool(request: &AgentRequest) -> Option<&'static str> {
+    match request {
+        AgentRequest::HttpRequest(_) => Some("http_request"),
+        AgentRequest::Exec(_) => Some("exec"),
+        AgentRequest::DbQuery(_) => Some("db_query"),
+        AgentRequest::DbConnect(_) => Some("db_connect"),
+        AgentRequest::Run(_) => Some("run"),
+        AgentRequest::RequestShare(_) => Some("request_share"),
+        AgentRequest::SendShare(_) => Some("send_share"),
+        AgentRequest::ReceiveShare(_) => Some("receive_share"),
+        AgentRequest::Hello(_)
+        | AgentRequest::Status
+        | AgentRequest::ListHandles
+        | AgentRequest::RequestHandle(_) => None,
+    }
+}
+
 pub(crate) fn printable(text: &str, max_chars: usize) -> String {
     let mut clean = String::with_capacity(text.len());
     for c in text.chars() {

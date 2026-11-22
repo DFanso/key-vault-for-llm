@@ -29,12 +29,25 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
+        Self::with_settings(Settings::default())
+    }
+
+    /// With notifications at `KV_NOTIFY=ask`, so the daemon has notices to
+    /// tell.
+    pub fn notifying() -> Self {
+        Self::with_settings(Settings {
+            notify: kv::notify::Level::Ask,
+            ..Settings::default()
+        })
+    }
+
+    pub fn with_settings(settings: Settings) -> Self {
         let dir = TempDir::new().unwrap();
         let t0 = Instant::now();
         let daemon = Daemon::new(
             dir.path().join("vault.kv"),
             Audit::new(dir.path().join("audit.jsonl")),
-            Settings::default(),
+            settings,
             t0,
         );
         let mut f = Self { dir, daemon, t0 };
