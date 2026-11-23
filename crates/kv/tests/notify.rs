@@ -255,3 +255,22 @@ fn approval_notices_are_capped_per_minute_then_say_how_many_asked() {
         format!("{notice} 2 more requests asked meanwhile; open kv to see them.")
     );
 }
+
+#[test]
+fn unlock_wait_reads_a_duration_or_off_and_defaults_to_thirty_seconds() {
+    use kv::notify::{
+        DEFAULT_UNLOCK_WAIT, MAX_UNLOCK_WAIT, parse_unlock_wait, unlock_wait_or_default,
+    };
+    assert_eq!(DEFAULT_UNLOCK_WAIT, Duration::from_secs(30));
+    for off in ["0", "off", "OFF", " none ", "false", "no"] {
+        assert_eq!(parse_unlock_wait(off), Ok(Duration::ZERO), "{off}");
+    }
+    assert_eq!(parse_unlock_wait("30s"), Ok(Duration::from_secs(30)));
+    assert_eq!(parse_unlock_wait("2m"), Ok(Duration::from_secs(120)));
+    assert_eq!(parse_unlock_wait("0s"), Ok(Duration::ZERO));
+    // A wait of hours would hold agents' calls open for hours.
+    assert_eq!(parse_unlock_wait("3h"), Ok(MAX_UNLOCK_WAIT));
+    assert!(parse_unlock_wait("soon").is_err());
+    // Not understood: the default, so the daemon still starts.
+    assert_eq!(unlock_wait_or_default("soon"), DEFAULT_UNLOCK_WAIT);
+}

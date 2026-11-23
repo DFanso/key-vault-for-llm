@@ -8,13 +8,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kv_core::proto::{
     AgentErrorCode, AgentRequest, AgentResponse, ControlErrorCode, ControlRequest, ControlResponse,
-    SessionInfo, Verdict,
+    NoticeKind, SessionInfo, Verdict,
 };
 use tokio::io::AsyncReadExt;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 use super::harden;
-use super::state::{After, Daemon, Prepared, Settings, Waiting};
+use super::notices::Plain;
+use super::state::{After, Daemon, Prepared, Settings, Waiting, locked_tool};
 use crate::audit::Audit;
 use crate::broker;
 use crate::frame::{read_frame, write_frame};
@@ -23,6 +24,28 @@ use crate::notify;
 use crate::paths::Paths;
 
 type Shared = Arc<Mutex<Daemon>>;
+
+/// Agent calls that may wait for an unlock at once, the same bound as
+/// requests waiting for approval. Past it, a call refused because the
+/// vault is locked is answered `vault_locked` at once, as without the wait.
+pub const MAX_UNLOCK_WAITERS: usize = 32;
+
+/// How often the server posts the notices no client took and checks for
+/// missed requests to tell of.
+const NOTICE_TICK: Duration = Duration::from_secs(1);
+
+/// What every agent connection shares.
+#[derive(Clone)]
+struct Agents {
+    daemon: Shared,
+    http: reqwest::Client,
+    settings: Settings,
+    uses: Arc<Mutex<notify::UseNotices>>,
+    asks: Arc<Mutex<notify::RateCap>>,
+    /// Whether the vault is unlocked, for calls waiting for an unlock.
+    unlocked: watch::Receiver<bool>,
+    unlock_waiters: Arc<Semaphore>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -70,36 +93,58 @@ pub async fn run(paths: Paths, settings: Settings) -> io::Result<Outcome> {
         Instant::now(),
     )));
     let http = broker::http::client().map_err(io::Error::other)?;
-    let uses = Arc::new(Mutex::new(notify::UseNotices::default()));
-    let asks = Arc::new(Mutex::new(notify::RateCap::default()));
+    let (unlocked_tx, unlocked) = watch::channel(false);
+    let agents = Agents {
+        daemon: daemon.clone(),
+        http,
+        settings,
+        uses: Arc::new(Mutex::new(notify::UseNotices::default())),
+        asks: Arc::new(Mutex::new(notify::RateCap::default())),
+        unlocked,
+        unlock_waiters: Arc::new(Semaphore::new(MAX_UNLOCK_WAITERS)),
+    };
+    let unlocked_tx = Arc::new(unlocked_tx);
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let check_every = (settings.idle_lock.min(settings.locked_exit) / 4)
         .clamp(Duration::from_millis(100), Duration::from_secs(30));
     let mut ticker = tokio::time::interval(check_every);
+    let mut notice_ticker = tokio::time::interval(NOTICE_TICK);
 
     loop {
         tokio::select! {
             accepted = agent.accept() => match accepted {
                 Ok(stream) => {
-                    tokio::spawn(serve_agent(
-                        stream,
-                        daemon.clone(),
-                        http.clone(),
-                        settings,
-                        uses.clone(),
-                        asks.clone(),
-                    ));
+                    tokio::spawn(serve_agent(stream, agents.clone()));
                 }
                 Err(e) => accept_failed("agent", e).await,
             },
             accepted = control.accept() => match accepted {
                 Ok(stream) => {
-                    tokio::spawn(serve_control(stream, daemon.clone(), stop_tx.clone()));
+                    tokio::spawn(serve_control(
+                        stream,
+                        daemon.clone(),
+                        stop_tx.clone(),
+                        unlocked_tx.clone(),
+                    ));
                 }
                 Err(e) => accept_failed("control", e).await,
             },
+            _ = notice_ticker.tick() => {
+                let plain = {
+                    let mut daemon = lock(&daemon);
+                    daemon.notice_tick(Instant::now());
+                    daemon.take_plain_notices()
+                };
+                post_plain(plain, &agents);
+            }
             _ = ticker.tick() => {
-                if lock(&daemon).tick(Instant::now(), SystemTime::now()) == After::Stop {
+                let (after, is_unlocked) = {
+                    let mut daemon = lock(&daemon);
+                    let after = daemon.tick(Instant::now(), SystemTime::now());
+                    (after, daemon.is_unlocked())
+                };
+                set_unlocked(&unlocked_tx, is_unlocked);
+                if after == After::Stop {
                     break;
                 }
                 // Without it clients refuse this daemon; stop, and the next
@@ -134,14 +179,8 @@ fn immediate_use(prepared: &Prepared) -> Option<(&'static str, Vec<String>)> {
     }
 }
 
-async fn serve_agent(
-    mut stream: ServerStream,
-    daemon: Shared,
-    http: reqwest::Client,
-    settings: Settings,
-    uses: Arc<Mutex<notify::UseNotices>>,
-    asks: Arc<Mutex<notify::RateCap>>,
-) {
+async fn serve_agent(mut stream: ServerStream, agents: Agents) {
+    let settings = agents.settings;
     let (level, sound) = (settings.notify, settings.sound);
     let mut session: Option<SessionInfo> = None;
     loop {
@@ -170,44 +209,38 @@ async fn serve_agent(
             session = Some(info);
             continue;
         }
-        let shared = daemon.clone();
-        let asking = session.clone();
-        let prepared = tokio::task::spawn_blocking(move || {
-            let mut daemon = lock(&shared);
-            let now = Instant::now();
-            let prepared = daemon.prepare_in(asking.as_ref(), request, now);
-            (
-                prepared,
-                daemon.take_request_notice(),
-                daemon.take_share_notice(),
-                daemon.has_notifier(now),
-            )
-        })
-        .await;
-        let Ok((prepared, requested, shared, notifier)) = prepared else {
+        // Only with notifications on: the user learns from the "unlock
+        // needed" notice, posted or queued as the call was refused, why the
+        // call waits.
+        let again = (!settings.unlock_wait.is_zero()
+            && level.approvals()
+            && locked_tool(&request).is_some())
+        .then(|| request.clone());
+        let Some((mut prepared, mut notifier)) = prepare(&agents, &session, request).await else {
             return;
         };
-        if let Some(text) = shared
-            && level.approvals()
+        if let Some(request) = again
+            && is_locked(&prepared)
         {
-            notify::share_received(text, sound);
-        }
-        if let Some(name) = requested
-            && level.approvals()
-        {
-            notify::handle_requested(
-                format!("An agent asked you to add {name}; open kv tui."),
-                sound,
-            );
+            match wait_for_unlock(&mut stream, &agents).await {
+                Unlock::Unlocked => {
+                    let Some(again) = prepare(&agents, &session, request).await else {
+                        return;
+                    };
+                    (prepared, notifier) = again;
+                }
+                // The same `vault_locked` reply as without the wait.
+                Unlock::TimedOut | Unlock::Busy => {}
+                Unlock::HungUp => return,
+            }
         }
         if level.uses()
             && let Some((tool, handles)) = immediate_use(&prepared)
-            && let Some(text) = uses.lock().unwrap_or_else(PoisonError::into_inner).notice(
-                session.as_ref(),
-                &handles,
-                tool,
-                Instant::now(),
-            )
+            && let Some(text) = agents
+                .uses
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .notice(session.as_ref(), &handles, tool, Instant::now())
         {
             notify::handle_used(text, sound);
         }
@@ -217,14 +250,14 @@ async fn serve_agent(
                 if level.approvals()
                     && !notifier
                     && let Some(text) = notify::approval_notice(
-                        &mut asks.lock().unwrap_or_else(PoisonError::into_inner),
+                        &mut agents.asks.lock().unwrap_or_else(PoisonError::into_inner),
                         &waiting.notice,
                         Instant::now(),
                     )
                 {
                     notify::approval_needed(text, sound);
                 }
-                match wait_for_decision(&daemon, &mut stream, *waiting).await {
+                match wait_for_decision(&agents, &mut stream, *waiting).await {
                     Some(prepared) => prepared,
                     None => return,
                 }
@@ -237,11 +270,104 @@ async fn serve_agent(
             broker::run::serve(stream, *job).await;
             return;
         }
-        let response = run_job(prepared, &http).await;
+        let response = run_job(prepared, &agents.http).await;
         if write_frame(&mut stream, &response).await.is_err() {
             return;
         }
     }
+}
+
+/// Prepares `request` without holding up the async workers, and posts the
+/// notices that brought about. Also says whether a client is showing
+/// waiting requests with buttons, so the daemon need not. `None` if the
+/// daemon's task failed.
+async fn prepare(
+    agents: &Agents,
+    session: &Option<SessionInfo>,
+    request: AgentRequest,
+) -> Option<(Prepared, bool)> {
+    let shared = agents.daemon.clone();
+    let asking = session.clone();
+    let (prepared, plain, notifier) = tokio::task::spawn_blocking(move || {
+        let mut daemon = lock(&shared);
+        let now = Instant::now();
+        let prepared = daemon.prepare_in(asking.as_ref(), request, now);
+        (
+            prepared,
+            daemon.take_plain_notices(),
+            daemon.has_notifier(now),
+        )
+    })
+    .await
+    .ok()?;
+    post_plain(plain, agents);
+    Some((prepared, notifier))
+}
+
+fn is_locked(prepared: &Prepared) -> bool {
+    matches!(
+        prepared,
+        Prepared::Reply(AgentResponse::Error {
+            code: AgentErrorCode::VaultLocked,
+            ..
+        })
+    )
+}
+
+/// How a wait for the vault to unlock ended.
+enum Unlock {
+    Unlocked,
+    TimedOut,
+    /// `MAX_UNLOCK_WAITERS` calls wait already.
+    Busy,
+    /// The agent closed the connection.
+    HungUp,
+}
+
+/// Waits up to `unlock_wait` for the vault to unlock, holding one of the
+/// waiting places while it does.
+async fn wait_for_unlock(stream: &mut ServerStream, agents: &Agents) -> Unlock {
+    let Ok(_place) = agents.unlock_waiters.try_acquire() else {
+        return Unlock::Busy;
+    };
+    let mut unlocked = agents.unlocked.clone();
+    // The agent sends nothing until it has its reply, so any read that
+    // returns means it closed the connection (or broke the protocol).
+    let mut byte = [0u8; 1];
+    tokio::select! {
+        waited = tokio::time::timeout(
+            agents.settings.unlock_wait,
+            unlocked.wait_for(|unlocked| *unlocked),
+        ) => match waited {
+            Ok(Ok(_)) => Unlock::Unlocked,
+            _ => Unlock::TimedOut,
+        },
+        _ = stream.read(&mut byte) => Unlock::HungUp,
+    }
+}
+
+/// Posts the notices the daemon left for the server. A reminder counts
+/// against the same cap as the approval notices.
+fn post_plain(plain: Vec<Plain>, agents: &Agents) {
+    let sound = agents.settings.sound;
+    for notice in plain {
+        let body = if let NoticeKind::Reminder { .. } = notice.kind {
+            let mut asks = agents.asks.lock().unwrap_or_else(PoisonError::into_inner);
+            match notify::approval_notice(&mut asks, &notice.body, Instant::now()) {
+                Some(body) => body,
+                None => continue,
+            }
+        } else {
+            notice.body.clone()
+        };
+        let waiting = notice.waiting();
+        notify::post(notice.title, body, sound.tone(waiting), waiting);
+    }
+}
+
+/// Tells the calls waiting for an unlock whether the vault is unlocked.
+fn set_unlocked(unlocked: &watch::Sender<bool>, is_unlocked: bool) {
+    unlocked.send_if_modified(|was| std::mem::replace(was, is_unlocked) != is_unlocked);
 }
 
 async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
@@ -264,14 +390,16 @@ async fn run_job(prepared: Prepared, http: &reqwest::Client) -> AgentResponse {
     }
 }
 
-/// Waits for the user's decision without holding the daemon lock. Returns
-/// the job to run, or a reply saying why not; `None` when the agent hung
-/// up while it waited, and the request is withdrawn.
+/// Waits for the user's decision without holding the daemon lock, and
+/// reminds them halfway through. Returns the job to run, or a reply saying
+/// why not; `None` when the agent hung up while it waited, and the request
+/// is withdrawn.
 async fn wait_for_decision(
-    daemon: &Shared,
+    agents: &Agents,
     stream: &mut ServerStream,
     waiting: Waiting,
 ) -> Option<Prepared> {
+    let daemon = &agents.daemon;
     let Waiting {
         id,
         mut verdict,
@@ -279,13 +407,30 @@ async fn wait_for_decision(
         wait,
         ..
     } = waiting;
+    let started = tokio::time::Instant::now();
+    let deadline = started + wait;
+    let remind_at = started + wait / 2;
+    let mut reminded = false;
     // The agent sends nothing until it has its reply, so any read that
     // returns means it closed the connection (or broke the protocol).
     let mut byte = [0u8; 1];
-    let decided = tokio::select! {
-        waited = tokio::time::timeout(wait, &mut verdict) => match waited {
-            Ok(decided) => decided.ok(),
-            Err(_) => {
+    let decided = loop {
+        tokio::select! {
+            decided = &mut verdict => break decided.ok(),
+            _ = tokio::time::sleep_until(remind_at), if !reminded => {
+                reminded = true;
+                let shared = daemon.clone();
+                let plain = tokio::task::spawn_blocking(move || {
+                    let mut daemon = lock(&shared);
+                    daemon.remind(id, Instant::now());
+                    daemon.take_plain_notices()
+                })
+                .await;
+                if let Ok(plain) = plain {
+                    post_plain(plain, agents);
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
                 let shared = daemon.clone();
                 let expired = tokio::task::spawn_blocking(move || {
                     lock(&shared).expire(id, Instant::now())
@@ -295,16 +440,16 @@ async fn wait_for_decision(
                     return Some(Prepared::Reply(response));
                 }
                 // Decided, or locked, just as the wait ran out.
-                verdict.try_recv().ok()
+                break verdict.try_recv().ok();
             }
-        },
-        _ = stream.read(&mut byte) => {
-            let shared = daemon.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                lock(&shared).withdraw(id, Instant::now())
-            })
-            .await;
-            return None;
+            _ = stream.read(&mut byte) => {
+                let shared = daemon.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    lock(&shared).withdraw(id, Instant::now())
+                })
+                .await;
+                return None;
+            }
         }
     };
     Some(match decided {
@@ -326,7 +471,12 @@ async fn wait_for_decision(
     })
 }
 
-async fn serve_control(mut stream: ServerStream, daemon: Shared, stop: watch::Sender<bool>) {
+async fn serve_control(
+    mut stream: ServerStream,
+    daemon: Shared,
+    stop: watch::Sender<bool>,
+    unlocked: Arc<watch::Sender<bool>>,
+) {
     loop {
         let request: ControlRequest = match read_frame(&mut stream).await {
             Ok(Some(request)) => request,
@@ -347,12 +497,15 @@ async fn serve_control(mut stream: ServerStream, daemon: Shared, stop: watch::Se
         // Argon2 takes a noticeable fraction of a second, so it runs off the
         // async worker threads.
         let handled = tokio::task::spawn_blocking(move || {
-            lock(&daemon).handle_control(request, Instant::now())
+            let mut daemon = lock(&daemon);
+            let (response, after) = daemon.handle_control(request, Instant::now());
+            (response, after, daemon.is_unlocked())
         })
         .await;
-        let Ok((response, after)) = handled else {
+        let Ok((response, after, is_unlocked)) = handled else {
             return;
         };
+        set_unlocked(&unlocked, is_unlocked);
         let written = write_frame(&mut stream, &response).await;
         if after == After::Stop {
             let _ = stop.send(true);

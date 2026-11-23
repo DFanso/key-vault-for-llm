@@ -157,6 +157,18 @@ enum Command {
             value_parser = clap::builder::ValueParser::new(notify_sound)
         )]
         notify_sound: crate::notify::Sound,
+        /// How long an agent's call waits for you to unlock a locked vault
+        /// before it fails with vault_locked; 0 or off fails at once. Only
+        /// with notifications on. Daemons started on demand read
+        /// KV_UNLOCK_WAIT.
+        #[arg(
+            long,
+            env = "KV_UNLOCK_WAIT",
+            default_value = "30s",
+            value_name = "DURATION|OFF",
+            value_parser = clap::builder::ValueParser::new(unlock_wait)
+        )]
+        unlock_wait: Duration,
         /// The runtime directory this daemon serves, so clients can check
         /// the process at the socket is the daemon for theirs. Added by the
         /// daemon itself when missing.
@@ -472,6 +484,11 @@ fn notify_sound(
     Ok(crate::notify::or_default("KV_NOTIFY_SOUND", value))
 }
 
+/// `KV_UNLOCK_WAIT` or `--unlock-wait`, likewise.
+fn unlock_wait(value: &str) -> std::result::Result<Duration, std::convert::Infallible> {
+    Ok(crate::notify::unlock_wait_or_default(value))
+}
+
 /// Checks that `--runtime-dir` names the directory this daemon serves. A
 /// daemon started without it, by hand or by a service manager, starts
 /// itself again with it on Unix, where clients read it from the daemon's
@@ -511,6 +528,7 @@ async fn run(cli: Cli) -> Result<()> {
             autostart,
             notify,
             notify_sound,
+            unlock_wait,
             runtime_dir,
         } => {
             daemon_serves(&paths, runtime_dir)?;
@@ -521,6 +539,7 @@ async fn run(cli: Cli) -> Result<()> {
                     locked_exit,
                     notify,
                     sound: notify_sound,
+                    unlock_wait,
                     listener_process: true,
                     ..Settings::default()
                 },

@@ -32,12 +32,17 @@ impl Daemon {
     /// Starts a daemon in this process with a 2 s approval wait and one
     /// `mode: ask` http handle pointing at a local server.
     pub async fn start() -> Self {
-        let dir = TempDir::new().unwrap();
-        let paths = Paths::under(dir.path());
-        let settings = Settings {
+        Self::start_with(Settings {
             approval_wait: Duration::from_secs(2),
             ..Settings::default()
-        };
+        })
+        .await
+    }
+
+    /// `start`, with `settings` for the daemon.
+    pub async fn start_with(settings: Settings) -> Self {
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::under(dir.path());
         tokio::spawn(kv::daemon::run(paths.clone(), settings));
         let upstream = MockServer::start().await;
         Mock::given(method("GET"))

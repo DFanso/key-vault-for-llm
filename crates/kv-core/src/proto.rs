@@ -479,6 +479,15 @@ pub enum ControlCommand {
     /// one has asked within the last few seconds, the daemon posts no
     /// notification of its own for a new request, so none shows twice.
     NotifyingOverview,
+    /// The daemon's status and the notices it holds for this client to
+    /// post, from a client that posts them under kv's own name with buttons,
+    /// as `kv tray` does on macOS through kv.app. Needs no credential, so it
+    /// works while the vault is locked: neither carries anything secret.
+    /// While one has asked within the last few seconds, the daemon queues
+    /// its notices for it instead of posting them itself; once it stops
+    /// asking, the daemon posts what is left. Not counted as use, so it
+    /// does not keep a locked daemon running, and not audited.
+    NotifyingStatus,
     /// Answers a request waiting for approval.
     Decide {
         id: u64,
@@ -558,6 +567,11 @@ pub enum ControlResponse {
     },
     Overview {
         overview: Overview,
+    },
+    /// The answer to `notifying_status`.
+    Notices {
+        status: Status,
+        notices: Vec<Notice>,
     },
     /// A handle's value, for the user.
     Revealed {
@@ -641,6 +655,33 @@ pub struct Overview {
     /// Open share requests, and shares received and sent. No keys or values.
     #[serde(default)]
     pub shares: SharesView,
+}
+
+/// Something the daemon would have shown as a desktop notification,
+/// handed to the client that posts them (see `notifying_status`). Agent
+/// text in it has been made safe to show. Never holds a value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub kind: NoticeKind,
+    pub title: String,
+    pub body: String,
+}
+
+/// What a notice is about, which says what a click on it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NoticeKind {
+    /// An agent was refused because the vault is locked.
+    UnlockNeeded,
+    /// The request `id` is still waiting for approval, about half its
+    /// time gone.
+    Reminder { id: u64 },
+    /// Requests timed out with no answer.
+    Missed,
+    /// An agent asked the user to add a handle.
+    HandleRequested,
+    /// A share was saved as a handle.
+    ShareReceived,
 }
 
 /// One part of a revealed value: the token, a URL or a variable.

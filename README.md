@@ -231,7 +231,7 @@ With `--read-only true`:
 
 Handles in `--mode ask` (the default) make the agent wait until you answer in
 `kv tui` or `kv tray`, for up to 60 seconds. kv also shows a desktop
-notification with a sound. Two settings change that. Set them in your shell
+notification with a sound. Three settings change that. Set them in your shell
 profile (on Windows as user environment variables, such as
 `setx KV_NOTIFY all`, so a `kv tray` started at login sees them too) and run
 `kv stop` so the next command picks them up:
@@ -244,11 +244,43 @@ profile (on Windows as user environment variables, such as
   waiting for you and the usual one for the rest, `default` plays the usual
   one for all, and `off` plays none. On Windows a request waiting for you
   stays on screen until you dismiss it.
+- `KV_UNLOCK_WAIT`: how long an agent's call waits for you to unlock a locked
+  vault before it fails with `vault_locked`: `30s` (the default), any
+  duration up to `10m`, or `0` or `off` to fail at once, as kv did before
+  this setting. With `KV_NOTIFY=off` calls never wait, since nothing would tell you
+  why they hang.
 
 At most 10 requests and 10 uses a minute get a notification each; the next
 one says how many were held back, and every waiting request is still in
 kv's window and `kv tui`. A value kv does not understand counts as the
 default, so a typo cannot keep the daemon from starting.
+
+#### When something waits on you
+
+With `KV_NOTIFY` at `ask` or `all`, kv also tells you when an agent is stuck
+on you, not only when a request first arrives:
+
+- **Unlock needed.** An agent's call (an HTTP request, a command, a query, a
+  lease, a run or a share; not the status or the list of handles) found the
+  vault locked: "claude-code is waiting (http_request): unlock kv." The first
+  such call after the vault locks is told at once, later ones at most every
+  10 minutes with a count of the calls since. The call then waits for
+  `KV_UNLOCK_WAIT` (30 seconds by default): unlock in time (`kv unlock`, kv's
+  window, or the notification's Unlock button under kv tray) and it goes on
+  as if the vault had been unlocked all along, approval included; otherwise
+  it fails with `vault_locked` as before. At most 32 calls wait at once;
+  past that, they fail at once. Your MCP client has its own timeout for a
+  tool call, and one shorter than `KV_UNLOCK_WAIT` gives up first: the agent
+  then sees that timeout rather than `vault_locked`, and can simply call
+  again once you have unlocked.
+- **Still waiting.** A request nobody has answered halfway through its 60
+  seconds is shown again, "About 30 s left." It counts against the same 10
+  a minute as new requests.
+- **Requests timed out.** Requests that timed out unanswered are told of
+  together: the first one starts a 10-second gather, then one notification
+  names them all ("You missed 3 requests (claude-code: github, prod-db;
+  cursor: openrouter)."), and later ones wait at least 5 minutes for the next.
+  The Audit tab lists each with `approval_timeout`.
 
 ```sh
 kv tui
@@ -331,6 +363,24 @@ know. The first time, macOS asks whether kv may send notifications; turn them
 on later in System Settings, Notifications, kv, where choosing the Alerts style
 keeps each one on screen until you answer it. `KV_TRAY_APP=off kv tray` leaves
 `kv.app` out, with plain notifications.
+
+The tray posts kv's other notices through `kv.app` too, locked or not, each
+with a button that acts on it:
+
+- "unlock needed" has Unlock, which does what the menu's Unlock does: Touch
+  ID where it is set up, otherwise kv's window asks for the passphrase. The
+  notification goes once the vault is unlocked, wherever it was unlocked.
+- "still waiting" brings the request's own notification back, with its
+  answers.
+- "requests timed out", "handle requested" and "shared secret received"
+  have Open kv, which opens kv's window on the Audit, Handles or Shares tab.
+
+Clicking a notification does what its button does. While the tray takes these
+from the daemon (it asks every second), the daemon posts none of them
+itself; if the tray stops, the daemon posts what is left within about 5
+seconds. Without the tray, the daemon's own notifications come from the
+`kv` binary, which is not an app, so macOS files them under **Finder**: if
+you see none, check System Settings, Notifications, Finder.
 
 #### kv's window
 
@@ -682,6 +732,13 @@ After an update the vault is locked, so run `kv unlock`. On macOS, the new
 kv binary can no longer read the Touch ID key until you allow it once; see
 [Touch ID and Windows Hello](#touch-id-and-windows-hello) and choose Always
 Allow.
+
+### Upgrading from 1.9.3 or earlier
+
+An agent's call that finds the vault locked now waits up to 30 seconds for
+you to unlock it, after a notification saying so, instead of failing at
+once. Set `KV_UNLOCK_WAIT=off` (and run `kv stop`) to keep the old behaviour;
+see [When something waits on you](#when-something-waits-on-you).
 
 ### Upgrading from 1.9.0 or earlier
 

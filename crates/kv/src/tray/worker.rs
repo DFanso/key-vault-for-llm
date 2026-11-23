@@ -15,14 +15,15 @@ use futures_util::future::BoxFuture;
 use zeroize::Zeroizing;
 
 use kv_core::proto::{
-    AgentRequest, AgentResponse, Overview, ReceiveShareCall, SendShareCall, ShareRequestCall,
+    AgentRequest, AgentResponse, ControlCommand, ControlRequest, ControlResponse, NoticeKind,
+    Overview, ReceiveShareCall, SendShareCall, ShareRequestCall, Status,
 };
 use kv_core::secret::{Secret, SecretText, SecretValue};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 use super::model::{Action, Model, View};
-use super::notices::{self, Notice};
+use super::notices::{self, Click, Notice};
 use super::update::Updater;
 use super::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use crate::client;
@@ -139,6 +140,9 @@ pub struct Worker<D> {
     saved: Option<PathBuf>,
     /// The notification on show for each waiting request, by request id.
     posted: BTreeMap<u64, String>,
+    /// The "unlock needed" notifications on show, taken down once the
+    /// vault is unlocked.
+    unlock_posted: Vec<String>,
     /// Checks for, and installs, a newer kv. Shared with the thread the
     /// handover to a new tray runs on.
     updater: Arc<dyn Updater>,
@@ -181,6 +185,7 @@ impl<D: Desktop> Worker<D> {
             overview: None,
             prompting: None,
             posted: BTreeMap::new(),
+            unlock_posted: Vec::new(),
             updater: Arc::from(updater),
             offer: None,
             next_check: Instant::now() + state::TRAY_FIRST,
@@ -204,12 +209,9 @@ impl<D: Desktop> Worker<D> {
     /// Reading the status never starts the daemon; a session the daemon no
     /// longer knows is dropped, with any open form.
     pub async fn model(&mut self) -> Model {
-        let status = match client::agent_if_running(&self.paths, &AgentRequest::Status).await {
-            Ok(Some(AgentResponse::Status { status })) => Some(status),
-            _ => None,
-        };
-        let mut ended = None;
         let notifying = self.desktop.can_notify();
+        let (status, notices) = self.status(notifying).await;
+        let mut ended = None;
         self.overview = match self.driver.refresh_for(notifying).await {
             Some(Outcome::Overview(overview)) => Some(overview),
             Some(Outcome::Ended(message)) => {
@@ -222,6 +224,7 @@ impl<D: Desktop> Worker<D> {
             self.set_form(None);
         }
         self.sync_notices(notifying);
+        self.post_daemon_notices(notices, status.as_ref());
         self.send_state();
         // After the locked state, so the reason shows on the unlock screen.
         if let Some(message) = ended {
@@ -237,6 +240,75 @@ impl<D: Desktop> Worker<D> {
             login: self.desktop.login_is_on(),
             update: self.offer.as_ref().map(|offer| &offer.version),
         })
+    }
+
+    /// The daemon's status, never starting it. Where kv.app posts
+    /// notifications, also the notices the daemon holds for the tray to
+    /// post under kv's name, which marks the tray as taking them, locked or
+    /// not; an older daemon that does not know the command is asked the
+    /// plain way.
+    async fn status(&self, notifying: bool) -> (Option<Status>, Vec<kv_core::proto::Notice>) {
+        if notifying {
+            let request = ControlRequest {
+                passphrase: None,
+                device: None,
+                token: None,
+                command: ControlCommand::NotifyingStatus,
+            };
+            match client::control_if_running(&self.paths, &request).await {
+                Ok(Some(ControlResponse::Notices { status, notices })) => {
+                    return (Some(status), notices);
+                }
+                Ok(None) => return (None, Vec::new()),
+                _ => {}
+            }
+        }
+        let status = match client::agent_if_running(&self.paths, &AgentRequest::Status).await {
+            Ok(Some(AgentResponse::Status { status })) => Some(status),
+            _ => None,
+        };
+        (status, Vec::new())
+    }
+
+    /// Posts the daemon's notices under kv's name, each with a click that
+    /// acts on it. A reminder of a request this tray shows brings that
+    /// request's notification back, with its answers. "Unlock needed" ones
+    /// go once the vault is unlocked.
+    fn post_daemon_notices(
+        &mut self,
+        notices: Vec<kv_core::proto::Notice>,
+        status: Option<&Status>,
+    ) {
+        if status.is_some_and(|status| !status.locked) && !self.unlock_posted.is_empty() {
+            let keys = std::mem::take(&mut self.unlock_posted);
+            self.desktop.withdraw(&keys);
+        }
+        for notice in notices {
+            let approval = match notice.kind {
+                NoticeKind::Reminder { id } => self.overview.as_ref().and_then(|overview| {
+                    overview.approvals.iter().find(|approval| approval.id == id)
+                }),
+                _ => None,
+            };
+            if let Some(approval) = approval {
+                let again = Notice::reminder(approval);
+                if let Some(old) = self.posted.insert(approval.id, again.key.clone()) {
+                    self.desktop.withdraw(&[old]);
+                }
+                self.desktop.post(&again);
+                continue;
+            }
+            let posted = Notice::from_daemon(&notice);
+            if notice.kind == NoticeKind::UnlockNeeded {
+                // One on show is enough: a newer one replaces it.
+                let old = std::mem::take(&mut self.unlock_posted);
+                if !old.is_empty() {
+                    self.desktop.withdraw(&old);
+                }
+                self.unlock_posted.push(posted.key.clone());
+            }
+            self.desktop.post(&posted);
+        }
     }
 
     /// Carries out one action, a device prompt and a check for updates
@@ -396,6 +468,25 @@ impl<D: Desktop> Worker<D> {
                     self.offer_update();
                 } else {
                     self.open_window(Tab::Home);
+                }
+            }
+            // One of the daemon's notices, its button or itself: Unlock
+            // does what the menu's Unlock… does; the others open kv.
+            Action::Notice { key, verdict: None } if notices::click(&key).is_some() => {
+                self.unlock_posted.retain(|posted| *posted != key);
+                match notices::click(&key) {
+                    Some(Click::Unlock) if self.driver.has_session() => {
+                        self.open_window(Tab::Home);
+                    }
+                    Some(Click::Unlock) if self.driver.device().is_some() => {
+                        return Next::Prompt(Prompting::Unlock(Asker::Menu));
+                    }
+                    // No Touch ID: the window asks for the passphrase.
+                    Some(Click::Unlock) => {
+                        self.open_window(Tab::Home);
+                    }
+                    Some(Click::Open(tab)) => return self.open(tab),
+                    None => {}
                 }
             }
             Action::Notice { key, verdict } => {
@@ -1046,7 +1137,8 @@ impl<D: Desktop> Worker<D> {
     /// goes too, since no one would clear it later.
     fn withdraw_all(&mut self) {
         self.desktop.clear_copied();
-        let keys: Vec<String> = std::mem::take(&mut self.posted).into_values().collect();
+        let mut keys: Vec<String> = std::mem::take(&mut self.posted).into_values().collect();
+        keys.append(&mut self.unlock_posted);
         if !keys.is_empty() {
             self.desktop.withdraw(&keys);
         }

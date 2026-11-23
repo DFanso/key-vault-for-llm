@@ -16,7 +16,7 @@ use kv::client;
 use kv::device::{self, Device};
 use kv::paths::Paths;
 use kv::tray::model::{Action, IconState, Item, Model};
-use kv::tray::notices::Notice;
+use kv::tray::notices::{Button, Notice};
 use kv::tray::update::Updater;
 use kv::tray::window::{FormRequest, FromPage, ImportVar, Tab, Theme, ToPage, UpdateKind};
 use kv::tray::worker::{Desktop, Worker};
@@ -2623,4 +2623,149 @@ async fn an_update_downloads_beside_the_loop() {
     assert_eq!(*updates.installed.lock().unwrap(), [Version::new(1, 9, 0)]);
     assert_eq!(*updates.restarted.lock().unwrap(), [Version::new(1, 9, 0)]);
     assert_eq!(install_results(&desk.take()), []);
+}
+
+/// A daemon with notifications on and Touch ID set up, the vault locked,
+/// and a worker for it on a desktop where kv.app posts notifications.
+async fn locked_notifying() -> (Daemon, Arc<Fake>, Desk, Worker<Desk>) {
+    let daemon = Daemon::start_with(kv::daemon::Settings {
+        approval_wait: Duration::from_secs(2),
+        notify: kv::notify::Level::Ask,
+        ..kv::daemon::Settings::default()
+    })
+    .await;
+    let fake = Arc::new(Fake::default());
+    let (slot, key) = device::enroll(fake.as_ref()).unwrap();
+    daemon
+        .control(Some(PASS), device::enroll_command(slot, &key))
+        .await;
+    daemon.control(None, ControlCommand::Lock).await;
+    let desk = Desk::default();
+    *desk.notifying.lock().unwrap() = true;
+    let mut worker = Worker::new(
+        daemon.paths.clone(),
+        Some(fake.clone() as Arc<dyn Device>),
+        desk.clone(),
+        Box::new(Updates::default()),
+    );
+    // From here on the daemon leaves its notices to the tray.
+    worker.model().await;
+    (daemon, fake, desk, worker)
+}
+
+/// Asks for models until a notification matching `found` is posted.
+async fn posted_until(
+    worker: &mut Worker<Desk>,
+    desk: &Desk,
+    found: impl Fn(&Notice) -> bool,
+) -> Notice {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        worker.model().await;
+        if let Some(notice) = desk.posted.lock().unwrap().iter().find(|n| found(n)) {
+            return notice.clone();
+        }
+        assert!(Instant::now() < deadline, "nothing like it was posted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_refused_while_locked_posts_unlock_and_its_button_unlocks_with_touch_id() {
+    let (daemon, _fake, desk, mut worker) = locked_notifying().await;
+    let reply = daemon.agent_call().await.unwrap();
+    assert!(
+        matches!(
+            reply,
+            AgentResponse::Error {
+                code: AgentErrorCode::VaultLocked,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    let notice = posted_until(&mut worker, &desk, |n| n.key.starts_with("kv-unlock-")).await;
+    assert_eq!(notice.title, "unlock needed");
+    assert_eq!(
+        notice.body,
+        "approval test is waiting (http_request): unlock kv."
+    );
+    assert_eq!(notice.button, Some(Button::Unlock));
+    assert!(!notice.answers);
+
+    // The Unlock button, or a click on the notice: Touch ID, as the menu's
+    // Unlock does.
+    assert!(
+        !worker
+            .act(Action::Notice {
+                key: notice.key,
+                verdict: None,
+            })
+            .await
+    );
+    assert_eq!(desk.notes(), Vec::<String>::new());
+    match client::agent_if_running(&daemon.paths, &AgentRequest::Status).await {
+        Ok(Some(AgentResponse::Status { status })) => assert!(!status.locked),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlock_notice_goes_once_the_vault_is_unlocked_elsewhere() {
+    let (daemon, _fake, desk, mut worker) = locked_notifying().await;
+    daemon.agent_call().await.unwrap();
+    let notice = posted_until(&mut worker, &desk, |n| n.key.starts_with("kv-unlock-")).await;
+    daemon.control(Some(PASS), ControlCommand::Unlock).await;
+    worker.model().await;
+    assert!(
+        desk.withdrawn.lock().unwrap().contains(&notice.key),
+        "{:?}",
+        desk.withdrawn.lock().unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_requested_handle_is_posted_by_the_tray_and_opens_the_handles_tab() {
+    let (daemon, _fake, desk, mut worker) = locked_notifying().await;
+    request_handle(&daemon, "staging").await;
+    let notice = posted_until(&mut worker, &desk, |n| {
+        n.key.starts_with("kv-open-handles-")
+    })
+    .await;
+    assert_eq!(notice.title, "handle requested");
+    assert_eq!(notice.body, "An agent asked you to add staging.");
+    assert_eq!(notice.button, Some(Button::Open));
+    worker
+        .act(Action::Notice {
+            key: notice.key,
+            verdict: None,
+        })
+        .await;
+    assert_eq!(desk.windows.lock().unwrap().first(), Some(&Tab::Handles));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_still_waiting_halfway_is_posted_again_with_its_answers() {
+    let (daemon, _fake, desk, mut worker) = locked_notifying().await;
+    assert!(!worker.act(Action::Unlock).await);
+    let call = daemon.agent_call();
+    let first = posted_until(&mut worker, &desk, |n| n.answers).await;
+    let again = posted_until(&mut worker, &desk, |n| {
+        n.answers && n.subtitle.starts_with("Reminder: about")
+    })
+    .await;
+    assert_ne!(again.key, first.key);
+    assert_eq!(again.title, first.title);
+    assert!(desk.withdrawn.lock().unwrap().contains(&first.key));
+    // Answering the reminder answers the request.
+    worker
+        .act(Action::Notice {
+            key: again.key,
+            verdict: Some(Verdict::AllowOnce),
+        })
+        .await;
+    match call.await.unwrap() {
+        AgentResponse::Http(reply) => assert_eq!(reply.status, 200),
+        other => panic!("{other:?}"),
+    }
 }
