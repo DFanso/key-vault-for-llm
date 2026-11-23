@@ -353,30 +353,89 @@ pub fn post(title: String, text: String, tone: Option<Tone>, waiting: bool) {
 }
 
 /// Shows `text` from a thread of its own, so a slow or missing notification
-/// service never holds up the daemon. Failures are ignored. On Windows,
-/// `waiting` keeps a request waiting for the user on screen until it is
-/// dismissed (a reminder toast). Elsewhere it is left alone: some Linux
-/// notification daemons would keep a critical one after the request timed
-/// out.
+/// service never holds up the daemon. Failures are ignored.
 fn show(summary: impl Into<String>, text: String, tone: Option<Tone>, waiting: bool) {
     let summary = summary.into();
-    std::thread::spawn(move || {
-        let mut notification = notify_rust::Notification::new();
-        notification.summary(&summary).body(&text);
-        if let Some(tone) = tone {
-            notification.sound_name(sound_name(tone));
-        }
-        #[cfg(windows)]
-        if waiting {
-            notification.urgency(notify_rust::Urgency::Critical);
-        }
-        #[cfg(not(windows))]
-        let _ = waiting;
-        let _ = notification.show();
-    });
+    std::thread::spawn(move || post_now(&summary, &text, tone, waiting));
+}
+
+/// Shows `text` and returns once it is posted. On Windows, `waiting` keeps
+/// a request waiting for the user on screen until it is dismissed (a
+/// reminder toast). Elsewhere it is left alone: some Linux notification
+/// daemons would keep a critical one after the request timed out.
+fn post_now(summary: &str, text: &str, tone: Option<Tone>, waiting: bool) {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(summary).body(text);
+    if let Some(tone) = tone {
+        notification.sound_name(sound_name(tone));
+    }
+    #[cfg(windows)]
+    if waiting {
+        notification.urgency(notify_rust::Urgency::Critical);
+    }
+    #[cfg(not(windows))]
+    let _ = waiting;
+    let _ = notification.show();
 }
 
 /// Something `kv tray` could not do, since its menu cannot say so.
+///
+/// On macOS the tray posts it from a `kv tray-message` process of its own.
+/// notify-rust makes the process that posts pass for Finder, by swapping the
+/// main bundle's identifier, and the fingerprint state Touch ID unlock
+/// compares against changes with that identifier: once the tray had posted
+/// (as it does after an update), Touch ID refused every unlock from it as if
+/// the fingerprints had changed.
 pub fn tray(text: String) {
+    #[cfg(target_os = "macos")]
+    match std::env::current_exe() {
+        Ok(exe) => tray_from(&exe, text),
+        Err(e) => eprintln!("kv: cannot post \"{text}\": {e}"),
+    }
+    #[cfg(not(target_os = "macos"))]
     show("kv tray", text, Sound::from_env().tone(false), false);
+}
+
+/// Posts `text` from a `tray-message` process started from `exe`.
+#[cfg(target_os = "macos")]
+fn tray_from(exe: &std::path::Path, text: String) {
+    use std::process::{Command, Stdio};
+
+    let started = Command::new(exe)
+        .arg("tray-message")
+        .arg(&text)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn();
+    match started {
+        // Waited for, so it leaves no zombie behind.
+        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+        Err(e) => eprintln!("kv: cannot post \"{text}\": {e}"),
+    }
+}
+
+/// `kv tray-message`: posts one of the tray's messages, then returns.
+pub fn tray_message(text: &str) {
+    post_now("kv tray", text, Sound::from_env().tone(false), false);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use objc2_foundation::NSBundle;
+
+    /// What Touch ID unlock in the tray depends on; see `tray`.
+    #[test]
+    fn tray_messages_leave_the_bundle_identifier_alone() {
+        super::tray_from(Path::new("/usr/bin/true"), "kv test notice".into());
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(
+            NSBundle::mainBundle()
+                .bundleIdentifier()
+                .map(|id| id.to_string()),
+            None
+        );
+    }
 }

@@ -110,6 +110,10 @@ enum Command {
     /// kv.app's notification helper, which `kv tray` starts on macOS.
     #[command(hide = true)]
     TrayNotices,
+    /// Posts one of kv tray's messages, from a process other than the
+    /// tray's (see `notify::tray`).
+    #[command(hide = true)]
+    TrayMessage { text: String },
     /// Start a handle's run command with its variables set, on this
     /// process's stdin and stdout (for an MCP client that should talk to
     /// one server directly)
@@ -383,6 +387,10 @@ pub fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::parse();
+    if let Command::TrayMessage { text } = &cli.command {
+        crate::notify::tray_message(text);
+        return ExitCode::SUCCESS;
+    }
     if let Command::TrayNotices = cli.command {
         // Its event loop needs the main thread, as the tray's does.
         return match crate::tray::run_notices() {
@@ -681,6 +689,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Run { .. } => unreachable!("main runs kv run before this"),
         Command::Tray { .. } => unreachable!("main runs kv tray before this"),
         Command::TrayNotices => unreachable!("main runs kv tray-notices before this"),
+        Command::TrayMessage { .. } => unreachable!("main runs kv tray-message before this"),
         Command::Passwd => {
             let passphrase = input.secret("Current passphrase: ")?;
             let new_passphrase = input.new_passphrase("New passphrase: ")?;
