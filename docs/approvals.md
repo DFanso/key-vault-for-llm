@@ -44,7 +44,7 @@ newest entries of the audit log. `L` locks the vault, `q` quits.
 
 ![The Handles tab, with an agent's request for a new handle at the top](images/tui-handles.svg)
 
-![The Audit tab: queries, a lease, a run program and a refused host](images/tui-audit.svg)
+![The Audit tab: a program run in auto mode, a request you denied and requests nobody answered in time](images/tui-audit.svg)
 
 ## From the menu bar
 
@@ -134,13 +134,15 @@ as fake. On Windows the window needs the Microsoft Edge WebView2 Runtime,
 which Windows 10 and 11 normally have.
 
 <p align="center">
-  <img src="images/tray-menu.png" width="300" alt="The tray's menu beside the icon: one request waiting, Open kv, Lock kv, Start at login and Quit kv tray">
+  <img src="images/tray-menu.png" width="300" alt="The tray's menu beside the icon: three requests waiting, Open kv, Lock kv, Start at login and Quit kv tray">
 </p>
 
 | | |
 |---|---|
-| ![kv's window, Home: one request waiting, six handles and the latest activity](images/tray-home.png) | ![Approvals: claude-code asks to use the github handle for a GET request, with Allow once, Allow for this session, Deny and Deny and block](images/tray-approvals.png) |
-| ![Handles: search, a mode filter, New handle, tabs by kind and a ⋯ menu on each handle](images/tray-handles.png) | ![New handle asks what the agent will use the secret for: a web API, a program or CLI, Postgres, Redis or a username and password](images/tray-new-handle.png) |
+| ![kv's window, Home: three requests waiting, quick actions and the latest activity](images/tray-home.png) | ![Approvals: claude-code asks to use the github handle for a GET request, with Allow once, Allow for this session, Deny and Deny and block](images/tray-approvals.png) |
+| ![Handles: an agent's request for a stripe handle at the top, then search, a mode filter, New handle and tabs by kind](images/tray-handles.png) | ![New handle asks what the agent will use the secret for: a web API, a program or CLI, Postgres, Redis or a username and password](images/tray-new-handle.png) |
+| ![The New handle form for a web API: name, description, token and where it goes](images/tray-new-handle-form.png) | ![Audit: each use of a handle, allowed or denied, with the request it made](images/tray-audit.png) |
+| ![Settings: the session, appearance and starting kv tray at login](images/tray-settings.png) | ![The locked window: a passphrase field and an Unlock button](images/tray-unlock.png) |
 
 The window has no frame, so it opens beside the icon like the menu and hides
 when you click elsewhere, with three exceptions. Drag it by its title bar and
