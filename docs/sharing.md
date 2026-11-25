@@ -58,6 +58,8 @@ button, ready to paste into whatever chat you use:
 
 Either side can use an agent or the window; the codes are the same.
 
+![The Shares tab: Request a secret, Send a secret and Receive a share, with an open request for a staging Sentry DSN and its code](images/tray-shares.png)
+
 The Shares tab also lists open requests (with their codes and a Copy button),
 what you received and what you sent. **View** shows a received value as long
 as the handle still holds what arrived, never a value you typed in yourself.
